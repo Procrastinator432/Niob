@@ -1,6 +1,8 @@
 package com.niobcalculator.materialyou;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.graphics.RectF;
 import android.content.Context;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
@@ -256,43 +258,25 @@ public class MainActivity extends Activity {
         rootContainer.removeAllViews();
         boolean isLandscape = getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
 
-        // 1. Top App Bar (only shown on non-calculator tabs: 2D-Plot, Konstanten, Setup)
+        // 1. Top App Bar (only shown on non-calculator tabs: 2D-Plot, Konstanten, Setup; no redundant back button)
         if (activeTab != 0) {
             LinearLayout topBar = new LinearLayout(this);
             topBar.setOrientation(LinearLayout.HORIZONTAL);
             topBar.setGravity(Gravity.CENTER_VERTICAL);
             topBar.setBackgroundColor(colSurfaceContainer);
-            int padH = dp(14);
-            int padV = dp(isLandscape ? 6 : 10);
+            int padH = dp(16);
+            int padV = dp(isLandscape ? 8 : 12);
             topBar.setPadding(padH, padV, padH, padV);
-
-            Button backBtn = makeMaterialButton("← Rechner", Color.TRANSPARENT, colPrimary, 12, 13f, 1.4f, true);
-            backBtn.setPadding(dp(6), dp(2), dp(8), dp(2));
-            backBtn.setOnClickListener(v -> {
-                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-                activeTab = 0;
-                rebuildScreen();
-            });
-            topBar.addView(backBtn);
 
             TextView titleView = new TextView(this);
             String titleText = (activeTab == 1) ? "2D-Plotter" : (activeTab == 2 ? "Physikalische Konstanten" : "Einstellungen");
             titleView.setText(titleText);
             titleView.setTextColor(colOnSurface);
-            setScaledTextSize(titleView, isLandscape ? 15f : 17f, 2.0f);
+            setScaledTextSize(titleView, isLandscape ? 16f : 18f, 2.0f);
             titleView.setTypeface(Typeface.DEFAULT_BOLD);
-            titleView.setGravity(Gravity.CENTER);
-            LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-            topBar.addView(titleView, titleLp);
-
-            final TextView angleChip = createChip(engine.isRadiansMode() ? "RAD" : "DEG", colSecondaryContainer, colOnSecondaryContainer);
-            angleChip.setOnClickListener(v -> {
-                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-                engine.setRadiansMode(!engine.isRadiansMode());
-                saveState();
-                rebuildScreen();
-            });
-            topBar.addView(angleChip);
+            titleView.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+            topBar.addView(titleView, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
             rootContainer.addView(topBar, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -314,46 +298,251 @@ public class MainActivity extends Activity {
             buildConverterTab(contentArea);
         }
 
-        // 3. Bottom Material You Navigation Bar (Pill Indicators)
+        // 3. Bottom Material You Navigation Bar (Pure Icon Pill Indicators, No Emojis, No Words)
         LinearLayout bottomNav = new LinearLayout(this);
         bottomNav.setOrientation(LinearLayout.HORIZONTAL);
         bottomNav.setBackgroundColor(colSurfaceContainer);
-        bottomNav.setPadding(dp(6), dp(isLandscape ? 4 : 6), dp(6), dp(isLandscape ? 4 : 6));
+        int navH = dp(isLandscape ? 44 : 52);
+        bottomNav.setMinimumHeight(navH);
+        bottomNav.setPadding(dp(8), dp(isLandscape ? 3 : 6), dp(8), dp(isLandscape ? 3 : 6));
+        bottomNav.setGravity(Gravity.CENTER);
 
-        String[] navTitles = {"Rechner", "Plotter", "Konstanten", "Einstellungen"};
-        for (int i = 0; i < navTitles.length; i++) {
+        float density = getResources().getDisplayMetrics().density;
+        String[] navDescriptions = {"Rechner", "Plotter", "Konstanten", "Einstellungen"};
+        for (int i = 0; i < 4; i++) {
             final int tabIdx = i;
             boolean sel = (activeTab == i);
-            Button navBtn = makeMaterialButton(
-                    navTitles[i],
-                    sel ? colPrimaryContainer : Color.TRANSPARENT,
-                    sel ? colOnPrimaryContainer : colOnSurfaceVariant,
-                    18,
-                    isLandscape ? 12f : 12.5f,
-                    1.4f,
-                    sel
-            );
-            navBtn.setSingleLine(true);
-            navBtn.setGravity(Gravity.CENTER);
-            navBtn.setPadding(dp(2), dp(4), dp(2), dp(4));
-            navBtn.setIncludeFontPadding(false);
-            navBtn.setMinimumHeight(dp(isLandscape ? 36 : 42));
-            navBtn.setAutoSizeTextTypeUniformWithConfiguration(
-                    7, Math.round((isLandscape ? 12f : 12.5f) * 1.4f), 1, TypedValue.COMPLEX_UNIT_DIP);
-            navBtn.setOnClickListener(v -> {
+
+            FrameLayout itemWrap = new FrameLayout(this);
+            itemWrap.setContentDescription(navDescriptions[i]);
+            itemWrap.setClickable(true);
+            itemWrap.setFocusable(true);
+            itemWrap.setMinimumHeight(dp(isLandscape ? 36 : 40));
+
+            FrameLayout pill = new FrameLayout(this);
+            pill.setBackground(roundedRect(sel ? colPrimaryContainer : Color.TRANSPARENT, 16));
+            FrameLayout.LayoutParams pillLp = new FrameLayout.LayoutParams(dp(64), dp(32));
+            pillLp.gravity = Gravity.CENTER;
+
+            ImageView iconView = new ImageView(this);
+            int iconColor = sel ? colOnPrimaryContainer : colOnSurfaceVariant;
+            Drawable iconDrawable;
+            if (i == 0) iconDrawable = new CalculatorNavDrawable(iconColor, density);
+            else if (i == 1) iconDrawable = new PlotterNavDrawable(iconColor, density);
+            else if (i == 2) iconDrawable = new ConstantsNavDrawable(iconColor, density);
+            else iconDrawable = new SettingsNavDrawable(iconColor, sel ? colPrimaryContainer : colSurfaceContainer, density);
+
+            iconView.setImageDrawable(iconDrawable);
+            iconView.setScaleType(ImageView.ScaleType.CENTER);
+            pill.addView(iconView, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+            itemWrap.addView(pill);
+
+            GradientDrawable mask = roundedRect(Color.WHITE, 16);
+            GradientDrawable content = roundedRect(Color.TRANSPARENT, 16);
+            RippleDrawable ripple = new RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), content, mask);
+            itemWrap.setBackground(ripple);
+
+            itemWrap.setOnClickListener(v -> {
                 v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
                 activeTab = tabIdx;
                 rebuildScreen();
             });
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-            lp.setMargins(dp(2), 0, dp(2), 0);
-            bottomNav.addView(navBtn, lp);
+
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
+            bottomNav.addView(itemWrap, lp);
         }
         rootContainer.addView(bottomNav, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                ViewGroup.LayoutParams.MATCH_PARENT, navH));
     }
 
-    private static class FilledBackspaceDrawable extends Drawable {
+    private Drawable outlinedPill(int strokeColor, float strokeWidthPx, int radiusDp) {
+        GradientDrawable gd = new GradientDrawable();
+        gd.setColor(Color.TRANSPARENT);
+        gd.setStroke(Math.round(strokeWidthPx), strokeColor);
+        gd.setCornerRadius(dp(radiusDp));
+        GradientDrawable mask = new GradientDrawable();
+        mask.setColor(Color.WHITE);
+        mask.setCornerRadius(dp(radiusDp));
+        return new RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), gd, mask);
+    }
+
+    private static class CalculatorNavDrawable extends Drawable {
+        private final Paint strokePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint fillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final float density;
+
+        CalculatorNavDrawable(int color, float density) {
+            this.density = density;
+            strokePaint.setColor(color);
+            strokePaint.setStyle(Paint.Style.STROKE);
+            strokePaint.setStrokeWidth(1.8f * density);
+            strokePaint.setStrokeCap(Paint.Cap.ROUND);
+            strokePaint.setStrokeJoin(Paint.Join.ROUND);
+
+            fillPaint.setColor(color);
+            fillPaint.setStyle(Paint.Style.FILL);
+        }
+
+        @Override
+        public void draw(Canvas canvas) {
+            Rect b = getBounds();
+            float cx = b.exactCenterX();
+            float cy = b.exactCenterY();
+            float w = 18f * density;
+            float h = 22f * density;
+            float left = cx - w / 2f;
+            float top = cy - h / 2f;
+            float right = left + w;
+            float bottom = top + h;
+            float r = 3.5f * density;
+
+            RectF body = new RectF(left, top, right, bottom);
+            canvas.drawRoundRect(body, r, r, strokePaint);
+
+            float sMargin = 3f * density;
+            float sH = 4.5f * density;
+            RectF screen = new RectF(left + sMargin, top + sMargin, right - sMargin, top + sMargin + sH);
+            canvas.drawRoundRect(screen, 1.5f * density, 1.5f * density, strokePaint);
+
+            float keyR = 1.1f * density;
+            float ky1 = top + sMargin + sH + 3.5f * density;
+            float ky2 = ky1 + 4f * density;
+            float kx1 = left + sMargin + 1.5f * density;
+            float kx2 = cx;
+            float kx3 = right - sMargin - 1.5f * density;
+
+            canvas.drawCircle(kx1, ky1, keyR, fillPaint);
+            canvas.drawCircle(kx2, ky1, keyR, fillPaint);
+            canvas.drawCircle(kx3, ky1, keyR, fillPaint);
+            canvas.drawCircle(kx1, ky2, keyR, fillPaint);
+            canvas.drawCircle(kx2, ky2, keyR, fillPaint);
+            canvas.drawCircle(kx3, ky2, keyR, fillPaint);
+        }
+
+        @Override public void setAlpha(int alpha) { strokePaint.setAlpha(alpha); fillPaint.setAlpha(alpha); }
+        @Override public void setColorFilter(ColorFilter cf) { strokePaint.setColorFilter(cf); fillPaint.setColorFilter(cf); }
+        @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
+    }
+
+    private static class PlotterNavDrawable extends Drawable {
+        private final Paint axisPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint curvePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path path = new Path();
+        private final float density;
+
+        PlotterNavDrawable(int color, float density) {
+            this.density = density;
+            axisPaint.setColor(color);
+            axisPaint.setStyle(Paint.Style.STROKE);
+            axisPaint.setStrokeWidth(1.6f * density);
+            axisPaint.setStrokeCap(Paint.Cap.ROUND);
+
+            curvePaint.setColor(color);
+            curvePaint.setStyle(Paint.Style.STROKE);
+            curvePaint.setStrokeWidth(2.0f * density);
+            curvePaint.setStrokeCap(Paint.Cap.ROUND);
+            curvePaint.setStrokeJoin(Paint.Join.ROUND);
+        }
+
+        @Override
+        public void draw(Canvas canvas) {
+            Rect b = getBounds();
+            float cx = b.exactCenterX();
+            float cy = b.exactCenterY();
+            float w = 22f * density;
+            float h = 20f * density;
+            float left = cx - w / 2f;
+            float bottom = cy + h / 2f;
+            float top = cy - h / 2f;
+            float right = cx + w / 2f;
+
+            canvas.drawLine(left + 2f * density, top, left + 2f * density, bottom, axisPaint);
+            canvas.drawLine(left + 2f * density, bottom, right, bottom, axisPaint);
+
+            path.reset();
+            path.moveTo(left + 4f * density, bottom - 4f * density);
+            path.cubicTo(
+                    left + 8f * density, bottom - 18f * density,
+                    left + 14f * density, bottom + 2f * density,
+                    right - 1f * density, top + 2f * density
+            );
+            canvas.drawPath(path, curvePaint);
+        }
+
+        @Override public void setAlpha(int alpha) { axisPaint.setAlpha(alpha); curvePaint.setAlpha(alpha); }
+        @Override public void setColorFilter(ColorFilter cf) { axisPaint.setColorFilter(cf); curvePaint.setColorFilter(cf); }
+        @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
+    }
+
+    private static class ConstantsNavDrawable extends Drawable {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final float density;
+
+        ConstantsNavDrawable(int color, float density) {
+            this.density = density;
+            paint.setColor(color);
+            paint.setTypeface(Typeface.create("serif", Typeface.BOLD));
+            paint.setTextAlign(Paint.Align.CENTER);
+        }
+
+        @Override
+        public void draw(Canvas canvas) {
+            Rect b = getBounds();
+            float cx = b.exactCenterX();
+            float cy = b.exactCenterY();
+            paint.setTextSize(20f * density);
+            Paint.FontMetrics fm = paint.getFontMetrics();
+            float y = cy - (fm.ascent + fm.descent) / 2f;
+            canvas.drawText("π", cx, y, paint);
+        }
+
+        @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); }
+        @Override public void setColorFilter(ColorFilter cf) { paint.setColorFilter(cf); }
+        @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
+    }
+
+    private static class SettingsNavDrawable extends Drawable {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint holePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final float density;
+
+        SettingsNavDrawable(int color, int bgColor, float density) {
+            this.density = density;
+            paint.setColor(color);
+            paint.setStyle(Paint.Style.FILL);
+            holePaint.setColor(bgColor);
+            holePaint.setStyle(Paint.Style.FILL);
+        }
+
+        @Override
+        public void draw(Canvas canvas) {
+            Rect b = getBounds();
+            float cx = b.exactCenterX();
+            float cy = b.exactCenterY();
+            float rOuter = 8.5f * density;
+            float rInner = 4.0f * density;
+            float toothW = 3.2f * density;
+            float toothH = 11f * density;
+
+            for (int i = 0; i < 4; i++) {
+                canvas.save();
+                canvas.rotate(i * 45f, cx, cy);
+                RectF tooth = new RectF(cx - toothW / 2f, cy - toothH, cx + toothW / 2f, cy + toothH);
+                canvas.drawRoundRect(tooth, 1f * density, 1f * density, paint);
+                canvas.restore();
+            }
+            canvas.drawCircle(cx, cy, rOuter, paint);
+            canvas.drawCircle(cx, cy, rInner, holePaint);
+        }
+
+        @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); holePaint.setAlpha(alpha); }
+        @Override public void setColorFilter(ColorFilter cf) { paint.setColorFilter(cf); holePaint.setColorFilter(cf); }
+        @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
+    }
+
+private static class FilledBackspaceDrawable extends Drawable {
         private final Paint fillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint xPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Path path = new Path();
@@ -541,7 +730,7 @@ public class MainActivity extends Activity {
         historyScroll.setBackgroundColor(Color.TRANSPARENT);
         historyListContainer = new LinearLayout(this);
         historyListContainer.setOrientation(LinearLayout.VERTICAL);
-        historyListContainer.setPadding(dp(12), dp(8), dp(12), dp(8));
+        historyListContainer.setPadding(dp(12), dp(14), dp(12), dp(8));
         historyScroll.addView(historyListContainer);
         refreshHistoryViews();
 
@@ -792,7 +981,7 @@ public class MainActivity extends Activity {
             LinearLayout itemBox = new LinearLayout(this);
             itemBox.setOrientation(LinearLayout.VERTICAL);
             itemBox.setBackgroundColor(Color.TRANSPARENT);
-            itemBox.setPadding(dp(6), dp(4), dp(6), dp(4));
+            itemBox.setPadding(dp(6), dp(8), dp(6), dp(8));
 
             // Row 1: Expression (vertical fraction if simple fraction a/b)
             boolean isSimpleFraction = item.expr.matches("^-?\\d+/\\d+$");
@@ -862,23 +1051,51 @@ public class MainActivity extends Activity {
             eqTv.setTypeface(Typeface.DEFAULT_BOLD);
             resRow.addView(eqTv);
 
-            TextView resTv = new TextView(this);
+            View resSpacer = new View(this);
+            resRow.addView(resSpacer, new LinearLayout.LayoutParams(0, 0, 1f));
+
             String rawShown = item.showingExact ? item.exactText : item.decimalText;
-            String shown = formatDisplayNumber(rawShown);
-            resTv.setText(shown);
-            resTv.setGravity(Gravity.END);
-            resTv.setTextColor(colOnSurface);
-            setScaledTextSize(resTv, 23f, 2.0f);
-            resTv.setTypeface(Typeface.DEFAULT_BOLD);
-            resTv.setOnClickListener(v -> {
-                currentInput += rawShown;
-                saveState();
-                updateInputAndPreview();
-            });
-            resRow.addView(resTv, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            String cleanFrac = rawShown != null ? rawShown.replace(" ", "") : "";
+            boolean isFractionResult = item.showingExact && cleanFrac.matches("^-?\\d+/\\d+$");
+
+            if (isFractionResult) {
+                String[] fracParts = cleanFrac.split("/");
+                View fracResultView = createFractionView(fracParts[0].trim(), fracParts[1].trim(), 20f);
+                fracResultView.setOnClickListener(v -> {
+                    currentInput += rawShown;
+                    saveState();
+                    updateInputAndPreview();
+                });
+                LinearLayout.LayoutParams fracLp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                fracLp.gravity = Gravity.END | Gravity.CENTER_VERTICAL;
+                resRow.addView(fracResultView, fracLp);
+            } else {
+                TextView resTv = new TextView(this);
+                String shown = formatDisplayNumber(rawShown);
+                resTv.setText(shown);
+                resTv.setGravity(Gravity.END);
+                resTv.setTextColor(colOnSurface);
+                setScaledTextSize(resTv, 23f, 2.0f);
+                resTv.setTypeface(Typeface.DEFAULT_BOLD);
+                resTv.setOnClickListener(v -> {
+                    currentInput += rawShown;
+                    saveState();
+                    updateInputAndPreview();
+                });
+                resRow.addView(resTv, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
 
             itemBox.addView(resRow, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+            View itemDiv = new View(this);
+            itemDiv.setBackgroundColor(0x22FFFFFF);
+            LinearLayout.LayoutParams itemDivLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(1));
+            itemDivLp.topMargin = dp(6);
+            itemBox.addView(itemDiv, itemDivLp);
 
             if (item.reportText != null && !item.reportText.isEmpty()) {
                 TextView repTv = new TextView(this);
@@ -1024,6 +1241,68 @@ public class MainActivity extends Activity {
                         {k(engine.isRadiansMode() ? "RAD" : "DEG", "TOGGLE_ANGLE"), k("Konstanten", "TAB_2"), k("Plotter", "TAB_1"), k("Einstellungen", "TAB_3")}
                 }
         };
+
+        if (activeSection == 1) {
+            LinearLayout angleBar = new LinearLayout(this);
+            angleBar.setOrientation(LinearLayout.HORIZONTAL);
+            angleBar.setGravity(Gravity.CENTER);
+            angleBar.setPadding(0, dp(1), 0, dp(4));
+
+            LinearLayout segPill = new LinearLayout(this);
+            segPill.setOrientation(LinearLayout.HORIZONTAL);
+            segPill.setBackground(roundedRect(colSurfaceHigh, 13));
+            segPill.setPadding(dp(2), dp(2), dp(2), dp(2));
+
+            boolean isRad = engine.isRadiansMode();
+
+            Button radBtn = makeMaterialButton(
+                    "RAD",
+                    isRad ? colPrimary : Color.TRANSPARENT,
+                    isRad ? colOnPrimary : colOnSurfaceVariant,
+                    11,
+                    11.5f,
+                    1.4f,
+                    isRad
+            );
+            radBtn.setPadding(dp(16), dp(2), dp(16), dp(2));
+            radBtn.setMinimumHeight(dp(24));
+            radBtn.setIncludeFontPadding(false);
+            radBtn.setOnClickListener(v -> {
+                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                if (!engine.isRadiansMode()) {
+                    engine.setRadiansMode(true);
+                    saveState();
+                    refreshKeyboardSection();
+                }
+            });
+            segPill.addView(radBtn);
+
+            Button degBtn = makeMaterialButton(
+                    "DEG",
+                    !isRad ? colPrimary : Color.TRANSPARENT,
+                    !isRad ? colOnPrimary : colOnSurfaceVariant,
+                    11,
+                    11.5f,
+                    1.4f,
+                    !isRad
+            );
+            degBtn.setPadding(dp(16), dp(2), dp(16), dp(2));
+            degBtn.setMinimumHeight(dp(24));
+            degBtn.setIncludeFontPadding(false);
+            degBtn.setOnClickListener(v -> {
+                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                if (engine.isRadiansMode()) {
+                    engine.setRadiansMode(false);
+                    saveState();
+                    refreshKeyboardSection();
+                }
+            });
+            segPill.addView(degBtn);
+
+            angleBar.addView(segPill);
+            grid.addView(angleBar, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        }
 
         KeyDef[][] rows = sections[Math.min(activeSection, sections.length - 1)];
         for (KeyDef[] row : rows) {
@@ -1363,98 +1642,395 @@ public class MainActivity extends Activity {
         return ss;
     }
 
+    private static final boolean[] categoryExpanded = {false, true, false, false, false};
+
+    private static class ConstantDef {
+        final String symbol;
+        final String token;
+        final String name;
+        final String displayValue;
+
+        ConstantDef(String symbol, String token, String name, String displayValue) {
+            this.symbol = symbol;
+            this.token = token;
+            this.name = name;
+            this.displayValue = displayValue;
+        }
+    }
+
+    private static class CategoryDef {
+        final String title;
+        final ConstantDef[] items;
+
+        CategoryDef(String title, ConstantDef[] items) {
+            this.title = title;
+            this.items = items;
+        }
+    }
+
+    private CategoryDef[] getConstantCategories() {
+        return new CategoryDef[]{
+                new CategoryDef("Benutzerdefinierte Variablen", new ConstantDef[]{}),
+                new CategoryDef("Universelle physikalische Konstanten", new ConstantDef[]{
+                        new ConstantDef("k_B", "k_B", "Boltzmann-Konstante", "1,380 6×10⁻²³"),
+                        new ConstantDef("ε₀", "eps0", "Elektrische Feldkonstante", "8,854 2×10⁻¹²"),
+                        new ConstantDef("e⁻", "e_charge", "Elementarladung", "1,602 2×10⁻¹⁹"),
+                        new ConstantDef("α", "alpha_fs", "Feinstrukturkonstante", "7,297 4×10⁻³"),
+                        new ConstantDef("G", "G", "Gravitationskonstante", "6,673 8×10⁻¹¹"),
+                        new ConstantDef("g", "g", "Gravitationsbeschleunigung", "9,806 7"),
+                        new ConstantDef("c₀", "c0", "Lichtgeschwindigkeit", "2,997 9×10⁸"),
+                        new ConstantDef("μ₀", "mu0", "Magnetische Feldkonstante", "12,566×10⁻⁷"),
+                        new ConstantDef("h", "h", "Plancksches Wirkungsquantum", "6,626 1×10⁻³⁴"),
+                        new ConstantDef("m_P", "m_P", "Planck-Masse", "2,176 5×10⁻⁸"),
+                        new ConstantDef("t_P", "t_P", "Planck-Zeit", "5,391 1×10⁻⁴⁴"),
+                        new ConstantDef("l_P", "l_P", "Planck-Länge", "1,616 2×10⁻³⁵")
+                }),
+                new CategoryDef("Elektromagnetische Konstanten", new ConstantDef[]{
+                        new ConstantDef("Z₀", "Z0", "Wellenwiderstand des Vakuums", "376,73"),
+                        new ConstantDef("Φ₀", "Phi0", "Magnetisches Flussquant", "2,067 8×10⁻¹⁵"),
+                        new ConstantDef("K_J", "K_J", "Josephson-Konstante", "4,835×10¹⁴"),
+                        new ConstantDef("R_K", "R_K", "Von-Klitzing-Konstante", "25813,0"),
+                        new ConstantDef("G₀", "G0", "Leitwertquant", "7,748 1×10⁻⁵"),
+                        new ConstantDef("σ", "sigma", "Stefan-Boltzmann-Konstante", "5,670 4×10⁻⁸"),
+                        new ConstantDef("R_∞", "R_inf", "Rydberg-Konstante", "1,097 4×10⁷"),
+                        new ConstantDef("E_h", "E_h", "Hartree-Energie", "4,359 7×10⁻¹⁸"),
+                        new ConstantDef("μ_B", "mu_B", "Bohrsches Magneton", "1,399 6×10¹⁰"),
+                        new ConstantDef("μ_e", "mu_e", "Magnetisches Moment d. Elektrons", "−9,284 8×10⁻²⁴")
+                }),
+                new CategoryDef("Chemische Konstanten", new ConstantDef[]{
+                        new ConstantDef("N_A", "N_A", "Avogadro-Konstante", "6,022 1×10²³"),
+                        new ConstantDef("m_u", "m_u", "Atomare Masseneinheit", "1,660 5×10⁻²⁷"),
+                        new ConstantDef("F", "F", "Faraday-Konstante", "96485,0"),
+                        new ConstantDef("R", "R", "Universelle Gaskonstante", "8,314 5"),
+                        new ConstantDef("m_e", "m_e", "Elektronenmasse", "9,109 4×10⁻³¹"),
+                        new ConstantDef("m_p", "m_p", "Protonenmasse", "1,674 9×10⁻²⁷"),
+                        new ConstantDef("m_n", "m_n", "Neutronenmasse", "1,672 6×10⁻²⁷")
+                }),
+                new CategoryDef("Mathematische Konstanten", new ConstantDef[]{
+                        new ConstantDef("π", "pi", "Kreiszahl Pi", "3,14159…"),
+                        new ConstantDef("e", "e", "Eulersche Zahl", "2,71828…"),
+                        new ConstantDef("i", "i", "Imaginäre Einheit", "√(−1)")
+                })
+        };
+    }
+
+    private void showUnsetDialog() {
+        final String[] vars = {"a", "b", "c", "d", "k", "l", "m", "n", "x", "y", "z"};
+        new AlertDialog.Builder(this)
+                .setTitle("Variable löschen (unset)")
+                .setItems(vars, (dialog, which) -> {
+                    engine.unsetVariable(vars[which]);
+                    saveState();
+                    rebuildScreen();
+                })
+                .setNegativeButton("Abbrechen", null)
+                .show();
+    }
+
+    private LinearLayout buildUserVariablesGrid() {
+        LinearLayout grid = new LinearLayout(this);
+        grid.setOrientation(LinearLayout.VERTICAL);
+
+        final String[] uVars = {"a", "b", "c", "d", "k", "l", "m", "n", "x", "y", "z"};
+        int cols = 3;
+        int rows = (int) Math.ceil((double) uVars.length / cols);
+
+        for (int r = 0; r < rows; r++) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setPadding(0, dp(4), 0, dp(6));
+
+            for (int c = 0; c < cols; c++) {
+                int idx = r * cols + c;
+                if (idx < uVars.length) {
+                    final String vName = uVars[idx];
+                    Double val = engine.getVariable(vName);
+                    String valStr = val != null ? formatDisplayNumber(Double.toString(val)) : "nicht gesetzt";
+
+                    LinearLayout tile = new LinearLayout(this);
+                    tile.setOrientation(LinearLayout.VERTICAL);
+                    tile.setGravity(Gravity.CENTER_HORIZONTAL);
+                    tile.setPadding(dp(4), dp(4), dp(4), dp(6));
+
+                    FrameLayout circle = new FrameLayout(this);
+                    circle.setBackground(roundedRect(colSurfaceHigh, 25));
+                    FrameLayout.LayoutParams cLp = new FrameLayout.LayoutParams(dp(50), dp(50));
+                    cLp.gravity = Gravity.CENTER;
+
+                    TextView symTv = new TextView(this);
+                    symTv.setText(vName);
+                    symTv.setTextColor(colPrimary);
+                    symTv.setTypeface(Typeface.DEFAULT_BOLD);
+                    symTv.setGravity(Gravity.CENTER);
+                    setScaledTextSize(symTv, 18f, 1.4f);
+                    circle.addView(symTv, new FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                    tile.addView(circle, cLp);
+
+                    TextView valTv = new TextView(this);
+                    valTv.setText(valStr);
+                    valTv.setTextColor(colOnSurfaceVariant);
+                    valTv.setGravity(Gravity.CENTER);
+                    valTv.setSingleLine(true);
+                    setScaledTextSize(valTv, 11f, 1.3f);
+                    LinearLayout.LayoutParams valLp = new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                    valLp.topMargin = dp(4);
+                    tile.addView(valTv, valLp);
+
+                    Button insBtn = makeMaterialButton("+ Einsetzen", colPrimary, colOnPrimary, 10, 10f, 1.3f);
+                    insBtn.setSingleLine(true);
+                    insBtn.setPadding(dp(6), dp(1), dp(6), dp(1));
+                    insBtn.setMinimumHeight(dp(24));
+                    insBtn.setOnClickListener(v -> {
+                        v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                        currentInput += vName;
+                        activeTab = 0;
+                        saveState();
+                        rebuildScreen();
+                    });
+                    LinearLayout.LayoutParams insLp = new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                    insLp.topMargin = dp(4);
+                    tile.addView(insBtn, insLp);
+
+                    tile.setClickable(true);
+                    tile.setFocusable(true);
+                    tile.setOnClickListener(v -> {
+                        v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                        currentInput += vName;
+                        activeTab = 0;
+                        saveState();
+                        rebuildScreen();
+                    });
+
+                    LinearLayout.LayoutParams tileLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+                    row.addView(tile, tileLp);
+                } else {
+                    View empty = new View(this);
+                    row.addView(empty, new LinearLayout.LayoutParams(0, 0, 1f));
+                }
+            }
+            grid.addView(row);
+        }
+        return grid;
+    }
+
+    private LinearLayout buildConstantGrid(ConstantDef[] items) {
+        LinearLayout grid = new LinearLayout(this);
+        grid.setOrientation(LinearLayout.VERTICAL);
+
+        int cols = 3;
+        int rows = (int) Math.ceil((double) items.length / cols);
+
+        for (int r = 0; r < rows; r++) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setPadding(0, dp(4), 0, dp(6));
+
+            for (int c = 0; c < cols; c++) {
+                int idx = r * cols + c;
+                if (idx < items.length) {
+                    final ConstantDef item = items[idx];
+                    LinearLayout tile = new LinearLayout(this);
+                    tile.setOrientation(LinearLayout.VERTICAL);
+                    tile.setGravity(Gravity.CENTER_HORIZONTAL);
+                    tile.setPadding(dp(4), dp(4), dp(4), dp(6));
+
+                    // 1. Circular Symbol Badge
+                    FrameLayout circle = new FrameLayout(this);
+                    circle.setBackground(roundedRect(colSurfaceHigh, 25));
+                    FrameLayout.LayoutParams cLp = new FrameLayout.LayoutParams(dp(50), dp(50));
+                    cLp.gravity = Gravity.CENTER;
+
+                    TextView symTv = new TextView(this);
+                    symTv.setText(formatSubscriptSymbol(item.symbol));
+                    symTv.setTextColor(colOnSurface);
+                    symTv.setTypeface(Typeface.DEFAULT_BOLD);
+                    symTv.setGravity(Gravity.CENTER);
+                    setScaledTextSize(symTv, 16f, 1.4f);
+                    circle.addView(symTv, new FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                    tile.addView(circle, cLp);
+
+                    // 2. Numerical Value
+                    TextView valTv = new TextView(this);
+                    valTv.setText(item.displayValue);
+                    valTv.setTextColor(colOnSurfaceVariant);
+                    valTv.setGravity(Gravity.CENTER);
+                    valTv.setSingleLine(true);
+                    setScaledTextSize(valTv, 11f, 1.3f);
+                    LinearLayout.LayoutParams valLp = new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                    valLp.topMargin = dp(4);
+                    tile.addView(valTv, valLp);
+
+                    // 3. Name (e.g. Plancksches Wirkungsquantum or Boltzmann-Konstante)
+                    TextView nameTv = new TextView(this);
+                    nameTv.setText(item.name);
+                    nameTv.setTextColor(colOnSurface);
+                    nameTv.setGravity(Gravity.CENTER);
+                    nameTv.setMaxLines(2);
+                    setScaledTextSize(nameTv, 11f, 1.3f);
+                    LinearLayout.LayoutParams nameLp = new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                    nameLp.topMargin = dp(2);
+                    tile.addView(nameTv, nameLp);
+
+                    // 4. Action Button "+ Einsetzen"
+                    Button insBtn = makeMaterialButton("+ Einsetzen", colPrimary, colOnPrimary, 10, 10f, 1.3f);
+                    insBtn.setSingleLine(true);
+                    insBtn.setPadding(dp(6), dp(1), dp(6), dp(1));
+                    insBtn.setMinimumHeight(dp(24));
+                    insBtn.setOnClickListener(v -> {
+                        v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                        currentInput += item.token;
+                        activeTab = 0;
+                        saveState();
+                        rebuildScreen();
+                    });
+                    LinearLayout.LayoutParams insLp = new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                    insLp.topMargin = dp(4);
+                    tile.addView(insBtn, insLp);
+
+                    tile.setClickable(true);
+                    tile.setFocusable(true);
+                    tile.setOnClickListener(v -> {
+                        v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                        currentInput += item.token;
+                        activeTab = 0;
+                        saveState();
+                        rebuildScreen();
+                    });
+
+                    LinearLayout.LayoutParams tileLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+                    row.addView(tile, tileLp);
+                } else {
+                    View empty = new View(this);
+                    row.addView(empty, new LinearLayout.LayoutParams(0, 0, 1f));
+                }
+            }
+            grid.addView(row);
+        }
+        return grid;
+    }
+
     private void buildConstantsTab(FrameLayout parent) {
         ScrollView sv = new ScrollView(this);
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
-        list.setPadding(dp(12), dp(10), dp(12), dp(10));
+        list.setPadding(dp(12), dp(10), dp(12), dp(16));
 
-        TextView hdr = new TextView(this);
-        hdr.setText("Physikalische & Mathematische Konstanten");
-        hdr.setTextColor(colPrimary);
-        setScaledTextSize(hdr, 16f, 2.0f);
-        hdr.setTypeface(Typeface.DEFAULT_BOLD);
-        hdr.setPadding(0, 0, 0, dp(10));
-        list.addView(hdr);
+        // Top Action Pills: set, unset, zur Tastatur hinzufügen (matching Vorlage screenshot)
+        LinearLayout topActions = new LinearLayout(this);
+        topActions.setOrientation(LinearLayout.HORIZONTAL);
+        topActions.setGravity(Gravity.CENTER);
+        topActions.setPadding(dp(4), dp(4), dp(4), dp(10));
 
-        String[][] consts = {
-                {"c₀", "c0", "Lichtgeschwindigkeit im Vakuum", "2.9979 × 10⁸ m/s"},
-                {"μ₀", "mu0", "Magnetische Feldkonstante", "12.566 × 10⁻⁷ N/A²"},
-                {"ε₀", "eps0", "Elektrische Feldkonstante", "8.8542 × 10⁻¹² F/m"},
-                {"G", "G", "Gravitationskonstante", "6.6738 × 10⁻¹¹ m³/(kg·s²)"},
-                {"h", "h", "Plancksches Wirkungsquantum", "6.6261 × 10⁻³⁴ J·s"},
-                {"α", "alpha_fs", "Feinstrukturkonstante", "7.2974 × 10⁻³"},
-                {"k_B", "k_B", "Boltzmann-Konstante", "1.3806 × 10⁻²³ J/K"},
-                {"g", "g", "Normfallbeschleunigung", "9.8067 m/s²"},
-                {"m_P", "m_P", "Planck-Masse", "2.1765 × 10⁻⁸ kg"},
-                {"t_P", "t_P", "Planck-Zeit", "5.3911 × 10⁻⁴⁴ s"},
-                {"l_P", "l_P", "Planck-Länge", "1.6162 × 10⁻³⁵ m"},
-                {"e⁻", "e_charge", "Elementarladung", "1.6022 × 10⁻¹⁹ C"},
-                {"Z₀", "Z0", "Wellenwiderstand des Vakuums", "376.73 Ω"},
-                {"Φ₀", "Phi0", "Magnetisches Flussquant", "2.0678 × 10⁻¹⁵ Wb"},
-                {"K_J", "K_J", "Josephson-Konstante", "4.835 × 10¹⁴ Hz/V"},
-                {"R_K", "R_K", "Von-Klitzing-Konstante", "25813.0 Ω"},
-                {"G₀", "G0", "Leitwertquant", "7.7481 × 10⁻⁵ S"},
-                {"σ", "sigma", "Stefan-Boltzmann-Konstante", "5.6704 × 10⁻⁸ W/(m²·K⁴)"},
-                {"R_∞", "R_inf", "Rydberg-Konstante", "1.0974 × 10⁷ 1/m"},
-                {"E_h", "E_h", "Hartree-Energie", "4.3597 × 10⁻¹⁸ J"},
-                {"μ_B", "mu_B", "Bohrsches Magneton", "1.3996 × 10¹⁰ J/T"},
-                {"μ_e", "mu_e", "Magnetisches Moment des Elektrons", "−9.2848 × 10⁻²⁴ J/T"},
-                {"N_A", "N_A", "Avogadro-Konstante", "6.0221 × 10²³ 1/mol"},
-                {"m_u", "m_u", "Atomare Masseneinheit", "1.6605 × 10⁻²⁷ kg"},
-                {"F", "F", "Faraday-Konstante", "96485.0 C/mol"},
-                {"R", "R", "Universelle Gaskonstante", "8.3145 J/(mol·K)"},
-                {"m_e", "m_e", "Elektronenmasse", "9.1094 × 10⁻³¹ kg"},
-                {"m_p", "m_p", "Protonenmasse", "1.6749 × 10⁻²⁷ kg"},
-                {"m_n", "m_n", "Neutronenmasse", "1.6726 × 10⁻²⁷ kg"},
-                {"π", "pi", "Kreiszahl Pi", "3.14159265…"},
-                {"e", "e", "Eulersche Zahl", "2.71828182…"},
-                {"i", "i", "Imaginäre Einheit", "√(−1)"}
-        };
+        Button setBtn = makeMaterialButton("set", Color.TRANSPARENT, colPrimary, 18, 13f, 1.4f, true);
+        setBtn.setBackground(outlinedPill(colPrimary, dp(1.5f), 18));
+        setBtn.setPadding(dp(18), dp(4), dp(18), dp(4));
+        setBtn.setOnClickListener(v -> {
+            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+            currentInput += " := ";
+            activeTab = 0;
+            saveState();
+            rebuildScreen();
+        });
+        topActions.addView(setBtn);
 
-        for (final String[] c : consts) {
+        Button unsetBtn = makeMaterialButton("unset", Color.TRANSPARENT, colPrimary, 18, 13f, 1.4f, true);
+        unsetBtn.setBackground(outlinedPill(colPrimary, dp(1.5f), 18));
+        unsetBtn.setPadding(dp(18), dp(4), dp(18), dp(4));
+        LinearLayout.LayoutParams unsetLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        unsetLp.leftMargin = dp(8);
+        unsetLp.rightMargin = dp(8);
+        unsetBtn.setOnClickListener(v -> {
+            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+            showUnsetDialog();
+        });
+        topActions.addView(unsetBtn, unsetLp);
+
+        Button addKbBtn = makeMaterialButton("zur Tastatur hinzufügen", Color.TRANSPARENT, colPrimary, 18, 13f, 1.4f, true);
+        addKbBtn.setBackground(outlinedPill(colPrimary, dp(1.5f), 18));
+        addKbBtn.setPadding(dp(14), dp(4), dp(14), dp(4));
+        addKbBtn.setOnClickListener(v -> {
+            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+            showMoreVariables = !showMoreVariables;
+            activeTab = 0;
+            saveState();
+            rebuildScreen();
+        });
+        topActions.addView(addKbBtn);
+
+        list.addView(topActions);
+
+        // Accordion Category Cards
+        CategoryDef[] cats = getConstantCategories();
+        for (int cIdx = 0; cIdx < cats.length; cIdx++) {
+            final int catIndex = cIdx;
+            final CategoryDef cat = cats[cIdx];
+            final boolean isExp = categoryExpanded[catIndex];
+
             LinearLayout card = new LinearLayout(this);
-            card.setOrientation(LinearLayout.HORIZONTAL);
-            card.setGravity(Gravity.CENTER_VERTICAL);
-            card.setBackground(roundedRect(colSurfaceContainer, 14));
-            card.setPadding(dp(12), dp(10), dp(12), dp(10));
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setBackground(roundedRect(colSurfaceContainer, 16));
+            card.setPadding(dp(12), dp(12), dp(12), dp(12));
 
-            TextView sym = createChip(formatSubscriptSymbol(c[0]), colPrimaryContainer, colOnPrimaryContainer);
-            card.addView(sym);
-
-            LinearLayout info = new LinearLayout(this);
-            info.setOrientation(LinearLayout.VERTICAL);
-            info.setPadding(dp(10), 0, dp(10), 0);
-            TextView nameTv = new TextView(this);
-            nameTv.setText(c[2]);
-            nameTv.setTextColor(colOnSurface);
-            setScaledTextSize(nameTv, 13.5f, 2.0f);
-            nameTv.setTypeface(Typeface.DEFAULT_BOLD);
-            TextView valTv = new TextView(this);
-            valTv.setText(c[3]);
-            valTv.setTextColor(colOnSurfaceVariant);
-            setScaledTextSize(valTv, 12.5f, 2.0f);
-            info.addView(nameTv);
-            info.addView(valTv);
-            card.addView(info, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-            Button ins = makeMaterialButton("+ Einsetzen", colPrimary, colOnPrimary, 12, 12f, 2.0f);
-            ins.setSingleLine(true);
-            ins.setPadding(dp(10), dp(6), dp(10), dp(6));
-            ins.setAutoSizeTextTypeUniformWithConfiguration(8, Math.round(12f * 2.0f), 1, TypedValue.COMPLEX_UNIT_DIP);
-            ins.setOnClickListener(v -> {
-                currentInput += c[1];
-                activeTab = 0;
-                saveState();
+            // Header Row (Chevron + Title)
+            LinearLayout hdr = new LinearLayout(this);
+            hdr.setOrientation(LinearLayout.HORIZONTAL);
+            hdr.setGravity(Gravity.CENTER_VERTICAL);
+            hdr.setClickable(true);
+            hdr.setFocusable(true);
+            hdr.setPadding(dp(4), dp(4), dp(4), dp(4));
+            hdr.setOnClickListener(v -> {
+                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                categoryExpanded[catIndex] = !categoryExpanded[catIndex];
                 rebuildScreen();
             });
-            card.addView(ins);
 
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+            TextView chev = new TextView(this);
+            chev.setText(isExp ? "▲  " : "▼  ");
+            chev.setTextColor(colOnSurface);
+            setScaledTextSize(chev, 14f, 2.0f);
+            hdr.addView(chev);
+
+            TextView titleTv = new TextView(this);
+            titleTv.setText(cat.title);
+            titleTv.setTextColor(colOnSurface);
+            setScaledTextSize(titleTv, 15f, 2.0f);
+            titleTv.setTypeface(Typeface.DEFAULT_BOLD);
+            hdr.addView(titleTv, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+            card.addView(hdr);
+
+            if (isExp) {
+                View div = new View(this);
+                div.setBackgroundColor(0x22FFFFFF);
+                LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, dp(1));
+                divLp.topMargin = dp(8);
+                divLp.bottomMargin = dp(10);
+                card.addView(div, divLp);
+
+                if (catIndex == 0) {
+                    LinearLayout varGrid = buildUserVariablesGrid();
+                    card.addView(varGrid);
+                } else {
+                    LinearLayout grid = buildConstantGrid(cat.items);
+                    card.addView(grid);
+                }
+            }
+
+            LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.bottomMargin = dp(6);
-            list.addView(card, lp);
+            cardLp.bottomMargin = dp(8);
+            list.addView(card, cardLp);
         }
+
         sv.addView(list);
         parent.addView(sv);
     }
@@ -1591,20 +2167,41 @@ public class MainActivity extends Activity {
     }
 
     private View createFractionView(String num, String den) {
+        return createFractionView(num, den, 18f);
+    }
+
+    private View createFractionView(String num, String den, float spSize) {
+        LinearLayout outer = new LinearLayout(this);
+        outer.setOrientation(LinearLayout.HORIZONTAL);
+        outer.setGravity(Gravity.CENTER_VERTICAL);
+
+        boolean isNegative = num.startsWith("-");
+        String cleanNum = isNegative ? num.substring(1) : num;
+
+        if (isNegative) {
+            TextView minusTv = new TextView(this);
+            minusTv.setText("− ");
+            minusTv.setTextColor(colOnSurface);
+            setScaledTextSize(minusTv, spSize + 2f, 2.0f);
+            minusTv.setTypeface(Typeface.DEFAULT_BOLD);
+            minusTv.setGravity(Gravity.CENTER);
+            outer.addView(minusTv);
+        }
+
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setGravity(Gravity.CENTER_HORIZONTAL);
 
         TextView numTv = new TextView(this);
-        numTv.setText(num);
+        numTv.setText(cleanNum);
         numTv.setTextColor(colOnSurface);
         numTv.setGravity(Gravity.CENTER);
-        setScaledTextSize(numTv, 18f, 2.0f);
+        setScaledTextSize(numTv, spSize, 2.0f);
         numTv.setTypeface(Typeface.DEFAULT_BOLD);
         box.addView(numTv);
 
-        int maxLen = Math.max(num.length(), den.length());
-        int lineW = Math.max(dp(maxLen * 12 + 10), dp(36));
+        int maxLen = Math.max(cleanNum.length(), den.length());
+        int lineW = Math.max(dp(Math.round(maxLen * spSize * 0.65f + 8)), dp(28));
 
         View line = new View(this);
         line.setBackgroundColor(colOnSurface);
@@ -1618,11 +2215,12 @@ public class MainActivity extends Activity {
         denTv.setText(den);
         denTv.setTextColor(colOnSurface);
         denTv.setGravity(Gravity.CENTER);
-        setScaledTextSize(denTv, 18f, 2.0f);
+        setScaledTextSize(denTv, spSize, 2.0f);
         denTv.setTypeface(Typeface.DEFAULT_BOLD);
         box.addView(denTv);
 
-        return box;
+        outer.addView(box);
+        return outer;
     }
 
     private GradientDrawable roundedRect(int fillColor, int radiusDp) {

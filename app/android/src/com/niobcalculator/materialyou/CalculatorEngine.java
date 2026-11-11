@@ -195,6 +195,12 @@ public final class CalculatorEngine {
         variables.put(name, Value.fromFloat(val));
     }
 
+    public void unsetVariable(String name) {
+        if (name != null) {
+            variables.remove(name);
+        }
+    }
+
     public void setUserVariable(String name, Value val) {
         if (name != null && val != null) {
             variables.put(name, val);
