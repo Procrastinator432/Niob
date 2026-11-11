@@ -60,7 +60,6 @@ public class MainActivity extends Activity {
     private int activeSection = 0; // 0=()√^, 1=sin, 2=∑∫i, 3=abc, 4=mehr
     private boolean dualKeyboard = true;
     private boolean showMoreVariables = false;
-    private boolean showBottomNavOnCalc = true;
 
     // Android 12 Monet Dynamic Colors
     private int colBgSurface;
@@ -117,7 +116,6 @@ public class MainActivity extends Activity {
         android.content.SharedPreferences prefs = getSharedPreferences("jade_calculator", MODE_PRIVATE);
         showExactFirst = prefs.getBoolean("show_exact_first", true);
         showMoreVariables = prefs.getBoolean("show_more_variables", false);
-        showBottomNavOnCalc = prefs.getBoolean("show_bottom_nav_calc", true);
         engine.setRadiansMode(prefs.getBoolean("radians_mode", true));
         engine.setModuloAlwaysPositive(prefs.getBoolean("modulo_always_positive", true));
 
@@ -175,7 +173,6 @@ public class MainActivity extends Activity {
         android.content.SharedPreferences.Editor ed = getSharedPreferences("jade_calculator", MODE_PRIVATE).edit();
         ed.putBoolean("show_exact_first", showExactFirst);
         ed.putBoolean("show_more_variables", showMoreVariables);
-        ed.putBoolean("show_bottom_nav_calc", showBottomNavOnCalc);
         ed.putBoolean("radians_mode", engine.isRadiansMode());
         ed.putBoolean("modulo_always_positive", engine.isModuloAlwaysPositive());
         ed.putString("ans_value", engine.serializeValue(engine.getLastAns()));
@@ -318,45 +315,42 @@ public class MainActivity extends Activity {
         }
 
         // 3. Bottom Material You Navigation Bar (Pill Indicators)
-        // Hidden on Calculator tab by default (showBottomNavOnCalc = false) to give full breathing room matching Vorlage
-        boolean showBottomNav = (activeTab != 0) || showBottomNavOnCalc;
-        if (showBottomNav) {
-            LinearLayout bottomNav = new LinearLayout(this);
-            bottomNav.setOrientation(LinearLayout.HORIZONTAL);
-            bottomNav.setBackgroundColor(colSurfaceContainer);
-            bottomNav.setPadding(dp(6), dp(isLandscape ? 4 : 6), dp(6), dp(isLandscape ? 4 : 6));
+        LinearLayout bottomNav = new LinearLayout(this);
+        bottomNav.setOrientation(LinearLayout.HORIZONTAL);
+        bottomNav.setBackgroundColor(colSurfaceContainer);
+        bottomNav.setPadding(dp(6), dp(isLandscape ? 4 : 6), dp(6), dp(isLandscape ? 4 : 6));
 
-            String[] navTitles = {"Rechner", "Plotter", "Konstanten", "Einstellungen"};
-            for (int i = 0; i < navTitles.length; i++) {
-                final int tabIdx = i;
-                boolean sel = (activeTab == i);
-                Button navBtn = makeMaterialButton(
-                        navTitles[i],
-                        sel ? colPrimaryContainer : Color.TRANSPARENT,
-                        sel ? colOnPrimaryContainer : colOnSurfaceVariant,
-                        18,
-                        isLandscape ? 12f : 12.5f,
-                        1.4f,
-                        sel
-                );
-                navBtn.setSingleLine(true);
-                navBtn.setGravity(Gravity.CENTER);
-                navBtn.setPadding(dp(4), dp(4), dp(4), dp(4));
-                navBtn.setMinimumHeight(dp(isLandscape ? 36 : 42));
-                navBtn.setAutoSizeTextTypeUniformWithConfiguration(
-                        8, Math.round((isLandscape ? 12f : 12.5f) * 1.4f), 1, TypedValue.COMPLEX_UNIT_DIP);
-                navBtn.setOnClickListener(v -> {
-                    v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-                    activeTab = tabIdx;
-                    rebuildScreen();
-                });
-                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-                lp.setMargins(dp(2), 0, dp(2), 0);
-                bottomNav.addView(navBtn, lp);
-            }
-            rootContainer.addView(bottomNav, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        String[] navTitles = {"Rechner", "Plotter", "Konstanten", "Einstellungen"};
+        for (int i = 0; i < navTitles.length; i++) {
+            final int tabIdx = i;
+            boolean sel = (activeTab == i);
+            Button navBtn = makeMaterialButton(
+                    navTitles[i],
+                    sel ? colPrimaryContainer : Color.TRANSPARENT,
+                    sel ? colOnPrimaryContainer : colOnSurfaceVariant,
+                    18,
+                    isLandscape ? 12f : 12.5f,
+                    1.4f,
+                    sel
+            );
+            navBtn.setSingleLine(true);
+            navBtn.setGravity(Gravity.CENTER);
+            navBtn.setPadding(dp(2), dp(4), dp(2), dp(4));
+            navBtn.setIncludeFontPadding(false);
+            navBtn.setMinimumHeight(dp(isLandscape ? 36 : 42));
+            navBtn.setAutoSizeTextTypeUniformWithConfiguration(
+                    7, Math.round((isLandscape ? 12f : 12.5f) * 1.4f), 1, TypedValue.COMPLEX_UNIT_DIP);
+            navBtn.setOnClickListener(v -> {
+                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                activeTab = tabIdx;
+                rebuildScreen();
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            lp.setMargins(dp(2), 0, dp(2), 0);
+            bottomNav.addView(navBtn, lp);
         }
+        rootContainer.addView(bottomNav, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
     private static class FilledBackspaceDrawable extends Drawable {
@@ -509,6 +503,13 @@ public class MainActivity extends Activity {
                     v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
                     handleKeyPress("DEL");
                 });
+                ib.setOnLongClickListener(v -> {
+                    v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+                    currentInput = "";
+                    saveState();
+                    updateInputAndPreview();
+                    return true;
+                });
                 btnView = ib;
             } else {
                 Button b = makeMaterialButton(op[0], Color.TRANSPARENT, colOnSurface, 16, 22f, 1.4f, false);
@@ -563,6 +564,7 @@ public class MainActivity extends Activity {
         inputDisplayView.setTextColor(colOnSurface);
         inputDisplayView.setTypeface(Typeface.DEFAULT_BOLD);
         inputDisplayView.setTextIsSelectable(true);
+        inputDisplayView.setContentDescription("input_expression");
         inputWrap.addView(inputDisplayView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         cursorView = new View(this);
@@ -572,50 +574,6 @@ public class MainActivity extends Activity {
         inputWrap.addView(cursorView, cursorLp);
 
         inputRow.addView(inputWrap, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        Button acBtn = makeMaterialButton("AC", Color.TRANSPARENT, 0x88FFFFFF, 12, 12f, 2.0f);
-        acBtn.setSingleLine(true);
-        acBtn.setMinimumWidth(dp(isLandscape ? 40 : 44));
-        acBtn.setMinimumHeight(dp(isLandscape ? 28 : 32));
-        acBtn.setPadding(dp(4), dp(1), dp(4), dp(1));
-        acBtn.setAutoSizeTextTypeUniformWithConfiguration(8, Math.round(12f * 2.0f), 1, TypedValue.COMPLEX_UNIT_DIP);
-        acBtn.setOnClickListener(v -> {
-            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-            currentInput = "";
-            saveState();
-            updateInputAndPreview();
-        });
-        inputRow.addView(acBtn, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        Button menuBtn = makeMaterialButton("⋮", Color.TRANSPARENT, 0x88FFFFFF, 12, 16f, 1.4f, false);
-        menuBtn.setSingleLine(true);
-        menuBtn.setMinimumWidth(dp(isLandscape ? 30 : 34));
-        menuBtn.setMinimumHeight(dp(isLandscape ? 28 : 32));
-        menuBtn.setPadding(dp(2), dp(1), dp(2), dp(1));
-        menuBtn.setOnClickListener(v -> {
-            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-            PopupMenu popup = new PopupMenu(this, v);
-            popup.getMenu().add(0, 1, 0, "2D-Plotter");
-            popup.getMenu().add(0, 2, 1, "Physikalische Konstanten");
-            popup.getMenu().add(0, 3, 2, "Einstellungen");
-            popup.getMenu().add(0, 4, 3, engine.isRadiansMode() ? "Winkel: RAD (auf DEG wechseln)" : "Winkel: DEG (auf RAD wechseln)");
-            popup.setOnMenuItemClickListener(item -> {
-                int id = item.getItemId();
-                if (id == 1) { activeTab = 1; rebuildScreen(); }
-                else if (id == 2) { activeTab = 2; rebuildScreen(); }
-                else if (id == 3) { activeTab = 3; rebuildScreen(); }
-                else if (id == 4) {
-                    engine.setRadiansMode(!engine.isRadiansMode());
-                    saveState();
-                    updateInputAndPreview();
-                    refreshKeyboardSection();
-                }
-                return true;
-            });
-            popup.show();
-        });
-        inputRow.addView(menuBtn, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
         inputCard.addView(inputRow);
 
         previewDisplayView = new TextView(this);
@@ -874,9 +832,9 @@ public class MainActivity extends Activity {
             resRow.setGravity(Gravity.CENTER_VERTICAL);
 
             Button exactBadge = makeMaterialButton(
-                    item.showingExact ? "> dezimal" : "> exakt",
-                    0xFF1A73E8,
-                    0xFF001D35,
+                    item.showingExact ? "> dezi." : "> exakt",
+                    colPrimary,
+                    colOnPrimary,
                     14,
                     12f,
                     2.0f
@@ -899,7 +857,7 @@ public class MainActivity extends Activity {
 
             TextView eqTv = new TextView(this);
             eqTv.setText("  =  ");
-            eqTv.setTextColor(0xFF4285F4);
+            eqTv.setTextColor(colPrimary);
             setScaledTextSize(eqTv, 18f, 2.0f);
             eqTv.setTypeface(Typeface.DEFAULT_BOLD);
             resRow.addView(eqTv);
@@ -1561,23 +1519,9 @@ public class MainActivity extends Activity {
         col.addView(toggleAngle);
 
         View sp3 = new View(this);
-        col.addView(sp3, new LinearLayout.LayoutParams(dp(1), dp(8)));
+        col.addView(sp3, new LinearLayout.LayoutParams(dp(1), dp(12)));
 
-        // Setting 4: Navigationsleiste im Rechner
-        Button toggleNav = makeMaterialButton(
-                "Navigationsleiste im Rechner: " + (showBottomNavOnCalc ? "Eingeblendet" : "Ausgeblendet (wie Vorlage)"),
-                colSurfaceContainer, colOnSurface, 14, 14f, 2.0f);
-        toggleNav.setOnClickListener(v -> {
-            showBottomNavOnCalc = !showBottomNavOnCalc;
-            saveState();
-            rebuildScreen();
-        });
-        col.addView(toggleNav);
-
-        View sp4 = new View(this);
-        col.addView(sp4, new LinearLayout.LayoutParams(dp(1), dp(12)));
-
-        // Setting 5: Clear history
+        // Setting 4: Clear history
         Button clearHist = makeMaterialButton(
                 "Verlauf vollständig leeren",
                 colSecondaryContainer, colOnSecondaryContainer, 14, 14f, 2.0f);

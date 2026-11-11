@@ -790,7 +790,13 @@ impl JadeCalculatorApp {
                                     // `@id/result_term_view_exact` / `@id/result_term_view_decimal` right-aligned)
                                     ui.horizontal(|ui| {
                                         if !item.is_error {
-                                            let badge_txt = if item.showing_exact {
+                                            let badge_txt = if self.german_ui {
+                                                if item.showing_exact {
+                                                    "> dezi."
+                                                } else {
+                                                    "> exakt"
+                                                }
+                                            } else if item.showing_exact {
                                                 "↔ exact"
                                             } else {
                                                 "↔ decim."
@@ -815,10 +821,17 @@ impl JadeCalculatorApp {
                                             )
                                             .fill(pill_fill)
                                             .corner_radius(CornerRadius::same(10));
-                                            let tooltip = format!(
-                                                "Exakt: {}  |  Dezimal: {}",
-                                                item.exact_result, item.decimal_result
-                                            );
+                                            let tooltip = if self.german_ui {
+                                                format!(
+                                                    "Exakt: {}  |  Dezi.: {}",
+                                                    item.exact_result, item.decimal_result
+                                                )
+                                            } else {
+                                                format!(
+                                                    "Exact: {}  |  Decimal: {}",
+                                                    item.exact_result, item.decimal_result
+                                                )
+                                            };
                                             if ui.add(btn).on_hover_text(tooltip).clicked() {
                                                 item.showing_exact = !item.showing_exact;
                                             }
