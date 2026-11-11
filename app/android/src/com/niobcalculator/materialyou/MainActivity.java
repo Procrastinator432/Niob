@@ -119,6 +119,9 @@ public class MainActivity extends Activity {
     private Button toggleFracFieldBtn;
     private boolean focusNumerator = true;
     private String fracPrefix = "";
+    private String fracSuffix = "";
+    private String fracNumStr = "";
+    private String fracDenStr = "";
 
     private LinearLayout expTemplateRow;
     private TextView expPrefixTv;
@@ -126,6 +129,8 @@ public class MainActivity extends Activity {
     private EditText expValueEt;
     private String expPrefix = "";
     private String expBaseStr = "";
+    private String expSuffix = "";
+    private String expValueStr = "";
 
     private String plotExpr1 = "sin(x) * cos(x/2)";
     private String plotExpr2 = "x^2 / 4 - 2";
@@ -723,9 +728,7 @@ private static class FilledBackspaceDrawable extends Drawable {
                 });
                 ib.setOnLongClickListener(v -> {
                     v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
-                    currentInput = "";
-                    saveState();
-                    updateInputAndPreview();
+                    clearInput();
                     return true;
                 });
                 btnView = ib;
@@ -813,6 +816,8 @@ private static class FilledBackspaceDrawable extends Drawable {
         fracPrefixTv.setTextColor(colOnSurfaceVariant);
         fracPrefixTv.setTypeface(Typeface.DEFAULT_BOLD);
         setScaledTextSize(fracPrefixTv, isLandscape ? 17f : 20f, 2.0f);
+        fracPrefixTv.setText(prettifyMath(fracPrefix));
+        fracPrefixTv.setVisibility(fracPrefix != null && !fracPrefix.trim().isEmpty() ? View.VISIBLE : View.GONE);
         fracTemplateRow.addView(fracPrefixTv);
 
         LinearLayout fracBox = new LinearLayout(this);
@@ -822,6 +827,7 @@ private static class FilledBackspaceDrawable extends Drawable {
         fracBox.setPadding(dp(8), dp(2), dp(8), dp(2));
 
         fracNumEt = new EditText(this);
+        fracNumEt.setContentDescription("frac_num");
         fracNumEt.setHint("Zähler");
         fracNumEt.setHintTextColor(colOnSurfaceVariant);
         fracNumEt.setTextColor(colOnSurface);
@@ -833,12 +839,21 @@ private static class FilledBackspaceDrawable extends Drawable {
         fracNumEt.setTextIsSelectable(true);
         fracNumEt.setCursorVisible(true);
         setScaledTextSize(fracNumEt, isLandscape ? 16f : 19f, 2.0f);
+        fracNumEt.setText(fracNumStr != null ? fracNumStr : "");
         fracNumEt.setOnClickListener(v -> setFractionFocus(true));
+        fracNumEt.setOnFocusChangeListener((v, hasFocus) -> {
+            if (hasFocus) setFractionFocus(true);
+        });
+        fracNumEt.setOnTouchListener((v, ev) -> {
+            if (ev.getAction() == MotionEvent.ACTION_UP) setFractionFocus(true);
+            return false;
+        });
         fracNumEt.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
             @Override public void afterTextChanged(Editable s) {
                 if (isSyncingInput) return;
+                fracNumStr = s != null ? s.toString() : "";
                 syncCurrentInputFromActiveMode();
                 saveState();
                 updatePreviewOnly();
@@ -855,6 +870,7 @@ private static class FilledBackspaceDrawable extends Drawable {
         fracBox.addView(fracDiv, divLp);
 
         fracDenEt = new EditText(this);
+        fracDenEt.setContentDescription("frac_den");
         fracDenEt.setHint("Nenner");
         fracDenEt.setHintTextColor(colOnSurfaceVariant);
         fracDenEt.setTextColor(colOnSurface);
@@ -866,12 +882,21 @@ private static class FilledBackspaceDrawable extends Drawable {
         fracDenEt.setTextIsSelectable(true);
         fracDenEt.setCursorVisible(true);
         setScaledTextSize(fracDenEt, isLandscape ? 16f : 19f, 2.0f);
+        fracDenEt.setText(fracDenStr != null ? fracDenStr : "");
         fracDenEt.setOnClickListener(v -> setFractionFocus(false));
+        fracDenEt.setOnFocusChangeListener((v, hasFocus) -> {
+            if (hasFocus) setFractionFocus(false);
+        });
+        fracDenEt.setOnTouchListener((v, ev) -> {
+            if (ev.getAction() == MotionEvent.ACTION_UP) setFractionFocus(false);
+            return false;
+        });
         fracDenEt.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
             @Override public void afterTextChanged(Editable s) {
                 if (isSyncingInput) return;
+                fracDenStr = s != null ? s.toString() : "";
                 syncCurrentInputFromActiveMode();
                 saveState();
                 updatePreviewOnly();
@@ -911,6 +936,7 @@ private static class FilledBackspaceDrawable extends Drawable {
 
         fracTemplateRow.addView(fracCtrl);
         inputCard.addView(fracTemplateRow);
+        setFractionFocus(focusNumerator);
 
         // 2c. 2D Exponent Template Row (Superscript exponent box with Grundlinie exit)
         expTemplateRow = new LinearLayout(this);
@@ -923,12 +949,15 @@ private static class FilledBackspaceDrawable extends Drawable {
         expPrefixTv.setTextColor(colOnSurfaceVariant);
         expPrefixTv.setTypeface(Typeface.DEFAULT_BOLD);
         setScaledTextSize(expPrefixTv, isLandscape ? 17f : 20f, 2.0f);
+        expPrefixTv.setText(prettifyMath(expPrefix));
+        expPrefixTv.setVisibility(expPrefix != null && !expPrefix.trim().isEmpty() ? View.VISIBLE : View.GONE);
         expTemplateRow.addView(expPrefixTv);
 
         expBaseTv = new TextView(this);
         expBaseTv.setTextColor(colOnSurface);
         expBaseTv.setTypeface(Typeface.DEFAULT_BOLD);
         setScaledTextSize(expBaseTv, isLandscape ? 20f : 24f, 2.0f);
+        expBaseTv.setText(prettifyMath(expBaseStr != null ? expBaseStr : ""));
         expTemplateRow.addView(expBaseTv);
 
         FrameLayout expBox = new FrameLayout(this);
@@ -940,6 +969,7 @@ private static class FilledBackspaceDrawable extends Drawable {
         expBoxLp.leftMargin = dp(2);
 
         expValueEt = new EditText(this);
+        expValueEt.setContentDescription("exp_value");
         expValueEt.setHint("exp");
         expValueEt.setHintTextColor(colOnSurfaceVariant);
         expValueEt.setTextColor(colPrimary);
@@ -950,11 +980,17 @@ private static class FilledBackspaceDrawable extends Drawable {
         expValueEt.setTextIsSelectable(true);
         expValueEt.setCursorVisible(true);
         setScaledTextSize(expValueEt, isLandscape ? 14f : 16f, 1.8f);
+        expValueEt.setText(expValueStr != null ? expValueStr : "");
+        if (currentInputMode == InputMode.EXPONENT) {
+            expValueEt.requestFocus();
+            expValueEt.setSelection(expValueStr != null ? expValueStr.length() : 0);
+        }
         expValueEt.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
             @Override public void afterTextChanged(Editable s) {
                 if (isSyncingInput) return;
+                expValueStr = s != null ? s.toString() : "";
                 syncCurrentInputFromActiveMode();
                 saveState();
                 updatePreviewOnly();
@@ -982,6 +1018,7 @@ private static class FilledBackspaceDrawable extends Drawable {
         }
 
         previewDisplayView = new TextView(this);
+        previewDisplayView.setContentDescription("preview_result");
         setScaledTextSize(previewDisplayView, isLandscape ? 12.5f : 14f, 2.0f);
         previewDisplayView.setTextColor(colPrimary);
         previewDisplayView.setTypeface(Typeface.DEFAULT_BOLD);
@@ -1411,26 +1448,52 @@ private static class FilledBackspaceDrawable extends Drawable {
 
     private void syncCurrentInputFromActiveMode() {
         if (currentInputMode == InputMode.FRACTION) {
-            String n = fracNumEt != null && fracNumEt.getText() != null ? fracNumEt.getText().toString().trim() : "";
-            String d = fracDenEt != null && fracDenEt.getText() != null ? fracDenEt.getText().toString().trim() : "";
+            String n;
+            String d;
+            if (fracNumEt != null && fracNumEt.isAttachedToWindow() && fracNumEt.getText() != null) {
+                n = fracNumEt.getText().toString().trim();
+                fracNumStr = n;
+            } else {
+                n = fracNumStr != null ? fracNumStr.trim() : "";
+            }
+            if (fracDenEt != null && fracDenEt.isAttachedToWindow() && fracDenEt.getText() != null) {
+                d = fracDenEt.getText().toString().trim();
+                fracDenStr = d;
+            } else {
+                d = fracDenStr != null ? fracDenStr.trim() : "";
+            }
             String fStr;
             if (d.isEmpty()) {
-                fStr = n.isEmpty() ? "" : n;
+                fStr = n.isEmpty() ? "" : (n + " / ");
             } else {
                 String nPart = (n.contains("+") || n.contains("-") || n.contains("−") || n.contains(" ") || n.contains("÷") || n.contains("×")) ? "(" + n + ")" : (n.isEmpty() ? "1" : n);
                 String dPart = (d.contains("+") || d.contains("-") || d.contains("−") || d.contains(" ") || d.contains("÷") || d.contains("×")) ? "(" + d + ")" : d;
-                fStr = nPart + " / " + dPart;
+                String trimmedPrefix = fracPrefix != null ? fracPrefix.trim() : "";
+                boolean needDivisorParens = trimmedPrefix.endsWith("÷") || trimmedPrefix.endsWith("/")
+                        || trimmedPrefix.endsWith("×") || trimmedPrefix.endsWith("*")
+                        || trimmedPrefix.endsWith("^");
+                if (needDivisorParens) {
+                    fStr = "(" + nPart + " / " + dPart + ")";
+                } else {
+                    fStr = nPart + " / " + dPart;
+                }
             }
-            currentInput = fracPrefix + fStr;
+            currentInput = (fracPrefix != null ? fracPrefix : "") + fStr + (fracSuffix != null ? fracSuffix : "");
         } else if (currentInputMode == InputMode.EXPONENT) {
-            String exp = expValueEt != null && expValueEt.getText() != null ? expValueEt.getText().toString().trim() : "";
+            String exp;
+            if (expValueEt != null && expValueEt.isAttachedToWindow() && expValueEt.getText() != null) {
+                exp = expValueEt.getText().toString().trim();
+                expValueStr = exp;
+            } else {
+                exp = expValueStr != null ? expValueStr.trim() : "";
+            }
             String pStr;
             if (exp.isEmpty()) {
                 pStr = expBaseStr;
             } else {
                 pStr = expBaseStr + "^(" + exp + ")";
             }
-            currentInput = expPrefix + pStr;
+            currentInput = (expPrefix != null ? expPrefix : "") + pStr + (expSuffix != null ? expSuffix : "");
         } else {
             if (inputDisplayView != null && inputDisplayView.getText() != null) {
                 currentInput = inputDisplayView.getText().toString();
@@ -1446,11 +1509,16 @@ private static class FilledBackspaceDrawable extends Drawable {
         currentInputMode = InputMode.MAIN;
         if (fracTemplateRow != null) fracTemplateRow.setVisibility(View.GONE);
         if (mainInputRow != null) mainInputRow.setVisibility(View.VISIBLE);
+        int targetCursor = currentInput != null ? currentInput.length() - (fracSuffix != null ? fracSuffix.length() : 0) : 0;
+        fracPrefix = "";
+        fracSuffix = "";
+        fracNumStr = "";
+        fracDenStr = "";
         if (inputDisplayView != null) {
             isSyncingInput = true;
             try {
                 inputDisplayView.setText(currentInput != null ? currentInput : "");
-                inputDisplayView.setSelection(currentInput != null ? currentInput.length() : 0);
+                inputDisplayView.setSelection(Math.max(0, Math.min(targetCursor, inputDisplayView.length())));
                 inputDisplayView.requestFocus();
             } finally {
                 isSyncingInput = false;
@@ -1468,11 +1536,16 @@ private static class FilledBackspaceDrawable extends Drawable {
         currentInputMode = InputMode.MAIN;
         if (expTemplateRow != null) expTemplateRow.setVisibility(View.GONE);
         if (mainInputRow != null) mainInputRow.setVisibility(View.VISIBLE);
+        int targetCursor = currentInput != null ? currentInput.length() - (expSuffix != null ? expSuffix.length() : 0) : 0;
+        expPrefix = "";
+        expSuffix = "";
+        expBaseStr = "";
+        expValueStr = "";
         if (inputDisplayView != null) {
             isSyncingInput = true;
             try {
                 inputDisplayView.setText(currentInput != null ? currentInput : "");
-                inputDisplayView.setSelection(currentInput != null ? currentInput.length() : 0);
+                inputDisplayView.setSelection(Math.max(0, Math.min(targetCursor, inputDisplayView.length())));
                 inputDisplayView.requestFocus();
             } finally {
                 isSyncingInput = false;
@@ -1491,9 +1564,13 @@ private static class FilledBackspaceDrawable extends Drawable {
             return;
         }
         String cur = currentInput != null ? currentInput : "";
-        int sel = inputDisplayView != null ? inputDisplayView.getSelectionStart() : cur.length();
-        if (sel < 0 || sel > cur.length()) sel = cur.length();
-        String before = cur.substring(0, sel);
+        int selStart = inputDisplayView != null ? inputDisplayView.getSelectionStart() : cur.length();
+        int selEnd = inputDisplayView != null ? inputDisplayView.getSelectionEnd() : cur.length();
+        if (selStart < 0 || selStart > cur.length()) selStart = cur.length();
+        if (selEnd < 0 || selEnd > cur.length()) selEnd = cur.length();
+        if (selStart > selEnd) { int tmp = selStart; selStart = selEnd; selEnd = tmp; }
+        String before = cur.substring(0, selStart);
+        fracSuffix = cur.substring(selEnd);
 
         String initialNum = "";
         String prefix = before;
@@ -1522,6 +1599,8 @@ private static class FilledBackspaceDrawable extends Drawable {
         }
 
         fracPrefix = prefix;
+        fracNumStr = initialNum;
+        fracDenStr = "";
         currentInputMode = InputMode.FRACTION;
         if (mainInputRow != null) mainInputRow.setVisibility(View.GONE);
         if (expTemplateRow != null) expTemplateRow.setVisibility(View.GONE);
@@ -1558,9 +1637,13 @@ private static class FilledBackspaceDrawable extends Drawable {
             return;
         }
         String cur = currentInput != null ? currentInput : "";
-        int sel = inputDisplayView != null ? inputDisplayView.getSelectionStart() : cur.length();
-        if (sel < 0 || sel > cur.length()) sel = cur.length();
-        String before = cur.substring(0, sel);
+        int selStart = inputDisplayView != null ? inputDisplayView.getSelectionStart() : cur.length();
+        int selEnd = inputDisplayView != null ? inputDisplayView.getSelectionEnd() : cur.length();
+        if (selStart < 0 || selStart > cur.length()) selStart = cur.length();
+        if (selEnd < 0 || selEnd > cur.length()) selEnd = cur.length();
+        if (selStart > selEnd) { int tmp = selStart; selStart = selEnd; selEnd = tmp; }
+        String before = cur.substring(0, selStart);
+        expSuffix = cur.substring(selEnd);
 
         String base = fixedBase != null ? fixedBase : "";
         String prefix = before;
@@ -1595,6 +1678,7 @@ private static class FilledBackspaceDrawable extends Drawable {
 
         expPrefix = prefix;
         expBaseStr = base;
+        expValueStr = "";
         currentInputMode = InputMode.EXPONENT;
 
         if (mainInputRow != null) mainInputRow.setVisibility(View.GONE);
@@ -1702,6 +1786,14 @@ private static class FilledBackspaceDrawable extends Drawable {
             if (mainInputRow != null) mainInputRow.setVisibility(View.VISIBLE);
         }
         currentInput = "";
+        fracPrefix = "";
+        fracSuffix = "";
+        fracNumStr = "";
+        fracDenStr = "";
+        expPrefix = "";
+        expSuffix = "";
+        expBaseStr = "";
+        expValueStr = "";
         isSyncingInput = true;
         try {
             if (inputDisplayView != null) inputDisplayView.setText("");
@@ -2017,18 +2109,6 @@ private static class FilledBackspaceDrawable extends Drawable {
     }
 
     private void handleOperatorPress(String op) {
-        if (currentInputMode == InputMode.EXPONENT) {
-            if (expValueEt != null && expValueEt.getText().length() == 0 && (op.equals("−") || op.equals("+") || op.equals("-"))) {
-                insertAtCursor("−");
-                return;
-            }
-            exitExponentMode(true);
-        } else if (currentInputMode == InputMode.FRACTION) {
-            if (!focusNumerator && fracDenEt != null && fracDenEt.getText().length() > 0) {
-                exitFractionMode(true);
-            }
-        }
-
         EditText activeEt = getActiveInputEditText();
         if (activeEt == null) return;
         int start = Math.max(0, activeEt.getSelectionStart());
@@ -2045,9 +2125,10 @@ private static class FilledBackspaceDrawable extends Drawable {
         String cur = editable.toString();
         String before = cur.substring(0, start);
 
-        // If field is empty and op is minus, insert unary minus
-        if (before.trim().isEmpty() && op.equals("−")) {
-            insertAtCursor("−");
+        // If field is empty and op is minus or plus, insert unary sign (e.g. -3 or +3)
+        if (before.trim().isEmpty() && (op.equals("−") || op.equals("+") || op.equals("-"))) {
+            String sign = op.equals("+") ? "+" : "−";
+            insertAtCursor(sign);
             return;
         }
 
@@ -2056,15 +2137,17 @@ private static class FilledBackspaceDrawable extends Drawable {
         // Scientific exponent sign check: e.g. "1e", "2.5e"
         if (trimmedBefore.matches(".*\\d+(\\.\\d+)?[eE]$") && (op.equals("−") || op.equals("+") || op.equals("-"))) {
             // Exponent sign: NO SPACES!
-            insertAtCursor("−");
+            String expSign = op.equals("+") ? "+" : "−";
+            insertAtCursor(expSign);
             return;
         }
         if (trimmedBefore.matches(".*\\d+(\\.\\d+)?[eE][−\\-\\+]$") && (op.equals("−") || op.equals("+") || op.equals("-"))) {
             // Replace previous exponent sign
+            String expSign = op.equals("+") ? "+" : "−";
             int signPos = trimmedBefore.length() - 1;
             isSyncingInput = true;
             try {
-                editable.replace(signPos, start, "−");
+                editable.replace(signPos, start, expSign);
                 activeEt.setSelection(signPos + 1);
             } finally {
                 isSyncingInput = false;
@@ -2184,6 +2267,29 @@ private static class FilledBackspaceDrawable extends Drawable {
         }
 
         if (key.equals("=")) {
+            if (currentInputMode == InputMode.FRACTION) {
+                String dText = fracDenEt != null && fracDenEt.getText() != null ? fracDenEt.getText().toString().trim() : (fracDenStr != null ? fracDenStr.trim() : "");
+                String nText = fracNumEt != null && fracNumEt.getText() != null ? fracNumEt.getText().toString().trim() : (fracNumStr != null ? fracNumStr.trim() : "");
+                if (dText.isEmpty()) {
+                    setFractionFocus(false);
+                    if (fracDenEt != null) fracDenEt.performHapticFeedback(HapticFeedbackConstants.REJECT);
+                    return;
+                }
+                if (nText.isEmpty()) {
+                    setFractionFocus(true);
+                    if (fracNumEt != null) fracNumEt.performHapticFeedback(HapticFeedbackConstants.REJECT);
+                    return;
+                }
+            } else if (currentInputMode == InputMode.EXPONENT) {
+                String expText = expValueEt != null && expValueEt.getText() != null ? expValueEt.getText().toString().trim() : (expValueStr != null ? expValueStr.trim() : "");
+                if (expText.isEmpty()) {
+                    if (expValueEt != null) {
+                        expValueEt.requestFocus();
+                        expValueEt.performHapticFeedback(HapticFeedbackConstants.REJECT);
+                    }
+                    return;
+                }
+            }
             if (currentInputMode != InputMode.MAIN) {
                 exitFractionMode(true);
                 exitExponentMode(true);
@@ -2579,10 +2685,7 @@ private static class FilledBackspaceDrawable extends Drawable {
                         rebuildScreen();
                         Toast.makeText(this, "Variable " + vName + " zurückgesetzt", Toast.LENGTH_SHORT).show();
                     } else if (which == 3) {
-                        currentInput += vName;
-                        activeTab = 0;
-                        saveState();
-                        rebuildScreen();
+                        insertConstantOrVariable(vName);
                     } else if (which == 4) {
                         showMoreVariables = !showMoreVariables;
                         saveState();
@@ -2592,6 +2695,55 @@ private static class FilledBackspaceDrawable extends Drawable {
                 })
                 .setNegativeButton("Abbrechen", null)
                 .show();
+    }
+
+    private void insertConstantOrVariable(String token) {
+        if (currentInputMode == InputMode.EXPONENT) {
+            expValueStr = (expValueStr != null ? expValueStr : "") + token;
+            if (expValueEt != null) {
+                isSyncingInput = true;
+                try {
+                    expValueEt.setText(expValueStr);
+                    expValueEt.setSelection(expValueStr.length());
+                } finally {
+                    isSyncingInput = false;
+                }
+            }
+        } else if (currentInputMode == InputMode.FRACTION) {
+            if (focusNumerator) {
+                fracNumStr = (fracNumStr != null ? fracNumStr : "") + token;
+                if (fracNumEt != null) {
+                    isSyncingInput = true;
+                    try {
+                        fracNumEt.setText(fracNumStr);
+                        fracNumEt.setSelection(fracNumStr.length());
+                    } finally {
+                        isSyncingInput = false;
+                    }
+                }
+            } else {
+                fracDenStr = (fracDenStr != null ? fracDenStr : "") + token;
+                if (fracDenEt != null) {
+                    isSyncingInput = true;
+                    try {
+                        fracDenEt.setText(fracDenStr);
+                        fracDenEt.setSelection(fracDenStr.length());
+                    } finally {
+                        isSyncingInput = false;
+                    }
+                }
+            }
+        } else {
+            if (inputDisplayView != null && inputDisplayView.isAttachedToWindow()) {
+                insertAtCursor(token);
+            } else {
+                currentInput = (currentInput != null ? currentInput : "") + token;
+            }
+        }
+        activeTab = 0;
+        syncCurrentInputFromActiveMode();
+        saveState();
+        rebuildScreen();
     }
 
     private void showSetDirectValueDialog(final String vName) {
@@ -2705,10 +2857,7 @@ private static class FilledBackspaceDrawable extends Drawable {
                     tile.setFocusable(true);
                     tile.setOnClickListener(v -> {
                         v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-                        currentInput += vName;
-                        activeTab = 0;
-                        saveState();
-                        rebuildScreen();
+                        insertConstantOrVariable(vName);
                     });
 
                     LinearLayout.LayoutParams tileLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
@@ -2794,11 +2943,17 @@ private static class FilledBackspaceDrawable extends Drawable {
 
                     // 3. Name (e.g. Plancksches Wirkungsquantum or Boltzmann-Konstante)
                     TextView nameTv = new TextView(this);
-                    nameTv.setText(item.name);
+                    String formattedName = item.name
+                            .replace("Gravitationsbeschleunigung", "Gravitations-\nbeschleunigung")
+                            .replace("Feinstrukturkonstante", "Feinstruktur-\nkonstante")
+                            .replace("Stefan-Boltzmann-Konstante", "Stefan-Boltzmann-\nKonstante")
+                            .replace("Josephson-Konstante", "Josephson-\nKonstante")
+                            .replace("Von-Klitzing-Konstante", "Von-Klitzing-\nKonstante");
+                    nameTv.setText(formattedName);
                     nameTv.setTextColor(colOnSurface);
                     nameTv.setGravity(Gravity.CENTER);
                     nameTv.setMaxLines(2);
-                    setScaledTextSize(nameTv, 11f, 1.3f);
+                    setScaledTextSize(nameTv, item.name.length() > 18 ? 9.5f : (item.name.length() > 14 ? 10.5f : 11f), 1.3f);
                     LinearLayout.LayoutParams nameLp = new LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
                     nameLp.topMargin = dp(2);
@@ -2808,10 +2963,7 @@ private static class FilledBackspaceDrawable extends Drawable {
                     tile.setFocusable(true);
                     tile.setOnClickListener(v -> {
                         v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-                        currentInput += item.token;
-                        activeTab = 0;
-                        saveState();
-                        rebuildScreen();
+                        insertConstantOrVariable(item.token);
                     });
 
                     LinearLayout.LayoutParams tileLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
