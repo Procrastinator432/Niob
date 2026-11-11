@@ -553,6 +553,9 @@ public final class CalculatorEngine {
         String s = expr.replace("×", "*").replace("·", "*").replace("÷", "/")
                 .replace("π", "pi").replace("−", "-")
                 .replace("²", "^2").replace("³", "^3").replace("⁻¹", "^(-1)");
+        // Normalize scientific notation with optional spaces, e.g. "1e - 3" -> "1e-3", "2.5e + 4" -> "2.5e+4", "1e 3" -> "1e3"
+        s = s.replaceAll("(\\d+(?:\\.\\d+)?)[eE]\\s*([+\\-])\\s*(\\d+)", "$1e$2$3");
+        s = s.replaceAll("(\\d+(?:\\.\\d+)?)[eE]\\s+(\\d+)", "$1e$2");
         return new ExprEvaluator(s, overrides).parse();
     }
 
@@ -713,12 +716,17 @@ public final class CalculatorEngine {
                     nextChar();
                 }
                 if ((ch == 'e' || ch == 'E') && pos + 1 < s.length()) {
-                    char next = s.charAt(pos + 1);
-                    if (Character.isDigit(next) || next == '+' || next == '-') {
-                        hasExp = true;
-                        nextChar();
-                        if (ch == '+' || ch == '-') nextChar();
-                        while (ch >= '0' && ch <= '9') nextChar();
+                    int lookahead = pos + 1;
+                    while (lookahead < s.length() && s.charAt(lookahead) == ' ') lookahead++;
+                    if (lookahead < s.length()) {
+                        char next = s.charAt(lookahead);
+                        if (Character.isDigit(next) || next == '+' || next == '-') {
+                            hasExp = true;
+                            pos = lookahead;
+                            ch = s.charAt(pos);
+                            if (ch == '+' || ch == '-') nextChar();
+                            while (ch >= '0' && ch <= '9') nextChar();
+                        }
                     }
                 }
                 String numStr = s.substring(startPos, pos);
@@ -2056,12 +2064,17 @@ public final class CalculatorEngine {
                     nextChar();
                 }
                 if ((ch == 'e' || ch == 'E') && pos + 1 < s.length()) {
-                    char next = s.charAt(pos + 1);
-                    if (Character.isDigit(next) || next == '+' || next == '-') {
-                        hasExp = true;
-                        nextChar();
-                        if (ch == '+' || ch == '-') nextChar();
-                        while (ch >= '0' && ch <= '9') nextChar();
+                    int lookahead = pos + 1;
+                    while (lookahead < s.length() && s.charAt(lookahead) == ' ') lookahead++;
+                    if (lookahead < s.length()) {
+                        char next = s.charAt(lookahead);
+                        if (Character.isDigit(next) || next == '+' || next == '-') {
+                            hasExp = true;
+                            pos = lookahead;
+                            ch = s.charAt(pos);
+                            if (ch == '+' || ch == '-') nextChar();
+                            while (ch >= '0' && ch <= '9') nextChar();
+                        }
                     }
                 }
                 String numStr = s.substring(startPos, pos);

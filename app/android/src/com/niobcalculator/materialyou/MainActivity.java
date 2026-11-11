@@ -107,6 +107,26 @@ public class MainActivity extends Activity {
     private FrameLayout keyboardBodyContainer;
     private LinearLayout sectionHeaderRow;
     private boolean isSyncingInput = false;
+
+    private enum InputMode { MAIN, FRACTION, EXPONENT }
+    private InputMode currentInputMode = InputMode.MAIN;
+
+    private LinearLayout mainInputRow;
+    private LinearLayout fracTemplateRow;
+    private TextView fracPrefixTv;
+    private EditText fracNumEt;
+    private EditText fracDenEt;
+    private Button toggleFracFieldBtn;
+    private boolean focusNumerator = true;
+    private String fracPrefix = "";
+
+    private LinearLayout expTemplateRow;
+    private TextView expPrefixTv;
+    private TextView expBaseTv;
+    private EditText expValueEt;
+    private String expPrefix = "";
+    private String expBaseStr = "";
+
     private String plotExpr1 = "sin(x) * cos(x/2)";
     private String plotExpr2 = "x^2 / 4 - 2";
 
@@ -260,8 +280,8 @@ public class MainActivity extends Activity {
         rootContainer.removeAllViews();
         boolean isLandscape = getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
 
-        // 1. Top App Bar (only shown on non-calculator tabs: 2D-Plot, Konstanten, Setup; no redundant back button)
-        if (activeTab != 0) {
+        // 1. Top App Bar (only shown on Plotter and Einstellungen tabs; Konstanten uses clean card header like screenshot)
+        if (activeTab == 1 || activeTab == 3) {
             LinearLayout topBar = new LinearLayout(this);
             topBar.setOrientation(LinearLayout.HORIZONTAL);
             topBar.setGravity(Gravity.CENTER_VERTICAL);
@@ -271,7 +291,7 @@ public class MainActivity extends Activity {
             topBar.setPadding(padH, padV, padH, padV);
 
             TextView titleView = new TextView(this);
-            String titleText = (activeTab == 1) ? "2D-Plotter" : (activeTab == 2 ? "Physikalische Konstanten" : "Einstellungen");
+            String titleText = (activeTab == 1) ? "2D-Plotter" : "Einstellungen";
             titleView.setText(titleText);
             titleView.setTextColor(colOnSurface);
             setScaledTextSize(titleView, isLandscape ? 16f : 18f, 2.0f);
@@ -749,7 +769,9 @@ private static class FilledBackspaceDrawable extends Drawable {
         inputCard.setBackgroundColor(0xFF000000);
         inputCard.setPadding(dp(14), dp(6), dp(14), dp(6));
 
+        // 2a. Main Input Row
         LinearLayout inputRow = new LinearLayout(this);
+        mainInputRow = inputRow;
         inputRow.setOrientation(LinearLayout.HORIZONTAL);
         inputRow.setGravity(Gravity.CENTER_VERTICAL);
 
@@ -779,6 +801,185 @@ private static class FilledBackspaceDrawable extends Drawable {
         inputRow.addView(inputEt, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         inputCard.addView(inputRow);
+
+        // 2b. 2D Fraction Template Row (Separate Numerator & Denominator fields with horizontal fraction bar)
+        fracTemplateRow = new LinearLayout(this);
+        fracTemplateRow.setOrientation(LinearLayout.HORIZONTAL);
+        fracTemplateRow.setGravity(Gravity.CENTER_VERTICAL);
+        fracTemplateRow.setVisibility(currentInputMode == InputMode.FRACTION ? View.VISIBLE : View.GONE);
+        fracTemplateRow.setPadding(0, dp(2), 0, dp(2));
+
+        fracPrefixTv = new TextView(this);
+        fracPrefixTv.setTextColor(colOnSurfaceVariant);
+        fracPrefixTv.setTypeface(Typeface.DEFAULT_BOLD);
+        setScaledTextSize(fracPrefixTv, isLandscape ? 17f : 20f, 2.0f);
+        fracTemplateRow.addView(fracPrefixTv);
+
+        LinearLayout fracBox = new LinearLayout(this);
+        fracBox.setOrientation(LinearLayout.VERTICAL);
+        fracBox.setGravity(Gravity.CENTER_HORIZONTAL);
+        fracBox.setBackground(roundedRect(colSurfaceContainer, 8));
+        fracBox.setPadding(dp(8), dp(2), dp(8), dp(2));
+
+        fracNumEt = new EditText(this);
+        fracNumEt.setHint("Zähler");
+        fracNumEt.setHintTextColor(colOnSurfaceVariant);
+        fracNumEt.setTextColor(colOnSurface);
+        fracNumEt.setTypeface(Typeface.DEFAULT_BOLD);
+        fracNumEt.setBackground(null);
+        fracNumEt.setGravity(Gravity.CENTER);
+        fracNumEt.setSingleLine(true);
+        fracNumEt.setShowSoftInputOnFocus(false);
+        fracNumEt.setTextIsSelectable(true);
+        fracNumEt.setCursorVisible(true);
+        setScaledTextSize(fracNumEt, isLandscape ? 16f : 19f, 2.0f);
+        fracNumEt.setOnClickListener(v -> setFractionFocus(true));
+        fracNumEt.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
+            @Override public void afterTextChanged(Editable s) {
+                if (isSyncingInput) return;
+                syncCurrentInputFromActiveMode();
+                saveState();
+                updatePreviewOnly();
+            }
+        });
+        fracBox.addView(fracNumEt, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        View fracDiv = new View(this);
+        fracDiv.setBackgroundColor(colPrimary);
+        LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(dp(72), dp(2));
+        divLp.topMargin = dp(1);
+        divLp.bottomMargin = dp(1);
+        fracBox.addView(fracDiv, divLp);
+
+        fracDenEt = new EditText(this);
+        fracDenEt.setHint("Nenner");
+        fracDenEt.setHintTextColor(colOnSurfaceVariant);
+        fracDenEt.setTextColor(colOnSurface);
+        fracDenEt.setTypeface(Typeface.DEFAULT_BOLD);
+        fracDenEt.setBackground(null);
+        fracDenEt.setGravity(Gravity.CENTER);
+        fracDenEt.setSingleLine(true);
+        fracDenEt.setShowSoftInputOnFocus(false);
+        fracDenEt.setTextIsSelectable(true);
+        fracDenEt.setCursorVisible(true);
+        setScaledTextSize(fracDenEt, isLandscape ? 16f : 19f, 2.0f);
+        fracDenEt.setOnClickListener(v -> setFractionFocus(false));
+        fracDenEt.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
+            @Override public void afterTextChanged(Editable s) {
+                if (isSyncingInput) return;
+                syncCurrentInputFromActiveMode();
+                saveState();
+                updatePreviewOnly();
+            }
+        });
+        fracBox.addView(fracDenEt, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        fracTemplateRow.addView(fracBox);
+
+        LinearLayout fracCtrl = new LinearLayout(this);
+        fracCtrl.setOrientation(LinearLayout.HORIZONTAL);
+        fracCtrl.setGravity(Gravity.CENTER_VERTICAL);
+        fracCtrl.setPadding(dp(10), 0, 0, 0);
+
+        toggleFracFieldBtn = makeMaterialButton(
+                focusNumerator ? "↓ Nenner" : "↑ Zähler",
+                colSurfaceHigh, colPrimary, 8, 11f, 1.2f, true);
+        toggleFracFieldBtn.setPadding(dp(8), dp(3), dp(8), dp(3));
+        toggleFracFieldBtn.setOnClickListener(v -> {
+            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+            setFractionFocus(!focusNumerator);
+        });
+        fracCtrl.addView(toggleFracFieldBtn);
+
+        Button exitFracBtn = makeMaterialButton(
+                "↵ Grundlinie", colPrimary, colOnPrimary, 8, 11.5f, 1.2f, true);
+        exitFracBtn.setPadding(dp(10), dp(3), dp(10), dp(3));
+        LinearLayout.LayoutParams exitLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        exitLp.leftMargin = dp(6);
+        exitFracBtn.setOnClickListener(v -> {
+            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+            exitFractionMode(true);
+        });
+        fracCtrl.addView(exitFracBtn, exitLp);
+
+        fracTemplateRow.addView(fracCtrl);
+        inputCard.addView(fracTemplateRow);
+
+        // 2c. 2D Exponent Template Row (Superscript exponent box with Grundlinie exit)
+        expTemplateRow = new LinearLayout(this);
+        expTemplateRow.setOrientation(LinearLayout.HORIZONTAL);
+        expTemplateRow.setGravity(Gravity.CENTER_VERTICAL);
+        expTemplateRow.setVisibility(currentInputMode == InputMode.EXPONENT ? View.VISIBLE : View.GONE);
+        expTemplateRow.setPadding(0, dp(4), 0, dp(4));
+
+        expPrefixTv = new TextView(this);
+        expPrefixTv.setTextColor(colOnSurfaceVariant);
+        expPrefixTv.setTypeface(Typeface.DEFAULT_BOLD);
+        setScaledTextSize(expPrefixTv, isLandscape ? 17f : 20f, 2.0f);
+        expTemplateRow.addView(expPrefixTv);
+
+        expBaseTv = new TextView(this);
+        expBaseTv.setTextColor(colOnSurface);
+        expBaseTv.setTypeface(Typeface.DEFAULT_BOLD);
+        setScaledTextSize(expBaseTv, isLandscape ? 20f : 24f, 2.0f);
+        expTemplateRow.addView(expBaseTv);
+
+        FrameLayout expBox = new FrameLayout(this);
+        expBox.setBackground(roundedRect(colSurfaceContainer, 6));
+        expBox.setPadding(dp(6), dp(1), dp(6), dp(1));
+        LinearLayout.LayoutParams expBoxLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        expBoxLp.bottomMargin = dp(10);
+        expBoxLp.leftMargin = dp(2);
+
+        expValueEt = new EditText(this);
+        expValueEt.setHint("exp");
+        expValueEt.setHintTextColor(colOnSurfaceVariant);
+        expValueEt.setTextColor(colPrimary);
+        expValueEt.setTypeface(Typeface.DEFAULT_BOLD);
+        expValueEt.setBackground(null);
+        expValueEt.setSingleLine(true);
+        expValueEt.setShowSoftInputOnFocus(false);
+        expValueEt.setTextIsSelectable(true);
+        expValueEt.setCursorVisible(true);
+        setScaledTextSize(expValueEt, isLandscape ? 14f : 16f, 1.8f);
+        expValueEt.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
+            @Override public void afterTextChanged(Editable s) {
+                if (isSyncingInput) return;
+                syncCurrentInputFromActiveMode();
+                saveState();
+                updatePreviewOnly();
+            }
+        });
+        expBox.addView(expValueEt);
+        expTemplateRow.addView(expBox, expBoxLp);
+
+        Button exitExpBtn = makeMaterialButton(
+                "↵ Grundlinie", colPrimary, colOnPrimary, 8, 11.5f, 1.2f, true);
+        exitExpBtn.setPadding(dp(10), dp(3), dp(10), dp(3));
+        LinearLayout.LayoutParams exitExpLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        exitExpLp.leftMargin = dp(12);
+        exitExpBtn.setOnClickListener(v -> {
+            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+            exitExponentMode(true);
+        });
+        expTemplateRow.addView(exitExpBtn, exitExpLp);
+
+        inputCard.addView(expTemplateRow);
+
+        if (currentInputMode != InputMode.MAIN) {
+            mainInputRow.setVisibility(View.GONE);
+        }
 
         previewDisplayView = new TextView(this);
         setScaledTextSize(previewDisplayView, isLandscape ? 12.5f : 14f, 2.0f);
@@ -998,16 +1199,29 @@ private static class FilledBackspaceDrawable extends Drawable {
 
     private void insertHistoryValue(String rawVal) {
         if (rawVal == null || rawVal.isEmpty()) return;
+        EditText activeEt = getActiveInputEditText();
         int start = 0;
         String curText = "";
-        if (inputDisplayView != null) {
-            start = Math.max(0, inputDisplayView.getSelectionStart());
-            curText = inputDisplayView.getText() != null ? inputDisplayView.getText().toString() : "";
+        if (activeEt != null) {
+            start = Math.max(0, activeEt.getSelectionStart());
+            curText = activeEt.getText() != null ? activeEt.getText().toString() : "";
         }
-        char prevChar = (start > 0 && start <= curText.length()) ? curText.charAt(start - 1) : ' ';
-        boolean precededByOp = (prevChar == '/' || prevChar == '*' || prevChar == '+' || prevChar == '-' || prevChar == '^' || prevChar == '÷' || prevChar == '×' || prevChar == '−');
-        boolean isComposite = rawVal.contains("/") || rawVal.contains("+") || rawVal.contains("-") || rawVal.contains(" ");
-        String toInsert = (precededByOp && isComposite) ? ("(" + rawVal + ")") : rawVal;
+        String beforeCursor = (start >= 0 && start <= curText.length())
+                ? curText.substring(0, start).trim()
+                : curText.trim();
+        boolean precededByOp = beforeCursor.endsWith("/") || beforeCursor.endsWith("*")
+                || beforeCursor.endsWith("+") || beforeCursor.endsWith("-")
+                || beforeCursor.endsWith("^") || beforeCursor.endsWith("÷")
+                || beforeCursor.endsWith("×") || beforeCursor.endsWith("−");
+        boolean isComposite = rawVal.contains("/") || rawVal.contains("÷")
+                || rawVal.contains("+") || rawVal.contains("-") || rawVal.contains("−")
+                || rawVal.contains(" ");
+        String toInsert;
+        if (isComposite && (precededByOp || (!beforeCursor.isEmpty() && !beforeCursor.endsWith("(")))) {
+            toInsert = "(" + rawVal + ")";
+        } else {
+            toInsert = rawVal;
+        }
         insertAtCursor(toInsert);
     }
 
@@ -1025,14 +1239,31 @@ private static class FilledBackspaceDrawable extends Drawable {
             itemBox.setBackgroundColor(Color.TRANSPARENT);
             itemBox.setPadding(dp(6), dp(8), dp(6), dp(8));
 
-            // Row 1: Expression (vertical fraction if simple fraction a/b)
+            // Row 1: Expression (vertical fraction if simple fraction a/b or composite fraction (a)/(b))
             String cleanExpr = item.expr.replace(" ", "").replace("÷", "/").replace("−", "-").replace("×", "*");
-            boolean isSimpleFraction = cleanExpr.matches("^-?\\d+/\\d+$");
-            if (isSimpleFraction) {
+            boolean isFraction = false;
+            String fNum = null;
+            String fDen = null;
+            if (cleanExpr.matches("^-?\\d+/\\d+$")) {
                 String[] parts = cleanExpr.split("/");
-                View fracView = createFractionView(parts[0], parts[1]);
+                fNum = parts[0];
+                fDen = parts[1];
+                isFraction = true;
+            } else if (cleanExpr.matches("^\\(?([a-zA-Z0-9_+\\-*·]+)\\)?/\\(?([a-zA-Z0-9_+\\-*·]+)\\)?$")) {
+                int slashIdx = cleanExpr.lastIndexOf('/');
+                String p1 = cleanExpr.substring(0, slashIdx);
+                String p2 = cleanExpr.substring(slashIdx + 1);
+                if (p1.startsWith("(") && p1.endsWith(")")) p1 = p1.substring(1, p1.length() - 1);
+                if (p2.startsWith("(") && p2.endsWith(")")) p2 = p2.substring(1, p2.length() - 1);
+                fNum = p1;
+                fDen = p2;
+                isFraction = true;
+            }
+
+            if (isFraction && fNum != null && fDen != null) {
+                View fracView = createFractionView(fNum, fDen);
                 fracView.setOnClickListener(v -> {
-                    insertAtCursor(item.expr);
+                    insertHistoryValue(item.expr);
                 });
                 LinearLayout.LayoutParams fracLp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -1046,7 +1277,7 @@ private static class FilledBackspaceDrawable extends Drawable {
                 setScaledTextSize(exprTv, 18f, 2.0f);
                 exprTv.setTypeface(Typeface.DEFAULT_BOLD);
                 exprTv.setOnClickListener(v -> {
-                    insertAtCursor(item.expr);
+                    insertHistoryValue(item.expr);
                 });
                 LinearLayout.LayoutParams expLp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -1152,44 +1383,283 @@ private static class FilledBackspaceDrawable extends Drawable {
         }
     }
 
-    private void insertAtCursor(String text) {
-        if (text == null || text.isEmpty()) return;
-        if (inputDisplayView != null) {
-            int start = Math.max(0, inputDisplayView.getSelectionStart());
-            int end = Math.max(0, inputDisplayView.getSelectionEnd());
-            if (start > end) { int tmp = start; start = end; end = tmp; }
-            Editable editable = inputDisplayView.getText();
-            if (editable != null) {
-                isSyncingInput = true;
-                try {
-                    editable.replace(start, end, text);
-                    inputDisplayView.setSelection(start + text.length());
-                } finally {
-                    isSyncingInput = false;
-                }
-                currentInput = inputDisplayView.getText().toString();
-            } else {
-                currentInput += text;
+    private EditText getActiveInputEditText() {
+        if (currentInputMode == InputMode.FRACTION) {
+            return focusNumerator ? fracNumEt : fracDenEt;
+        } else if (currentInputMode == InputMode.EXPONENT) {
+            return expValueEt;
+        }
+        return inputDisplayView;
+    }
+
+    private void setFractionFocus(boolean toNumerator) {
+        focusNumerator = toNumerator;
+        if (toNumerator) {
+            if (fracNumEt != null) {
+                fracNumEt.requestFocus();
+                fracNumEt.setSelection(fracNumEt.getText() != null ? fracNumEt.getText().length() : 0);
             }
+            if (toggleFracFieldBtn != null) toggleFracFieldBtn.setText("↓ Nenner");
         } else {
-            currentInput += text;
+            if (fracDenEt != null) {
+                fracDenEt.requestFocus();
+                fracDenEt.setSelection(fracDenEt.getText() != null ? fracDenEt.getText().length() : 0);
+            }
+            if (toggleFracFieldBtn != null) toggleFracFieldBtn.setText("↑ Zähler");
+        }
+    }
+
+    private void syncCurrentInputFromActiveMode() {
+        if (currentInputMode == InputMode.FRACTION) {
+            String n = fracNumEt != null && fracNumEt.getText() != null ? fracNumEt.getText().toString().trim() : "";
+            String d = fracDenEt != null && fracDenEt.getText() != null ? fracDenEt.getText().toString().trim() : "";
+            String fStr;
+            if (d.isEmpty()) {
+                fStr = n.isEmpty() ? "" : n;
+            } else {
+                String nPart = (n.contains("+") || n.contains("-") || n.contains("−") || n.contains(" ") || n.contains("÷") || n.contains("×")) ? "(" + n + ")" : (n.isEmpty() ? "1" : n);
+                String dPart = (d.contains("+") || d.contains("-") || d.contains("−") || d.contains(" ") || d.contains("÷") || d.contains("×")) ? "(" + d + ")" : d;
+                fStr = nPart + " / " + dPart;
+            }
+            currentInput = fracPrefix + fStr;
+        } else if (currentInputMode == InputMode.EXPONENT) {
+            String exp = expValueEt != null && expValueEt.getText() != null ? expValueEt.getText().toString().trim() : "";
+            String pStr;
+            if (exp.isEmpty()) {
+                pStr = expBaseStr;
+            } else {
+                pStr = expBaseStr + "^(" + exp + ")";
+            }
+            currentInput = expPrefix + pStr;
+        } else {
+            if (inputDisplayView != null && inputDisplayView.getText() != null) {
+                currentInput = inputDisplayView.getText().toString();
+            }
+        }
+    }
+
+    private void exitFractionMode(boolean commit) {
+        if (currentInputMode != InputMode.FRACTION) return;
+        if (commit) {
+            syncCurrentInputFromActiveMode();
+        }
+        currentInputMode = InputMode.MAIN;
+        if (fracTemplateRow != null) fracTemplateRow.setVisibility(View.GONE);
+        if (mainInputRow != null) mainInputRow.setVisibility(View.VISIBLE);
+        if (inputDisplayView != null) {
+            isSyncingInput = true;
+            try {
+                inputDisplayView.setText(currentInput != null ? currentInput : "");
+                inputDisplayView.setSelection(currentInput != null ? currentInput.length() : 0);
+                inputDisplayView.requestFocus();
+            } finally {
+                isSyncingInput = false;
+            }
         }
         saveState();
         updatePreviewOnly();
     }
 
-    private void deleteAtCursor() {
+    private void exitExponentMode(boolean commit) {
+        if (currentInputMode != InputMode.EXPONENT) return;
+        if (commit) {
+            syncCurrentInputFromActiveMode();
+        }
+        currentInputMode = InputMode.MAIN;
+        if (expTemplateRow != null) expTemplateRow.setVisibility(View.GONE);
+        if (mainInputRow != null) mainInputRow.setVisibility(View.VISIBLE);
         if (inputDisplayView != null) {
-            int start = Math.max(0, inputDisplayView.getSelectionStart());
-            int end = Math.max(0, inputDisplayView.getSelectionEnd());
+            isSyncingInput = true;
+            try {
+                inputDisplayView.setText(currentInput != null ? currentInput : "");
+                inputDisplayView.setSelection(currentInput != null ? currentInput.length() : 0);
+                inputDisplayView.requestFocus();
+            } finally {
+                isSyncingInput = false;
+            }
+        }
+        saveState();
+        updatePreviewOnly();
+    }
+
+    private void openFractionTemplate() {
+        if (currentInputMode == InputMode.EXPONENT) {
+            exitExponentMode(true);
+        }
+        if (currentInputMode == InputMode.FRACTION) {
+            setFractionFocus(!focusNumerator);
+            return;
+        }
+        String cur = currentInput != null ? currentInput : "";
+        int sel = inputDisplayView != null ? inputDisplayView.getSelectionStart() : cur.length();
+        if (sel < 0 || sel > cur.length()) sel = cur.length();
+        String before = cur.substring(0, sel);
+
+        String initialNum = "";
+        String prefix = before;
+        String trimmedBefore = before.replaceAll("\\s+$", "");
+        if (trimmedBefore.endsWith(")")) {
+            int depth = 1;
+            int idx = trimmedBefore.length() - 2;
+            while (idx >= 0 && depth > 0) {
+                if (trimmedBefore.charAt(idx) == ')') depth++;
+                else if (trimmedBefore.charAt(idx) == '(') depth--;
+                idx--;
+            }
+            if (depth == 0) {
+                initialNum = trimmedBefore.substring(idx + 1);
+                prefix = before.substring(0, idx + 1);
+            }
+        } else {
+            int idx = trimmedBefore.length() - 1;
+            while (idx >= 0 && (Character.isLetterOrDigit(trimmedBefore.charAt(idx)) || trimmedBefore.charAt(idx) == '.')) {
+                idx--;
+            }
+            if (idx < trimmedBefore.length() - 1) {
+                initialNum = trimmedBefore.substring(idx + 1);
+                prefix = before.substring(0, idx + 1);
+            }
+        }
+
+        fracPrefix = prefix;
+        currentInputMode = InputMode.FRACTION;
+        if (mainInputRow != null) mainInputRow.setVisibility(View.GONE);
+        if (expTemplateRow != null) expTemplateRow.setVisibility(View.GONE);
+        if (fracTemplateRow != null) fracTemplateRow.setVisibility(View.VISIBLE);
+
+        if (fracPrefixTv != null) {
+            fracPrefixTv.setText(prettifyMath(fracPrefix));
+            fracPrefixTv.setVisibility(fracPrefix.trim().isEmpty() ? View.GONE : View.VISIBLE);
+        }
+
+        isSyncingInput = true;
+        try {
+            if (fracNumEt != null) fracNumEt.setText(initialNum);
+            if (fracDenEt != null) fracDenEt.setText("");
+        } finally {
+            isSyncingInput = false;
+        }
+
+        if (!initialNum.isEmpty()) {
+            setFractionFocus(false);
+        } else {
+            setFractionFocus(true);
+        }
+        syncCurrentInputFromActiveMode();
+        updatePreviewOnly();
+    }
+
+    private void openExponentTemplate(String fixedBase) {
+        if (currentInputMode == InputMode.FRACTION) {
+            exitFractionMode(true);
+        }
+        if (currentInputMode == InputMode.EXPONENT) {
+            exitExponentMode(true);
+            return;
+        }
+        String cur = currentInput != null ? currentInput : "";
+        int sel = inputDisplayView != null ? inputDisplayView.getSelectionStart() : cur.length();
+        if (sel < 0 || sel > cur.length()) sel = cur.length();
+        String before = cur.substring(0, sel);
+
+        String base = fixedBase != null ? fixedBase : "";
+        String prefix = before;
+        if (base.isEmpty()) {
+            String trimmedBefore = before.replaceAll("\\s+$", "");
+            if (trimmedBefore.endsWith(")")) {
+                int depth = 1;
+                int idx = trimmedBefore.length() - 2;
+                while (idx >= 0 && depth > 0) {
+                    if (trimmedBefore.charAt(idx) == ')') depth++;
+                    else if (trimmedBefore.charAt(idx) == '(') depth--;
+                    idx--;
+                }
+                if (depth == 0) {
+                    base = trimmedBefore.substring(idx + 1);
+                    prefix = before.substring(0, idx + 1);
+                }
+            } else {
+                int idx = trimmedBefore.length() - 1;
+                while (idx >= 0 && (Character.isLetterOrDigit(trimmedBefore.charAt(idx)) || trimmedBefore.charAt(idx) == '.')) {
+                    idx--;
+                }
+                if (idx < trimmedBefore.length() - 1) {
+                    base = trimmedBefore.substring(idx + 1);
+                    prefix = before.substring(0, idx + 1);
+                }
+            }
+        }
+        if (base.isEmpty()) {
+            base = "x";
+        }
+
+        expPrefix = prefix;
+        expBaseStr = base;
+        currentInputMode = InputMode.EXPONENT;
+
+        if (mainInputRow != null) mainInputRow.setVisibility(View.GONE);
+        if (fracTemplateRow != null) fracTemplateRow.setVisibility(View.GONE);
+        if (expTemplateRow != null) expTemplateRow.setVisibility(View.VISIBLE);
+
+        if (expPrefixTv != null) {
+            expPrefixTv.setText(prettifyMath(expPrefix));
+            expPrefixTv.setVisibility(expPrefix.trim().isEmpty() ? View.GONE : View.VISIBLE);
+        }
+        if (expBaseTv != null) {
+            expBaseTv.setText(prettifyMath(expBaseStr));
+        }
+        if (expValueEt != null) {
+            isSyncingInput = true;
+            try {
+                expValueEt.setText("");
+            } finally {
+                isSyncingInput = false;
+            }
+            expValueEt.requestFocus();
+            expValueEt.setSelection(0);
+        }
+        syncCurrentInputFromActiveMode();
+        updatePreviewOnly();
+    }
+
+    private void insertAtCursor(String text) {
+        if (text == null || text.isEmpty()) return;
+        EditText activeEt = getActiveInputEditText();
+        if (activeEt != null) {
+            int start = Math.max(0, activeEt.getSelectionStart());
+            int end = Math.max(0, activeEt.getSelectionEnd());
             if (start > end) { int tmp = start; start = end; end = tmp; }
-            Editable editable = inputDisplayView.getText();
+            Editable editable = activeEt.getText();
+            if (editable != null) {
+                isSyncingInput = true;
+                try {
+                    editable.replace(start, end, text);
+                    activeEt.setSelection(start + text.length());
+                } finally {
+                    isSyncingInput = false;
+                }
+            }
+        } else {
+            currentInput += text;
+        }
+        syncCurrentInputFromActiveMode();
+        saveState();
+        updatePreviewOnly();
+    }
+
+    private void deleteAtCursor() {
+        EditText activeEt = getActiveInputEditText();
+        if (activeEt != null) {
+            int start = Math.max(0, activeEt.getSelectionStart());
+            int end = Math.max(0, activeEt.getSelectionEnd());
+            if (start > end) { int tmp = start; start = end; end = tmp; }
+            Editable editable = activeEt.getText();
             if (editable != null && editable.length() > 0) {
                 isSyncingInput = true;
                 try {
                     if (start != end) {
                         editable.delete(start, end);
-                        inputDisplayView.setSelection(start);
+                        activeEt.setSelection(start);
                     } else if (start > 0) {
                         String sub = editable.toString().substring(0, start);
                         int delLen = 1;
@@ -1200,32 +1670,49 @@ private static class FilledBackspaceDrawable extends Drawable {
                             }
                         }
                         editable.delete(start - delLen, start);
-                        inputDisplayView.setSelection(start - delLen);
+                        activeEt.setSelection(start - delLen);
                     }
                 } finally {
                     isSyncingInput = false;
                 }
-                currentInput = inputDisplayView.getText().toString();
+            } else {
+                if (currentInputMode == InputMode.FRACTION) {
+                    if (!focusNumerator) {
+                        setFractionFocus(true);
+                    } else {
+                        exitFractionMode(false);
+                    }
+                } else if (currentInputMode == InputMode.EXPONENT) {
+                    exitExponentMode(false);
+                }
             }
         } else {
             currentInput = deleteLastToken(currentInput);
         }
+        syncCurrentInputFromActiveMode();
         saveState();
         updatePreviewOnly();
     }
 
     private void clearInput() {
-        if (inputDisplayView != null) {
-            isSyncingInput = true;
-            try {
-                inputDisplayView.setText("");
-            } finally {
-                isSyncingInput = false;
-            }
+        if (currentInputMode != InputMode.MAIN) {
+            currentInputMode = InputMode.MAIN;
+            if (fracTemplateRow != null) fracTemplateRow.setVisibility(View.GONE);
+            if (expTemplateRow != null) expTemplateRow.setVisibility(View.GONE);
+            if (mainInputRow != null) mainInputRow.setVisibility(View.VISIBLE);
         }
         currentInput = "";
+        isSyncingInput = true;
+        try {
+            if (inputDisplayView != null) inputDisplayView.setText("");
+            if (fracNumEt != null) fracNumEt.setText("");
+            if (fracDenEt != null) fracDenEt.setText("");
+            if (expValueEt != null) expValueEt.setText("");
+        } finally {
+            isSyncingInput = false;
+        }
         saveState();
-        updatePreviewOnly();
+        updateInputAndPreview();
     }
 
     private void updatePreviewOnly() {
@@ -1345,8 +1832,8 @@ private static class FilledBackspaceDrawable extends Drawable {
                 // 0: ( ) √ ^
                 {
                         {k("("), k(")"), k("π", "pi"), k("e")},
-                        {k("x²", "^2"), k("xⁿ", "^("), k("√x", "sqrt("), k("a/b", " / ")},
-                        {k("ln", "ln("), k("logₐ(x)", "log("), k("ⁿ√x", "nthroot("), k("10ⁿ", "10^(")}
+                        {k("x²", "^2"), k("xⁿ", "TEMPLATE_POWER"), k("√x", "sqrt("), k("a/b", "TEMPLATE_FRACTION")},
+                        {k("ln", "ln("), k("logₐ(x)", "log("), k("ⁿ√x", "nthroot("), k("10ⁿ", "TEMPLATE_POWER_10")}
                 },
                 // 1: sin
                 {
@@ -1530,11 +2017,24 @@ private static class FilledBackspaceDrawable extends Drawable {
     }
 
     private void handleOperatorPress(String op) {
-        if (inputDisplayView == null) return;
-        int start = Math.max(0, inputDisplayView.getSelectionStart());
-        int end = Math.max(0, inputDisplayView.getSelectionEnd());
+        if (currentInputMode == InputMode.EXPONENT) {
+            if (expValueEt != null && expValueEt.getText().length() == 0 && (op.equals("−") || op.equals("+") || op.equals("-"))) {
+                insertAtCursor("−");
+                return;
+            }
+            exitExponentMode(true);
+        } else if (currentInputMode == InputMode.FRACTION) {
+            if (!focusNumerator && fracDenEt != null && fracDenEt.getText().length() > 0) {
+                exitFractionMode(true);
+            }
+        }
+
+        EditText activeEt = getActiveInputEditText();
+        if (activeEt == null) return;
+        int start = Math.max(0, activeEt.getSelectionStart());
+        int end = Math.max(0, activeEt.getSelectionEnd());
         if (start > end) { int tmp = start; start = end; end = tmp; }
-        Editable editable = inputDisplayView.getText();
+        Editable editable = activeEt.getText();
         if (editable == null) return;
 
         if (start != end) {
@@ -1545,14 +2045,37 @@ private static class FilledBackspaceDrawable extends Drawable {
         String cur = editable.toString();
         String before = cur.substring(0, start);
 
-        // If input is empty and op is minus, insert unary minus
+        // If field is empty and op is minus, insert unary minus
         if (before.trim().isEmpty() && op.equals("−")) {
             insertAtCursor("−");
             return;
         }
 
-        // If preceding text ends with an operator: " + ", " − ", " × ", " ÷ ", "+", "-", "*", "/"
         String trimmedBefore = before.replaceAll("\\s+$", "");
+
+        // Scientific exponent sign check: e.g. "1e", "2.5e"
+        if (trimmedBefore.matches(".*\\d+(\\.\\d+)?[eE]$") && (op.equals("−") || op.equals("+") || op.equals("-"))) {
+            // Exponent sign: NO SPACES!
+            insertAtCursor("−");
+            return;
+        }
+        if (trimmedBefore.matches(".*\\d+(\\.\\d+)?[eE][−\\-\\+]$") && (op.equals("−") || op.equals("+") || op.equals("-"))) {
+            // Replace previous exponent sign
+            int signPos = trimmedBefore.length() - 1;
+            isSyncingInput = true;
+            try {
+                editable.replace(signPos, start, "−");
+                activeEt.setSelection(signPos + 1);
+            } finally {
+                isSyncingInput = false;
+            }
+            syncCurrentInputFromActiveMode();
+            saveState();
+            updatePreviewOnly();
+            return;
+        }
+
+        // If preceding text ends with an operator: " + ", " − ", " × ", " ÷ ", "+", "-", "*", "/"
         if (trimmedBefore.endsWith("+") || trimmedBefore.endsWith("−") || trimmedBefore.endsWith("-")
                 || trimmedBefore.endsWith("×") || trimmedBefore.endsWith("*")
                 || trimmedBefore.endsWith("÷") || trimmedBefore.endsWith("/")) {
@@ -1566,11 +2089,11 @@ private static class FilledBackspaceDrawable extends Drawable {
             isSyncingInput = true;
             try {
                 editable.replace(opStart, start, " " + op + " ");
-                inputDisplayView.setSelection(opStart + op.length() + 2);
+                activeEt.setSelection(opStart + op.length() + 2);
             } finally {
                 isSyncingInput = false;
             }
-            currentInput = editable.toString();
+            syncCurrentInputFromActiveMode();
             saveState();
             updatePreviewOnly();
             return;
@@ -1647,8 +2170,24 @@ private static class FilledBackspaceDrawable extends Drawable {
             clearInput();
             return;
         }
+        if (key.equals("TEMPLATE_FRACTION")) {
+            openFractionTemplate();
+            return;
+        }
+        if (key.equals("TEMPLATE_POWER")) {
+            openExponentTemplate(null);
+            return;
+        }
+        if (key.equals("TEMPLATE_POWER_10")) {
+            openExponentTemplate("10");
+            return;
+        }
 
         if (key.equals("=")) {
+            if (currentInputMode != InputMode.MAIN) {
+                exitFractionMode(true);
+                exitExponentMode(true);
+            }
             if (currentInput != null && !currentInput.trim().isEmpty()) {
                 try {
                     CalculatorEngine.Result result = engine.evaluateAndCommit(currentInput);
@@ -1659,11 +2198,13 @@ private static class FilledBackspaceDrawable extends Drawable {
                     clearInput();
                     refreshHistoryViews(true);
                 } catch (Exception e) {
-                    String msg = e.getMessage() != null ? e.getMessage() : "";
-                    String errDesc = msg.contains("Division") ? "Division durch 0" : "Fehler";
-                    history.add(new HistoryEntry(currentInput, errDesc, errDesc, true));
-                    clearInput();
-                    refreshHistoryViews(true);
+                    // Do NOT clear the input field on error!
+                    // Keep the expression intact so user can fix the error.
+                    // The live preview already reports the error (e.g. "⚠ Division durch Null").
+                    if (inputDisplayView != null) {
+                        inputDisplayView.performHapticFeedback(HapticFeedbackConstants.REJECT);
+                    }
+                    updatePreviewOnly();
                 }
             }
         } else if (key.equals("DEL")) {
@@ -1938,7 +2479,7 @@ private static class FilledBackspaceDrawable extends Drawable {
         return ss;
     }
 
-    private static final boolean[] categoryExpanded = {false, true, false, false, false};
+    private static final java.util.Set<Integer> expandedCategories = new java.util.HashSet<>(java.util.Collections.singletonList(1));
 
     private static class ConstantDef {
         final String symbol;
@@ -1976,10 +2517,7 @@ private static class FilledBackspaceDrawable extends Drawable {
                         new ConstantDef("g", "g", "Gravitationsbeschleunigung", "9,806 7"),
                         new ConstantDef("c₀", "c0", "Lichtgeschwindigkeit", "2,997 9×10⁸"),
                         new ConstantDef("μ₀", "mu0", "Magnetische Feldkonstante", "12,566×10⁻⁷"),
-                        new ConstantDef("h", "h", "Plancksches Wirkungsquantum", "6,626 1×10⁻³⁴"),
-                        new ConstantDef("m_P", "m_P", "Planck-Masse", "2,176 5×10⁻⁸"),
-                        new ConstantDef("t_P", "t_P", "Planck-Zeit", "5,391 1×10⁻⁴⁴"),
-                        new ConstantDef("l_P", "l_P", "Planck-Länge", "1,616 2×10⁻³⁵")
+                        new ConstantDef("h", "h", "Plancksches Wirkungsquantum", "6,626 1×10⁻³⁴")
                 }),
                 new CategoryDef("Elektromagnetische Konstanten", new ConstantDef[]{
                         new ConstantDef("Z₀", "Z0", "Wellenwiderstand des Vakuums", "376,73"),
@@ -2002,6 +2540,11 @@ private static class FilledBackspaceDrawable extends Drawable {
                         new ConstantDef("m_p", "m_p", "Protonenmasse", "1,674 9×10⁻²⁷"),
                         new ConstantDef("m_n", "m_n", "Neutronenmasse", "1,672 6×10⁻²⁷")
                 }),
+                new CategoryDef("Planck- & Naturkonstanten", new ConstantDef[]{
+                        new ConstantDef("m_P", "m_P", "Planck-Masse", "2,176 5×10⁻⁸"),
+                        new ConstantDef("t_P", "t_P", "Planck-Zeit", "5,391 1×10⁻⁴⁴"),
+                        new ConstantDef("l_P", "l_P", "Planck-Länge", "1,616 2×10⁻³⁵")
+                }),
                 new CategoryDef("Mathematische Konstanten", new ConstantDef[]{
                         new ConstantDef("π", "pi", "Kreiszahl Pi", "3,14159…"),
                         new ConstantDef("e", "e", "Eulersche Zahl", "2,71828…"),
@@ -2020,7 +2563,8 @@ private static class FilledBackspaceDrawable extends Drawable {
                         "Wert zuweisen (im Rechner: " + vName + " := )",
                         "Wert direkt festlegen…",
                         "Variable zurücksetzen (unset)",
-                        "In Rechner einsetzen (" + vName + ")"
+                        "In Rechner einsetzen (" + vName + ")",
+                        "Zur Tastatur hinzufügen (Variablen a..z)"
                 }, (dialog, which) -> {
                     if (which == 0) {
                         currentInput += vName + " := ";
@@ -2039,6 +2583,11 @@ private static class FilledBackspaceDrawable extends Drawable {
                         activeTab = 0;
                         saveState();
                         rebuildScreen();
+                    } else if (which == 4) {
+                        showMoreVariables = !showMoreVariables;
+                        saveState();
+                        rebuildScreen();
+                        Toast.makeText(this, showMoreVariables ? "Tastatur-Variablen eingeblendet" : "Standard-Tastatur aktiv", Toast.LENGTH_SHORT).show();
                     }
                 })
                 .setNegativeButton("Abbrechen", null)
@@ -2144,22 +2693,6 @@ private static class FilledBackspaceDrawable extends Drawable {
                     valLp.topMargin = dp(4);
                     tile.addView(valTv, valLp);
 
-                    Button insBtn = makeMaterialButton("+ Einsetzen", colPrimary, colOnPrimary, 10, 10f, 1.3f);
-                    insBtn.setSingleLine(true);
-                    insBtn.setPadding(dp(6), dp(1), dp(6), dp(1));
-                    insBtn.setMinimumHeight(dp(24));
-                    insBtn.setOnClickListener(v -> {
-                        v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-                        currentInput += vName;
-                        activeTab = 0;
-                        saveState();
-                        rebuildScreen();
-                    });
-                    LinearLayout.LayoutParams insLp = new LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                    insLp.topMargin = dp(4);
-                    tile.addView(insBtn, insLp);
-
                     View.OnLongClickListener onLong = v -> {
                         v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
                         showVariableOptionsDialog(vName);
@@ -2167,7 +2700,6 @@ private static class FilledBackspaceDrawable extends Drawable {
                     };
                     tile.setOnLongClickListener(onLong);
                     circle.setOnLongClickListener(onLong);
-                    insBtn.setOnLongClickListener(onLong);
 
                     tile.setClickable(true);
                     tile.setFocusable(true);
@@ -2272,23 +2804,6 @@ private static class FilledBackspaceDrawable extends Drawable {
                     nameLp.topMargin = dp(2);
                     tile.addView(nameTv, nameLp);
 
-                    // 4. Action Button "+ Einsetzen"
-                    Button insBtn = makeMaterialButton("+ Einsetzen", colPrimary, colOnPrimary, 10, 10f, 1.3f);
-                    insBtn.setSingleLine(true);
-                    insBtn.setPadding(dp(6), dp(1), dp(6), dp(1));
-                    insBtn.setMinimumHeight(dp(24));
-                    insBtn.setOnClickListener(v -> {
-                        v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-                        currentInput += item.token;
-                        activeTab = 0;
-                        saveState();
-                        rebuildScreen();
-                    });
-                    LinearLayout.LayoutParams insLp = new LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                    insLp.topMargin = dp(4);
-                    tile.addView(insBtn, insLp);
-
                     tile.setClickable(true);
                     tile.setFocusable(true);
                     tile.setOnClickListener(v -> {
@@ -2322,7 +2837,7 @@ private static class FilledBackspaceDrawable extends Drawable {
         for (int cIdx = 0; cIdx < cats.length; cIdx++) {
             final int catIndex = cIdx;
             final CategoryDef cat = cats[cIdx];
-            final boolean isExp = categoryExpanded[catIndex];
+            final boolean isExp = expandedCategories.contains(catIndex);
 
             LinearLayout card = new LinearLayout(this);
             card.setOrientation(LinearLayout.VERTICAL);
@@ -2338,18 +2853,23 @@ private static class FilledBackspaceDrawable extends Drawable {
             hdr.setPadding(dp(4), dp(4), dp(4), dp(4));
             hdr.setOnClickListener(v -> {
                 v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-                categoryExpanded[catIndex] = !categoryExpanded[catIndex];
+                if (expandedCategories.contains(catIndex)) {
+                    expandedCategories.remove(catIndex);
+                } else {
+                    expandedCategories.add(catIndex);
+                }
                 rebuildScreen();
             });
 
             TextView chev = new TextView(this);
-            chev.setText(isExp ? "▲  " : "▼  ");
-            chev.setTextColor(colOnSurface);
-            setScaledTextSize(chev, 14f, 2.0f);
+            chev.setText(isExp ? "∧  " : "∨  ");
+            chev.setTextColor(colOnSurfaceVariant);
+            chev.setTypeface(Typeface.DEFAULT_BOLD);
+            setScaledTextSize(chev, 15f, 2.0f);
             hdr.addView(chev);
 
             TextView titleTv = new TextView(this);
-            titleTv.setText(catIndex == 0 ? "Benutzerdefinierte Variablen (lange drücken)" : cat.title);
+            titleTv.setText(cat.title);
             titleTv.setTextColor(colOnSurface);
             setScaledTextSize(titleTv, 15f, 2.0f);
             titleTv.setTypeface(Typeface.DEFAULT_BOLD);
