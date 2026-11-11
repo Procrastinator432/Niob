@@ -101,7 +101,6 @@ public class MainActivity extends Activity {
     private LinearLayout rootContainer;
     private EditText inputDisplayView;
     private TextView previewDisplayView;
-    private Button angleBadgeView;
     private View cursorView;
     private ScrollView historyScrollView;
     private LinearLayout historyListContainer;
@@ -679,10 +678,10 @@ private static class FilledBackspaceDrawable extends Drawable {
 
         String[][] opDefs = {
                 {"\u232b", "DEL"},
-                {"\u00f7", "/"},
-                {"\u00d7", "*"},
+                {"\u00f7", "÷"},
+                {"\u00d7", "×"},
                 {"+", "+"},
-                {"\u2212", "-"}
+                {"\u2212", "−"}
         };
 
         for (int i = 0; i < opDefs.length; i++) {
@@ -777,38 +776,21 @@ private static class FilledBackspaceDrawable extends Drawable {
                 updatePreviewOnly();
             }
         });
-        inputRow.addView(inputEt, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        // Persistent RAD/DEG Indicator Badge in the input bar
-        Button angleBadge = makeMaterialButton(
-                engine.isRadiansMode() ? "RAD" : "DEG",
-                colSurfaceHigh,
-                colPrimary,
-                8,
-                8.5f,
-                1.1f
-        );
-        angleBadgeView = angleBadge;
-        angleBadge.setSingleLine(true);
-        angleBadge.setIncludeFontPadding(false);
-        angleBadge.setPadding(dp(6), dp(1), dp(6), dp(1));
-        angleBadge.setMinimumHeight(dp(19));
-        angleBadge.setMinimumWidth(dp(32));
-        angleBadge.setOnClickListener(v -> {
-            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-            engine.setRadiansMode(!engine.isRadiansMode());
-            angleBadge.setText(engine.isRadiansMode() ? "RAD" : "DEG");
-            saveState();
-            updateInputAndPreview();
-            refreshKeyboardSection();
-        });
-        inputRow.addView(angleBadge);
+        inputRow.addView(inputEt, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         inputCard.addView(inputRow);
 
         previewDisplayView = new TextView(this);
-        setScaledTextSize(previewDisplayView, isLandscape ? 12f : 13f, 2.0f);
+        setScaledTextSize(previewDisplayView, isLandscape ? 12.5f : 14f, 2.0f);
         previewDisplayView.setTextColor(colPrimary);
-        inputCard.addView(previewDisplayView);
+        previewDisplayView.setTypeface(Typeface.DEFAULT_BOLD);
+        previewDisplayView.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        previewDisplayView.setTextAlignment(View.TEXT_ALIGNMENT_VIEW_END);
+        previewDisplayView.setSingleLine(true);
+        LinearLayout.LayoutParams prevLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        prevLp.topMargin = dp(2);
+        inputCard.addView(previewDisplayView, prevLp);
 
         // 3. Dual Keyboard Container
         LinearLayout kbContainer = new LinearLayout(this);
@@ -1044,9 +1026,10 @@ private static class FilledBackspaceDrawable extends Drawable {
             itemBox.setPadding(dp(6), dp(8), dp(6), dp(8));
 
             // Row 1: Expression (vertical fraction if simple fraction a/b)
-            boolean isSimpleFraction = item.expr.matches("^-?\\d+/\\d+$");
+            String cleanExpr = item.expr.replace(" ", "").replace("÷", "/").replace("−", "-").replace("×", "*");
+            boolean isSimpleFraction = cleanExpr.matches("^-?\\d+/\\d+$");
             if (isSimpleFraction) {
-                String[] parts = item.expr.split("/");
+                String[] parts = cleanExpr.split("/");
                 View fracView = createFractionView(parts[0], parts[1]);
                 fracView.setOnClickListener(v -> {
                     insertAtCursor(item.expr);
@@ -1080,16 +1063,14 @@ private static class FilledBackspaceDrawable extends Drawable {
                     item.showingExact ? "dezi." : "exakt",
                     colSurfaceHigh,
                     colPrimary,
-                    9,
-                    8.5f,
-                    1.1f,
-                    false
+                    10,
+                    11.5f,
+                    1.2f,
+                    true
             );
             exactBadge.setSingleLine(true);
             exactBadge.setIncludeFontPadding(false);
-            exactBadge.setMinimumWidth(dp(46));
-            exactBadge.setMinimumHeight(dp(19));
-            exactBadge.setPadding(dp(6), 0, dp(6), 0);
+            exactBadge.setPadding(dp(9), dp(2.5f), dp(9), dp(2.5f));
             exactBadge.setOnClickListener(v -> {
                 v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
                 item.showingExact = !item.showingExact;
@@ -1097,7 +1078,7 @@ private static class FilledBackspaceDrawable extends Drawable {
                 refreshHistoryViews(false);
             });
             resRow.addView(exactBadge, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, dp(19)));
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
             TextView eqTv = new TextView(this);
             eqTv.setText("  =  ");
@@ -1249,9 +1230,6 @@ private static class FilledBackspaceDrawable extends Drawable {
 
     private void updatePreviewOnly() {
         if (previewDisplayView == null) return;
-        if (angleBadgeView != null) {
-            angleBadgeView.setText(engine.isRadiansMode() ? "RAD" : "DEG");
-        }
         String cur = currentInput != null ? currentInput.trim() : "";
         if (cur.isEmpty()) {
             String ansStr = engine.formatAns(false);
@@ -1367,8 +1345,8 @@ private static class FilledBackspaceDrawable extends Drawable {
                 // 0: ( ) √ ^
                 {
                         {k("("), k(")"), k("π", "pi"), k("e")},
-                        {k("x²", "^2"), k("xⁿ", "^("), k("√x", "sqrt("), k("ⁿ√x", "nthroot(")},
-                        {k("ln", "ln("), k("logₐ(x)", "log("), k("10ⁿ", "10^("), k("ans", "ans")}
+                        {k("x²", "^2"), k("xⁿ", "^("), k("√x", "sqrt("), k("a/b", " / ")},
+                        {k("ln", "ln("), k("logₐ(x)", "log("), k("ⁿ√x", "nthroot("), k("10ⁿ", "10^(")}
                 },
                 // 1: sin
                 {
@@ -1408,10 +1386,8 @@ private static class FilledBackspaceDrawable extends Drawable {
             angleBar.setGravity(Gravity.CENTER);
             angleBar.setPadding(dp(4), 0, dp(4), dp(2));
 
-            Button openParenBtn = makeMaterialButton("(", Color.TRANSPARENT, colOnSurface, 8, 13f, 1.2f);
-            openParenBtn.setPadding(dp(8), 0, dp(8), 0);
-            openParenBtn.setMinimumHeight(dp(18));
-            openParenBtn.setMinimumWidth(dp(30));
+            Button openParenBtn = makeMaterialButton("(", Color.TRANSPARENT, colOnSurface, 8, 14f, 1.2f);
+            openParenBtn.setPadding(dp(12), dp(2), dp(12), dp(2));
             openParenBtn.setOnClickListener(v -> {
                 v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
                 handleKeyPress("(");
@@ -1419,12 +1395,12 @@ private static class FilledBackspaceDrawable extends Drawable {
             angleBar.addView(openParenBtn);
 
             View s1 = new View(this);
-            angleBar.addView(s1, new LinearLayout.LayoutParams(dp(8), dp(1)));
+            angleBar.addView(s1, new LinearLayout.LayoutParams(dp(10), dp(1)));
 
             LinearLayout segPill = new LinearLayout(this);
             segPill.setOrientation(LinearLayout.HORIZONTAL);
             segPill.setBackground(roundedRect(colSurfaceHigh, 8));
-            segPill.setPadding(dp(1), dp(1), dp(1), dp(1));
+            segPill.setPadding(dp(1.5f), dp(1.5f), dp(1.5f), dp(1.5f));
 
             boolean isRad = engine.isRadiansMode();
 
@@ -1432,15 +1408,13 @@ private static class FilledBackspaceDrawable extends Drawable {
                     "RAD",
                     isRad ? colPrimary : Color.TRANSPARENT,
                     isRad ? colOnPrimary : colOnSurfaceVariant,
-                    7,
-                    8.5f,
+                    6,
+                    9.5f,
                     1.1f,
                     isRad
             );
-            radBtn.setPadding(dp(6), 0, dp(6), 0);
-            radBtn.setMinimumHeight(dp(17));
-            radBtn.setMinimumWidth(dp(30));
             radBtn.setIncludeFontPadding(false);
+            radBtn.setPadding(dp(10), dp(2), dp(10), dp(2));
             radBtn.setOnClickListener(v -> {
                 v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
                 if (!engine.isRadiansMode()) {
@@ -1456,15 +1430,13 @@ private static class FilledBackspaceDrawable extends Drawable {
                     "DEG",
                     !isRad ? colPrimary : Color.TRANSPARENT,
                     !isRad ? colOnPrimary : colOnSurfaceVariant,
-                    7,
-                    8.5f,
+                    6,
+                    9.5f,
                     1.1f,
                     !isRad
             );
-            degBtn.setPadding(dp(6), 0, dp(6), 0);
-            degBtn.setMinimumHeight(dp(17));
-            degBtn.setMinimumWidth(dp(30));
             degBtn.setIncludeFontPadding(false);
+            degBtn.setPadding(dp(10), dp(2), dp(10), dp(2));
             degBtn.setOnClickListener(v -> {
                 v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
                 if (engine.isRadiansMode()) {
@@ -1478,12 +1450,10 @@ private static class FilledBackspaceDrawable extends Drawable {
             angleBar.addView(segPill);
 
             View s2 = new View(this);
-            angleBar.addView(s2, new LinearLayout.LayoutParams(dp(8), dp(1)));
+            angleBar.addView(s2, new LinearLayout.LayoutParams(dp(10), dp(1)));
 
-            Button closeParenBtn = makeMaterialButton(")", Color.TRANSPARENT, colOnSurface, 8, 13f, 1.2f);
-            closeParenBtn.setPadding(dp(8), 0, dp(8), 0);
-            closeParenBtn.setMinimumHeight(dp(18));
-            closeParenBtn.setMinimumWidth(dp(30));
+            Button closeParenBtn = makeMaterialButton(")", Color.TRANSPARENT, colOnSurface, 8, 14f, 1.2f);
+            closeParenBtn.setPadding(dp(12), dp(2), dp(12), dp(2));
             closeParenBtn.setOnClickListener(v -> {
                 v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
                 handleKeyPress(")");
@@ -1531,6 +1501,7 @@ private static class FilledBackspaceDrawable extends Drawable {
     }
 
     private static final String[] MULTI_CHAR_TOKENS = {
+            " ÷ ", " × ", " + ", " − ", ", ",
             " := ", ":= ",
             "nthroot(3,", "nthroot(", "log(10,", "10^(",
             "transpose(", "binomial(",
@@ -1556,6 +1527,56 @@ private static class FilledBackspaceDrawable extends Drawable {
             }
         }
         return input.substring(0, input.length() - 1);
+    }
+
+    private void handleOperatorPress(String op) {
+        if (inputDisplayView == null) return;
+        int start = Math.max(0, inputDisplayView.getSelectionStart());
+        int end = Math.max(0, inputDisplayView.getSelectionEnd());
+        if (start > end) { int tmp = start; start = end; end = tmp; }
+        Editable editable = inputDisplayView.getText();
+        if (editable == null) return;
+
+        if (start != end) {
+            insertAtCursor(" " + op + " ");
+            return;
+        }
+
+        String cur = editable.toString();
+        String before = cur.substring(0, start);
+
+        // If input is empty and op is minus, insert unary minus
+        if (before.trim().isEmpty() && op.equals("−")) {
+            insertAtCursor("−");
+            return;
+        }
+
+        // If preceding text ends with an operator: " + ", " − ", " × ", " ÷ ", "+", "-", "*", "/"
+        String trimmedBefore = before.replaceAll("\\s+$", "");
+        if (trimmedBefore.endsWith("+") || trimmedBefore.endsWith("−") || trimmedBefore.endsWith("-")
+                || trimmedBefore.endsWith("×") || trimmedBefore.endsWith("*")
+                || trimmedBefore.endsWith("÷") || trimmedBefore.endsWith("/")) {
+            // Unary minus after an operator (e.g. 5 × −3)
+            if (op.equals("−") && !trimmedBefore.endsWith("−") && !trimmedBefore.endsWith("-")) {
+                insertAtCursor("−");
+                return;
+            }
+            int opStart = trimmedBefore.length() - 1;
+            while (opStart > 0 && cur.charAt(opStart - 1) == ' ') opStart--;
+            isSyncingInput = true;
+            try {
+                editable.replace(opStart, start, " " + op + " ");
+                inputDisplayView.setSelection(opStart + op.length() + 2);
+            } finally {
+                isSyncingInput = false;
+            }
+            currentInput = editable.toString();
+            saveState();
+            updatePreviewOnly();
+            return;
+        }
+
+        insertAtCursor(" " + op + " ");
     }
 
     private void showMatrixDialog() {
@@ -1647,6 +1668,14 @@ private static class FilledBackspaceDrawable extends Drawable {
             }
         } else if (key.equals("DEL")) {
             deleteAtCursor();
+        } else if (key.equals("÷") || key.equals("×") || key.equals("+") || key.equals("−")) {
+            handleOperatorPress(key);
+        } else if (key.equals("/")) {
+            handleOperatorPress("÷");
+        } else if (key.equals("*")) {
+            handleOperatorPress("×");
+        } else if (key.equals("-")) {
+            handleOperatorPress("−");
         } else if (key.equals(":=")) {
             int start = Math.max(0, inputDisplayView != null ? inputDisplayView.getSelectionStart() : 0);
             String cur = currentInput != null ? currentInput : "";
@@ -2159,6 +2188,26 @@ private static class FilledBackspaceDrawable extends Drawable {
             }
             grid.addView(row);
         }
+        // Optional quick keyboard shortcut button inside the variables category
+        LinearLayout kbRow = new LinearLayout(this);
+        kbRow.setOrientation(LinearLayout.HORIZONTAL);
+        kbRow.setGravity(Gravity.CENTER);
+        kbRow.setPadding(0, dp(6), 0, dp(4));
+
+        Button toggleKbBtn = makeMaterialButton(
+                showMoreVariables ? "Tastatur: Standard-Belegung wiederherstellen" : "Tastatur: Variablen a..z dauerhaft einblenden",
+                Color.TRANSPARENT, colPrimary, 16, 11.5f, 1.3f, true);
+        toggleKbBtn.setBackground(outlinedPill(colPrimary, dp(1.2f), 16));
+        toggleKbBtn.setPadding(dp(14), dp(4), dp(14), dp(4));
+        toggleKbBtn.setOnClickListener(v -> {
+            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+            showMoreVariables = !showMoreVariables;
+            saveState();
+            rebuildScreen();
+        });
+        kbRow.addView(toggleKbBtn);
+        grid.addView(kbRow);
+
         return grid;
     }
 
@@ -2268,28 +2317,7 @@ private static class FilledBackspaceDrawable extends Drawable {
         list.setOrientation(LinearLayout.VERTICAL);
         list.setPadding(dp(12), dp(10), dp(12), dp(16));
 
-        // Top Action Pill: zur Tastatur hinzufügen
-        LinearLayout topActions = new LinearLayout(this);
-        topActions.setOrientation(LinearLayout.HORIZONTAL);
-        topActions.setGravity(Gravity.CENTER);
-        topActions.setPadding(dp(4), dp(2), dp(4), dp(8));
-
-        Button addKbBtn = makeMaterialButton(
-                showMoreVariables ? "Erweiterte Variablen ausblenden" : "zur Tastatur hinzufügen",
-                Color.TRANSPARENT, colPrimary, 16, 12f, 1.3f, true);
-        addKbBtn.setBackground(outlinedPill(colPrimary, dp(1.2f), 16));
-        addKbBtn.setPadding(dp(16), dp(3), dp(16), dp(3));
-        addKbBtn.setOnClickListener(v -> {
-            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-            showMoreVariables = !showMoreVariables;
-            activeTab = 0;
-            saveState();
-            rebuildScreen();
-        });
-        topActions.addView(addKbBtn);
-        list.addView(topActions);
-
-        // Accordion Category Cards
+        // Accordion Category Cards (No top pills, clean direct view)
         CategoryDef[] cats = getConstantCategories();
         for (int cIdx = 0; cIdx < cats.length; cIdx++) {
             final int catIndex = cIdx;
@@ -2621,6 +2649,10 @@ private static class FilledBackspaceDrawable extends Drawable {
 
     private Button makeMaterialButton(String text, int bg, int fg, int cornerDp, float spSize, float maxScale, boolean bold) {
         Button b = new Button(this);
+        b.setMinHeight(0);
+        b.setMinWidth(0);
+        b.setMinimumHeight(0);
+        b.setMinimumWidth(0);
         b.setAllCaps(false);
         b.setText(text);
         b.setTextColor(fg);
