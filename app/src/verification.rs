@@ -1,6 +1,6 @@
 //! Automated Behavioral & Decompiled Bytecode Verification Suite
 //! Compares the rebuild's behavior against the decompiled bytecode of
-//! Jade Scientific Calculator 1.1 (`Lc/a/a/e/d;`, `Lc/a/a/e/h;`, `VariableMoreActivity`, `Lc/a/a/a;`).
+//! Niob Scientific Calculator (`Lc/a/a/e/d;`, `Lc/a/a/e/h;`, `VariableMoreActivity`, `Lc/a/a/a;`).
 
 use crate::constants::{
     AVOGADRO_CONST, BOLTZMANN_CONST, ELECTRON_CHARGE, FARADAY_CONST, GRAVITATIONAL_ACCELERATION,

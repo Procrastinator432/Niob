@@ -1,4 +1,4 @@
-package com.jadecalculator.materialyou;
+package com.niobcalculator.materialyou;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -336,7 +336,7 @@ public final class CalculatorRegressionTest {
             long caseStart = System.nanoTime();
             Element result = document.createElement("testcase");
             result.setAttribute("name", entry.getKey());
-            result.setAttribute("classname", "com.jadecalculator.materialyou.CalculatorEngine");
+            result.setAttribute("classname", "com.niobcalculator.materialyou.CalculatorEngine");
             suite.appendChild(result);
             try {
                 entry.getValue().run();

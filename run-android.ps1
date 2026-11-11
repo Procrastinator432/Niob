@@ -74,9 +74,6 @@ $buildScript = "$projectDir\app\android\build-apk.ps1"
 
 $apkPath = "$projectDir\app\Niob-Android12-MaterialYou.apk"
 if (-not (Test-Path $apkPath)) {
-    $apkPath = "$projectDir\app\JadeScientificCalculator-Android12-MaterialYou.apk"
-}
-if (-not (Test-Path $apkPath)) {
     Write-Error "APK nicht gefunden: $apkPath"
 }
 
@@ -89,7 +86,7 @@ Write-Host $installRaw.Trim()
 
 if ($installRaw -match "INSTALL_FAILED_UPDATE_INCOMPATIBLE") {
     Write-Host "Signaturkonflikt mit Vorversion erkannt -> Saubere Neuinstallation..." -ForegroundColor Yellow
-    & $adb -s $firstDevice uninstall com.jadecalculator.materialyou *>&1 | Out-Null
+    & $adb -s $firstDevice uninstall com.niobcalculator.materialyou *>&1 | Out-Null
     $installRaw = & $adb -s $firstDevice install -r $apkPath *>&1 | Out-String
     Write-Host $installRaw.Trim()
 }
@@ -97,7 +94,7 @@ if ($installRaw -match "INSTALL_FAILED_UPDATE_INCOMPATIBLE") {
 $ErrorActionPreference = $prevEAP
 
 Write-Host "`n=== [4/4] App starten ===" -ForegroundColor Cyan
-& $adb -s $firstDevice shell am force-stop com.jadecalculator.materialyou
-& $adb -s $firstDevice shell am start -n com.jadecalculator.materialyou/.MainActivity | Out-Null
+& $adb -s $firstDevice shell am force-stop com.niobcalculator.materialyou
+& $adb -s $firstDevice shell am start -n com.niobcalculator.materialyou/.MainActivity | Out-Null
 
 Write-Host "`n=== ERFOLG: Niob Calculator laeuft auf Ihrem Smartphone! ===`n" -ForegroundColor Green

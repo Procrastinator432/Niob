@@ -181,7 +181,7 @@ impl UnitCategory {
     }
 }
 
-struct JadeCalculatorApp {
+struct NiobCalculatorApp {
     // Core engine & state
     engine: MathEngine,
     input_expr: String,
@@ -224,7 +224,7 @@ struct JadeCalculatorApp {
     screenshot_requested: bool,
 }
 
-impl JadeCalculatorApp {
+impl NiobCalculatorApp {
     fn new(screenshot_path: Option<PathBuf>) -> Self {
         let mut engine = MathEngine::default();
         let mut history = Vec::new();
@@ -265,7 +265,7 @@ impl JadeCalculatorApp {
             keyboard_scale: 1.0,
             german_ui: true,
             theme_mode: ThemeMode::Dark,
-            accent_seed: AccentSeed::JadeEmerald,
+            accent_seed: AccentSeed::NiobEmerald,
             keyboard_slots,
             selected_slot_to_assign: 0,
             constants_search: String::new(),
@@ -495,7 +495,7 @@ impl JadeCalculatorApp {
 
                 // Material You Seed Color quick dots
                 for seed in [
-                    AccentSeed::JadeEmerald,
+                    AccentSeed::NiobEmerald,
                     AccentSeed::DynamicViolet,
                     AccentSeed::OceanBlue,
                     AccentSeed::SunsetOrange,
@@ -2178,7 +2178,7 @@ impl JadeCalculatorApp {
 
                 ui.add_space(10.0);
 
-                // 2. Material You & Jade Preferences (`res/xml/root_preferences.xml`)
+                // 2. Material You & Niob Preferences (`res/xml/root_preferences.xml`)
                 Frame::new()
                     .fill(pal.surface_container)
                     .corner_radius(CornerRadius::same(16))
@@ -2419,7 +2419,7 @@ fn convert_temperature(v: f64, from: usize, to: usize) -> f64 {
     }
 }
 
-impl eframe::App for JadeCalculatorApp {
+impl eframe::App for NiobCalculatorApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let pal = MaterialYouPalette::generate(self.theme_mode, self.accent_seed);
@@ -2496,6 +2496,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Niob",
         options,
-        Box::new(move |_cc| Ok(Box::new(JadeCalculatorApp::new(screenshot_path)))),
+        Box::new(move |_cc| Ok(Box::new(NiobCalculatorApp::new(screenshot_path)))),
     )
 }

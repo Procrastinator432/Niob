@@ -12,7 +12,7 @@
 
 Numerische Vergleiche verwenden `absolute_tolerance + relative_tolerance * abs(expected)`. Bei erwarteter Null schützt eine absolute Toleranz gegen Rundungsrauschen. Bei sehr kleinen, von null verschiedenen Größen ist die absolute Toleranz null. Nicht endliche Werte werden immer abgelehnt.
 
-Die Fallliste stammt aus dem lokalen Vergleich mit `Jade+Scientific+Calculator_1.1_APKPure.apk`, SHA-256 `04ad4f142defa7cc70b011ffc79f43ebf6dd46ca2d52d90a24f690d68bb6e4d3`. Originalausgaben stehen im historischen `checks/audit-2026-11-09/original-results.tsv`; Bytecode-/Ressourcenbefunde in den benachbarten Prüfdateien. Die Tests lesen diese Dateien nicht zur Laufzeit. Es besteht keine Abhängigkeit vom Downloads-Ordner oder einer fremden Installation.
+Die Fallliste stammt aus dem lokalen Vergleich mit der ursprünglichen Referenz-APK, SHA-256 `04ad4f142defa7cc70b011ffc79f43ebf6dd46ca2d52d90a24f690d68bb6e4d3`. Originalausgaben stehen im historischen `checks/audit-2026-11-09/original-results.tsv`; Bytecode-/Ressourcenbefunde in den benachbarten Prüfdateien. Die Tests lesen diese Dateien nicht zur Laufzeit. Es besteht keine Abhängigkeit vom Downloads-Ordner oder einer fremden Installation.
 
 Die Sollwerte wurden fachlich festgelegt: beispielsweise exakte Ganzzahl-/Bruchrechnung, bekannte Werte der Hyperbelfunktionen, Ableitung `cos(1000000)` und Integral `cos(800*pi*x)` über [0,1] = 0. Die auf sechs Stellen begrenzte Dezimalausgabe der Originalbibliothek wird nicht als Genauigkeitsgrenze des reparierten Rechners übernommen.
 

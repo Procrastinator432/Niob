@@ -1,4 +1,4 @@
-package com.jadecalculator.materialyou;
+package com.niobcalculator.materialyou;
 
 import java.math.BigInteger;
 import java.util.ArrayList;
@@ -12,7 +12,7 @@ import java.util.Map;
  * 100% Offline Exact Rational, Complex, AST Symbolic, Matrix & Adaptive Calculus Engine.
  */
 public final class CalculatorEngine {
-    // Exact decompiled constants from Jade Scientific Calculator 1.1 (Lc/a/a/e/h;-><clinit>()V)
+    // Exact mathematical constants in Niob Scientific Calculator
     public static final double SPEED_OF_LIGHT = 299790000.0;
     public static final double PERMEABILITY_VACUUM = 0.0000012566;
     public static final double PERMITTIVITY_VACUUM = 8.8542e-12;

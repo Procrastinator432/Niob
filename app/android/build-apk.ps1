@@ -47,12 +47,7 @@ if (-not (Test-Path $keystore)) {
     $ErrorActionPreference = "Stop"
 }
 $finalApk = "$appDir\Niob-Android12-MaterialYou.apk"
-$legacyApk = "$appDir\JadeScientificCalculator-Android12-MaterialYou.apk"
 & "$buildTools\apksigner.bat" sign --ks $keystore --ks-pass pass:android --key-pass pass:android --out $finalApk $alignedApk
-Copy-Item -Path $finalApk -Destination $legacyApk -Force
-if (Test-Path "$finalApk.idsig") {
-    Copy-Item -Path "$finalApk.idsig" -Destination "$legacyApk.idsig" -Force
-}
 
 Remove-Item -Recurse -Force $buildDir
-Write-Host "SUCCESS: Built signed Android 12 APK at $finalApk (and $legacyApk)"
+Write-Host "SUCCESS: Built signed Android 12 APK at $finalApk"

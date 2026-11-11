@@ -99,14 +99,14 @@ if ($Target -eq 'All' -or $Target -eq 'Android') {
         New-Item -ItemType Directory -Path $classes -Force | Out-Null
         $compile = Invoke-TestProcess $javac @(
             '--release', '8', '-encoding', 'UTF-8', '-Xlint:-options', '-d', $classes,
-            (Join-Path $projectDir 'app\android\src\com\jadecalculator\materialyou\CalculatorEngine.java'),
-            (Join-Path $projectDir 'app\android\tests\com\jadecalculator\materialyou\CalculatorRegressionTest.java')
+            (Join-Path $projectDir 'app\android\src\com\niobcalculator\materialyou\CalculatorEngine.java'),
+            (Join-Path $projectDir 'app\android\tests\com\niobcalculator\materialyou\CalculatorRegressionTest.java')
         ) 'android-compile.log'
         if ($compile.ExitCode -ne 0) { throw 'Android test compilation failed; see android-compile.log.' }
         $xmlPath = Join-Path $runDir 'android-junit.xml'
         $result = Invoke-TestProcess $java @(
             '-Dfile.encoding=UTF-8', '-Dstdout.encoding=UTF-8', '-cp', $classes,
-            'com.jadecalculator.materialyou.CalculatorRegressionTest',
+            'com.niobcalculator.materialyou.CalculatorRegressionTest',
             (Join-Path $projectDir 'app\tests\data\regressions.tsv'), $Filter, $xmlPath
         ) 'android.log'
         $passed = 0

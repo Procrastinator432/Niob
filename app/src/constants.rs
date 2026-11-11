@@ -1,5 +1,5 @@
 //! Physical, Electromagnetic, Chemical, and Mathematical Constants & UI Layout Metrics
-//! extracted from Jade Scientific Calculator 1.1 (`Lc/a/a/e/h;-><clinit>()V`,
+//! extracted for Niob Scientific Calculator (`Lc/a/a/e/h;-><clinit>()V`,
 //! `VariableMoreActivity.<init>()V`, and `res/layout/*.xml`).
 
 // --- Exact Mechanics Sheet Constants (`app/mechanics.json`) ---

@@ -1,5 +1,5 @@
 //! 100% Offline Symbolic, Rational, Complex, Matrix & Calculus Evaluation Engine
-//! Implements the mathematical capabilities of Jade Scientific Calculator 1.1
+//! Implements the mathematical capabilities of Niob Scientific Calculator
 //! (`Lc/a/a/e/d;`, `Lc/a/a/e/e;`, `Lc/a/a/e/f;`, `Lc/a/a/e/g;`, `Lc/a/a/e/h;`).
 
 use std::cell::RefCell;

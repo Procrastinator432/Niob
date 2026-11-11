@@ -1,4 +1,4 @@
-package com.jadecalculator.materialyou;
+package com.niobcalculator.materialyou;
 
 import android.app.Activity;
 import android.content.Context;
@@ -113,7 +113,7 @@ public class MainActivity extends Activity {
         resolveAndroid12DynamicColors();
 
         // Load saved state (Preferences & History & Calculations & UI Drafts)
-        android.content.SharedPreferences prefs = getSharedPreferences("jade_calculator", MODE_PRIVATE);
+        android.content.SharedPreferences prefs = getSharedPreferences("niob_calculator", MODE_PRIVATE);
         showExactFirst = prefs.getBoolean("show_exact_first", true);
         showMoreVariables = prefs.getBoolean("show_more_variables", false);
         engine.setRadiansMode(prefs.getBoolean("radians_mode", true));
@@ -170,7 +170,7 @@ public class MainActivity extends Activity {
     }
 
     private void saveState() {
-        android.content.SharedPreferences.Editor ed = getSharedPreferences("jade_calculator", MODE_PRIVATE).edit();
+        android.content.SharedPreferences.Editor ed = getSharedPreferences("niob_calculator", MODE_PRIVATE).edit();
         ed.putBoolean("show_exact_first", showExactFirst);
         ed.putBoolean("show_more_variables", showMoreVariables);
         ed.putBoolean("radians_mode", engine.isRadiansMode());

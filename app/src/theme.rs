@@ -1,5 +1,5 @@
 //! Material You (Material 3) Dynamic Tonal Palette & Theme Engine
-//! Combines Jade Scientific Calculator 1.1 color modes (`light`, `dark`, `amoled`)
+//! Combines Niob Scientific Calculator color modes (`light`, `dark`, `amoled`)
 //! and accent colors (`res/values/colors.xml`) with modern Android Material You surfaces.
 
 use egui::{Color32, CornerRadius, Stroke, Style, Visuals};
@@ -31,7 +31,7 @@ impl ThemeMode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccentSeed {
-    JadeEmerald,
+    NiobEmerald,
     DynamicViolet,
     OceanBlue,
     SunsetOrange,
@@ -43,7 +43,7 @@ pub enum AccentSeed {
 
 impl AccentSeed {
     pub const ALL: [AccentSeed; 8] = [
-        Self::JadeEmerald,
+        Self::NiobEmerald,
         Self::DynamicViolet,
         Self::OceanBlue,
         Self::SunsetOrange,
@@ -55,7 +55,7 @@ impl AccentSeed {
 
     pub fn name_de(self) -> &'static str {
         match self {
-            Self::JadeEmerald => "Jade Smaragd",
+            Self::NiobEmerald => "Niob Smaragd",
             Self::DynamicViolet => "Material Violett",
             Self::OceanBlue => "Ozeanblau",
             Self::SunsetOrange => "Bernstein-Orange",
@@ -68,7 +68,7 @@ impl AccentSeed {
 
     pub fn seed_color(self) -> Color32 {
         match self {
-            Self::JadeEmerald => Color32::from_rgb(0x3D, 0xDC, 0x84),   // accent_light_green #FF3DDC84
+            Self::NiobEmerald => Color32::from_rgb(0x3D, 0xDC, 0x84),   // accent_light_green #FF3DDC84
             Self::DynamicViolet => Color32::from_rgb(0x7C, 0x4D, 0xFF), // Material You Violet
             Self::OceanBlue => Color32::from_rgb(0x19, 0x72, 0xE7),     // accent_blue #FF1972E7
             Self::SunsetOrange => Color32::from_rgb(0xF5, 0x7C, 0x00),  // accent_orange #FFF57C00

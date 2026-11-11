@@ -77,9 +77,9 @@ Aktueller Stand der Regressionstests: **Rust 87/87 und Android 89/89 bestanden, 
 
 ## Wo die Fixes hingehören
 
-- Android: `app/android/src/com/jadecalculator/materialyou/CalculatorEngine.java`. Die Activity und die JVM-Tests verwenden direkt diese Klasse. Der vorhandene APK-Build sammelt sie automatisch zusammen mit den übrigen Produktionsquellen ein. Es wird kein Rechenkern aus Quelltextausschnitten nachgebaut.
+- Android: `app/android/src/com/niobcalculator/materialyou/CalculatorEngine.java`. Die Activity und die JVM-Tests verwenden direkt diese Klasse. Der vorhandene APK-Build sammelt sie automatisch zusammen mit den übrigen Produktionsquellen ein. Es wird kein Rechenkern aus Quelltextausschnitten nachgebaut.
 - Rust: `app/src/engine.rs`, gegebenenfalls `app/src/constants.rs`. `app/tests/regressions.rs` bindet die tatsächlichen Produktionsmodule ein und wird von `cargo test` automatisch gefunden.
-- Android-Testadapter: `app/android/tests/com/jadecalculator/materialyou/CalculatorRegressionTest.java`. Testquellen liegen außerhalb von `android/src` und gelangen nicht in die APK.
+- Android-Testadapter: `app/android/tests/com/niobcalculator/materialyou/CalculatorRegressionTest.java`. Testquellen liegen außerhalb von `android/src` und gelangen nicht in die APK.
 - Gemeinsame Sollwerte und Syntax-Aliase: `app/tests/data/regressions.tsv`.
 
 Für einen neuen Fall eine Zeile in der Tabelle ergänzen und den Namen im Rust-`cases!`-Aufruf aufnehmen. Die Rust-Vollständigkeitsprüfung vergleicht Fallnamen und Anzahl automatisch mit dem Fixture; Java liest alle Zeilen ein und lehnt ein leeres Fixture oder doppelte Namen ab. Zusätzliche zulässige exakte Schreibweisen werden in der Sollwertspalte mit `|` getrennt. Sollwerte nur ändern, wenn sich die fachliche Anforderung ändert.
