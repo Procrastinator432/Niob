@@ -42,6 +42,7 @@ import android.widget.LinearLayout;
 import android.widget.PopupMenu;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -98,13 +99,15 @@ public class MainActivity extends Activity {
 
     private final List<HistoryEntry> history = new ArrayList<>();
     private LinearLayout rootContainer;
-    private TextView inputDisplayView;
+    private EditText inputDisplayView;
     private TextView previewDisplayView;
+    private Button angleBadgeView;
     private View cursorView;
     private ScrollView historyScrollView;
     private LinearLayout historyListContainer;
     private FrameLayout keyboardBodyContainer;
     private LinearLayout sectionHeaderRow;
+    private boolean isSyncingInput = false;
     private String plotExpr1 = "sin(x) * cos(x/2)";
     private String plotExpr2 = "x^2 / 4 - 2";
 
@@ -653,6 +656,13 @@ private static class FilledBackspaceDrawable extends Drawable {
                     v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
                     handleKeyPress(tok);
                 });
+                if (text.equals(",")) {
+                    b.setOnLongClickListener(v -> {
+                        v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+                        handleKeyPress(", ");
+                        return true;
+                    });
+                }
 
                 LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
                 blp.setMargins(dp(2), dp(2), dp(2), dp(2));
@@ -744,25 +754,55 @@ private static class FilledBackspaceDrawable extends Drawable {
         inputRow.setOrientation(LinearLayout.HORIZONTAL);
         inputRow.setGravity(Gravity.CENTER_VERTICAL);
 
-        LinearLayout inputWrap = new LinearLayout(this);
-        inputWrap.setOrientation(LinearLayout.HORIZONTAL);
-        inputWrap.setGravity(Gravity.CENTER_VERTICAL);
+        EditText inputEt = new EditText(this);
+        inputDisplayView = inputEt;
+        inputEt.setBackground(null);
+        inputEt.setPadding(0, 0, dp(6), 0);
+        setScaledTextSize(inputEt, isLandscape ? 19f : 24f, 2.0f);
+        inputEt.setTextColor(colOnSurface);
+        inputEt.setTypeface(Typeface.DEFAULT_BOLD);
+        inputEt.setShowSoftInputOnFocus(false);
+        inputEt.setTextIsSelectable(true);
+        inputEt.setCursorVisible(true);
+        inputEt.setSingleLine(true);
+        inputEt.setHorizontallyScrolling(true);
+        inputEt.setContentDescription("input_expression");
+        inputEt.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
+            @Override public void afterTextChanged(Editable s) {
+                if (isSyncingInput) return;
+                currentInput = s.toString();
+                saveState();
+                updatePreviewOnly();
+            }
+        });
+        inputRow.addView(inputEt, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        inputDisplayView = new TextView(this);
-        setScaledTextSize(inputDisplayView, isLandscape ? 19f : 24f, 2.0f);
-        inputDisplayView.setTextColor(colOnSurface);
-        inputDisplayView.setTypeface(Typeface.DEFAULT_BOLD);
-        inputDisplayView.setTextIsSelectable(true);
-        inputDisplayView.setContentDescription("input_expression");
-        inputWrap.addView(inputDisplayView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        cursorView = new View(this);
-        cursorView.setBackground(roundedRect(colPrimary, 2));
-        LinearLayout.LayoutParams cursorLp = new LinearLayout.LayoutParams(dp(2.5f), dp(24));
-        cursorLp.leftMargin = dp(2);
-        inputWrap.addView(cursorView, cursorLp);
-
-        inputRow.addView(inputWrap, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        // Persistent RAD/DEG Indicator Badge in the input bar
+        Button angleBadge = makeMaterialButton(
+                engine.isRadiansMode() ? "RAD" : "DEG",
+                colSurfaceHigh,
+                colPrimary,
+                8,
+                8.5f,
+                1.1f
+        );
+        angleBadgeView = angleBadge;
+        angleBadge.setSingleLine(true);
+        angleBadge.setIncludeFontPadding(false);
+        angleBadge.setPadding(dp(6), dp(1), dp(6), dp(1));
+        angleBadge.setMinimumHeight(dp(19));
+        angleBadge.setMinimumWidth(dp(32));
+        angleBadge.setOnClickListener(v -> {
+            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+            engine.setRadiansMode(!engine.isRadiansMode());
+            angleBadge.setText(engine.isRadiansMode() ? "RAD" : "DEG");
+            saveState();
+            updateInputAndPreview();
+            refreshKeyboardSection();
+        });
+        inputRow.addView(angleBadge);
         inputCard.addView(inputRow);
 
         previewDisplayView = new TextView(this);
@@ -974,10 +1014,30 @@ private static class FilledBackspaceDrawable extends Drawable {
         return sb.toString().replaceAll(" {2,}", " ").trim();
     }
 
+    private void insertHistoryValue(String rawVal) {
+        if (rawVal == null || rawVal.isEmpty()) return;
+        int start = 0;
+        String curText = "";
+        if (inputDisplayView != null) {
+            start = Math.max(0, inputDisplayView.getSelectionStart());
+            curText = inputDisplayView.getText() != null ? inputDisplayView.getText().toString() : "";
+        }
+        char prevChar = (start > 0 && start <= curText.length()) ? curText.charAt(start - 1) : ' ';
+        boolean precededByOp = (prevChar == '/' || prevChar == '*' || prevChar == '+' || prevChar == '-' || prevChar == '^' || prevChar == '÷' || prevChar == '×' || prevChar == '−');
+        boolean isComposite = rawVal.contains("/") || rawVal.contains("+") || rawVal.contains("-") || rawVal.contains(" ");
+        String toInsert = (precededByOp && isComposite) ? ("(" + rawVal + ")") : rawVal;
+        insertAtCursor(toInsert);
+    }
+
     private void refreshHistoryViews() {
+        refreshHistoryViews(true);
+    }
+
+    private void refreshHistoryViews(boolean scrollToBottom) {
         if (historyListContainer == null) return;
         historyListContainer.removeAllViews();
-        for (final HistoryEntry item : history) {
+        for (int i = 0; i < history.size(); i++) {
+            final HistoryEntry item = history.get(i);
             LinearLayout itemBox = new LinearLayout(this);
             itemBox.setOrientation(LinearLayout.VERTICAL);
             itemBox.setBackgroundColor(Color.TRANSPARENT);
@@ -989,9 +1049,7 @@ private static class FilledBackspaceDrawable extends Drawable {
                 String[] parts = item.expr.split("/");
                 View fracView = createFractionView(parts[0], parts[1]);
                 fracView.setOnClickListener(v -> {
-                    currentInput += item.expr;
-                    saveState();
-                    updateInputAndPreview();
+                    insertAtCursor(item.expr);
                 });
                 LinearLayout.LayoutParams fracLp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -1005,9 +1063,7 @@ private static class FilledBackspaceDrawable extends Drawable {
                 setScaledTextSize(exprTv, 18f, 2.0f);
                 exprTv.setTypeface(Typeface.DEFAULT_BOLD);
                 exprTv.setOnClickListener(v -> {
-                    currentInput += item.expr;
-                    saveState();
-                    updateInputAndPreview();
+                    insertAtCursor(item.expr);
                 });
                 LinearLayout.LayoutParams expLp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -1015,34 +1071,33 @@ private static class FilledBackspaceDrawable extends Drawable {
                 itemBox.addView(exprTv, expLp);
             }
 
-            // Row 2: Left-aligned pill badge "> exakt" + "=" + right-aligned result
+            // Row 2: Left-aligned pill badge "> dezi." / "> exakt" + "=" + right-aligned result
             LinearLayout resRow = new LinearLayout(this);
             resRow.setOrientation(LinearLayout.HORIZONTAL);
             resRow.setGravity(Gravity.CENTER_VERTICAL);
 
             Button exactBadge = makeMaterialButton(
-                    item.showingExact ? "> dezi." : "> exakt",
+                    item.showingExact ? "dezi." : "exakt",
+                    colSurfaceHigh,
                     colPrimary,
-                    colOnPrimary,
-                    14,
-                    12f,
-                    2.0f
+                    9,
+                    8.5f,
+                    1.1f,
+                    false
             );
             exactBadge.setSingleLine(true);
             exactBadge.setIncludeFontPadding(false);
-            exactBadge.setMinimumWidth(dp(86));
-            exactBadge.setMinimumHeight(dp(30));
-            exactBadge.setPadding(dp(6), dp(1), dp(6), dp(1));
-            setScaledTextSize(exactBadge, 11.5f, 2.0f);
-            exactBadge.setAutoSizeTextTypeUniformWithConfiguration(8, Math.round(11.5f * 2.0f), 1, TypedValue.COMPLEX_UNIT_DIP);
+            exactBadge.setMinimumWidth(dp(46));
+            exactBadge.setMinimumHeight(dp(19));
+            exactBadge.setPadding(dp(6), 0, dp(6), 0);
             exactBadge.setOnClickListener(v -> {
                 v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
                 item.showingExact = !item.showingExact;
                 saveState();
-                refreshHistoryViews();
+                refreshHistoryViews(false);
             });
             resRow.addView(exactBadge, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                    ViewGroup.LayoutParams.WRAP_CONTENT, dp(19)));
 
             TextView eqTv = new TextView(this);
             eqTv.setText("  =  ");
@@ -1062,9 +1117,7 @@ private static class FilledBackspaceDrawable extends Drawable {
                 String[] fracParts = cleanFrac.split("/");
                 View fracResultView = createFractionView(fracParts[0].trim(), fracParts[1].trim(), 20f);
                 fracResultView.setOnClickListener(v -> {
-                    currentInput += rawShown;
-                    saveState();
-                    updateInputAndPreview();
+                    insertHistoryValue(item.exactText);
                 });
                 LinearLayout.LayoutParams fracLp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -1079,9 +1132,7 @@ private static class FilledBackspaceDrawable extends Drawable {
                 setScaledTextSize(resTv, 23f, 2.0f);
                 resTv.setTypeface(Typeface.DEFAULT_BOLD);
                 resTv.setOnClickListener(v -> {
-                    currentInput += rawShown;
-                    saveState();
-                    updateInputAndPreview();
+                    insertHistoryValue(item.exactText);
                 });
                 resRow.addView(resTv, new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -1090,62 +1141,171 @@ private static class FilledBackspaceDrawable extends Drawable {
             itemBox.addView(resRow, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-            View itemDiv = new View(this);
-            itemDiv.setBackgroundColor(0x22FFFFFF);
-            LinearLayout.LayoutParams itemDivLp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(1));
-            itemDivLp.topMargin = dp(6);
-            itemBox.addView(itemDiv, itemDivLp);
-
             if (item.reportText != null && !item.reportText.isEmpty()) {
                 TextView repTv = new TextView(this);
                 repTv.setText(item.reportText);
                 repTv.setTextColor(colOnSurfaceVariant);
-                setScaledTextSize(repTv, 11.5f, 2.0f);
+                setScaledTextSize(repTv, 11f, 1.8f);
                 repTv.setPadding(0, dp(2), 0, 0);
                 itemBox.addView(repTv, new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             }
 
-            View divider = new View(this);
-            divider.setBackgroundColor(0x22FFFFFF);
-            LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(1));
-            divLp.topMargin = dp(8);
-            itemBox.addView(divider, divLp);
+            // Subtle divider only between items (never after the last item)
+            if (i < history.size() - 1) {
+                View divider = new View(this);
+                divider.setBackgroundColor(0x18FFFFFF);
+                LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, dp(0.8f));
+                divLp.topMargin = dp(6);
+                itemBox.addView(divider, divLp);
+            }
 
             LinearLayout.LayoutParams rLp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            rLp.bottomMargin = dp(10);
+            rLp.bottomMargin = dp(8);
             historyListContainer.addView(itemBox, rLp);
         }
-        if (historyScrollView != null) {
+        if (scrollToBottom && historyScrollView != null) {
             historyScrollView.post(() -> historyScrollView.fullScroll(View.FOCUS_DOWN));
         }
     }
 
-    private void updateInputAndPreview() {
-        if (inputDisplayView == null || previewDisplayView == null || cursorView == null) return;
-        if (currentInput.isEmpty()) {
-            inputDisplayView.setText("");
-            cursorView.setVisibility(View.VISIBLE);
+    private void insertAtCursor(String text) {
+        if (text == null || text.isEmpty()) return;
+        if (inputDisplayView != null) {
+            int start = Math.max(0, inputDisplayView.getSelectionStart());
+            int end = Math.max(0, inputDisplayView.getSelectionEnd());
+            if (start > end) { int tmp = start; start = end; end = tmp; }
+            Editable editable = inputDisplayView.getText();
+            if (editable != null) {
+                isSyncingInput = true;
+                try {
+                    editable.replace(start, end, text);
+                    inputDisplayView.setSelection(start + text.length());
+                } finally {
+                    isSyncingInput = false;
+                }
+                currentInput = inputDisplayView.getText().toString();
+            } else {
+                currentInput += text;
+            }
+        } else {
+            currentInput += text;
+        }
+        saveState();
+        updatePreviewOnly();
+    }
+
+    private void deleteAtCursor() {
+        if (inputDisplayView != null) {
+            int start = Math.max(0, inputDisplayView.getSelectionStart());
+            int end = Math.max(0, inputDisplayView.getSelectionEnd());
+            if (start > end) { int tmp = start; start = end; end = tmp; }
+            Editable editable = inputDisplayView.getText();
+            if (editable != null && editable.length() > 0) {
+                isSyncingInput = true;
+                try {
+                    if (start != end) {
+                        editable.delete(start, end);
+                        inputDisplayView.setSelection(start);
+                    } else if (start > 0) {
+                        String sub = editable.toString().substring(0, start);
+                        int delLen = 1;
+                        for (String tok : MULTI_CHAR_TOKENS) {
+                            if (sub.endsWith(tok)) {
+                                delLen = tok.length();
+                                break;
+                            }
+                        }
+                        editable.delete(start - delLen, start);
+                        inputDisplayView.setSelection(start - delLen);
+                    }
+                } finally {
+                    isSyncingInput = false;
+                }
+                currentInput = inputDisplayView.getText().toString();
+            }
+        } else {
+            currentInput = deleteLastToken(currentInput);
+        }
+        saveState();
+        updatePreviewOnly();
+    }
+
+    private void clearInput() {
+        if (inputDisplayView != null) {
+            isSyncingInput = true;
+            try {
+                inputDisplayView.setText("");
+            } finally {
+                isSyncingInput = false;
+            }
+        }
+        currentInput = "";
+        saveState();
+        updatePreviewOnly();
+    }
+
+    private void updatePreviewOnly() {
+        if (previewDisplayView == null) return;
+        if (angleBadgeView != null) {
+            angleBadgeView.setText(engine.isRadiansMode() ? "RAD" : "DEG");
+        }
+        String cur = currentInput != null ? currentInput.trim() : "";
+        if (cur.isEmpty()) {
             String ansStr = engine.formatAns(false);
             if (ansStr != null && !ansStr.isEmpty() && !ansStr.equals("0")) {
                 previewDisplayView.setText("ANS = " + ansStr);
             } else {
                 previewDisplayView.setText("ANS = 0");
             }
-        } else {
-            String math = prettifyMath(currentInput);
-            inputDisplayView.setText(math);
-            cursorView.setVisibility(View.VISIBLE);
-            try {
-                CalculatorEngine.Result result = engine.evaluate(currentInput);
-                previewDisplayView.setText("= " + result.decimalText);
-            } catch (Exception e) {
-                previewDisplayView.setText("");
+            previewDisplayView.setTextColor(colPrimary);
+            return;
+        }
+
+        try {
+            CalculatorEngine.Result result = engine.evaluate(currentInput);
+            String dec = formatDisplayNumber(result.decimalText);
+            if (result.exactText != null && !result.exactText.isEmpty() && !result.exactText.equals(result.decimalText)) {
+                previewDisplayView.setText("= " + dec + "  (" + result.exactText + ")");
+            } else {
+                previewDisplayView.setText("= " + dec);
+            }
+            previewDisplayView.setTextColor(colPrimary);
+        } catch (Exception e) {
+            String msg = e.getMessage() != null ? e.getMessage() : "";
+            if (msg.contains("Division durch Null") || msg.contains("Division by zero")) {
+                previewDisplayView.setText("⚠ Division durch Null");
+                previewDisplayView.setTextColor(0xFFFFB4AB);
+            } else {
+                boolean isIncomplete = cur.endsWith("+") || cur.endsWith("-") || cur.endsWith("*")
+                        || cur.endsWith("/") || cur.endsWith("÷") || cur.endsWith("×") || cur.endsWith("−")
+                        || cur.endsWith("^") || cur.endsWith("(") || cur.endsWith(",") || cur.endsWith(":=");
+                if (isIncomplete) {
+                    previewDisplayView.setText("");
+                } else {
+                    previewDisplayView.setText("⚠ Ungültiger Ausdruck");
+                    previewDisplayView.setTextColor(colOnSurfaceVariant);
+                }
             }
         }
+    }
+
+    private void updateInputAndPreview() {
+        if (inputDisplayView != null) {
+            String cur = currentInput != null ? currentInput : "";
+            if (!inputDisplayView.getText().toString().equals(cur)) {
+                isSyncingInput = true;
+                try {
+                    inputDisplayView.setText(cur);
+                    inputDisplayView.setSelection(cur.length());
+                } finally {
+                    isSyncingInput = false;
+                }
+            }
+        }
+        updatePreviewOnly();
     }
 
     private static final class KeyDef {
@@ -1207,8 +1367,8 @@ private static class FilledBackspaceDrawable extends Drawable {
                 // 0: ( ) √ ^
                 {
                         {k("("), k(")"), k("π", "pi"), k("e")},
-                        {k("x²", "^2"), k("xⁿ", "^("), k("√x", "sqrt("), k("ⁿ√x", "nthroot(3,")},
-                        {k("ln", "ln("), k("logₐ(x)", "log(10,"), k("10ⁿ", "10^("), k("ans", "ans")}
+                        {k("x²", "^2"), k("xⁿ", "^("), k("√x", "sqrt("), k("ⁿ√x", "nthroot(")},
+                        {k("ln", "ln("), k("logₐ(x)", "log("), k("10ⁿ", "10^("), k("ans", "ans")}
                 },
                 // 1: sin
                 {
@@ -1220,25 +1380,25 @@ private static class FilledBackspaceDrawable extends Drawable {
                 {
                         {k("∑", "sum("), k("∏", "prod("), k("(ⁿₖ)", "binomial("), k("n!", "!")},
                         {k("∫", "int("), k("d/dx", "deriv("), k("mod", "mod("), k("i")},
-                        {k("[ ⋮ ]", "[["), k("[ ⋮ ]⁻¹", "inv("), k("[ ⋮ ]ᵀ", "trans("), k("det", "det(")}
+                        {k("[ Matrix ]", "SHOW_MATRIX_DIALOG"), k(",", ", "), k(")", ")"), k("det", "det(")}
                 },
                 // 3: a b c
                 showMoreVariables ?
                 new KeyDef[][]{
                         {k("a"), k("b"), k("c"), k("m")},
                         {k("k"), k("l"), k("n"), k(":=")},
-                        {k("x"), k("y"), k("z"), k("mehr", "TOGGLE_VAR_MORE")}
+                        {k("x"), k("y"), k("z"), k("[a..z]", "TOGGLE_VAR_MORE")}
                 } :
                 new KeyDef[][]{
                         {k("%"), k("x"), k("y"), k("n")},
-                        {k("c₀", "c0"), k("G", "G0"), k("g"), k("h")},
-                        {k("e⁻", "e_charge"), k("μ₀", "mu0"), k("N_A"), k("mehr", "TOGGLE_VAR_MORE")}
+                        {k("c₀", "c0"), k("G", "G"), k("g"), k("h")},
+                        {k("e⁻", "e_charge"), k("μ₀", "mu0"), k("N_A"), k("[a..z]", "TOGGLE_VAR_MORE")}
                 },
                 // 4: mehr
                 {
                         {k("|x|", "abs("), k("⌊x⌋", "floor("), k("⌈x⌉", "ceil("), k("round", "round(")},
                         {k("gcd", "gcd("), k("lcm", "lcm("), k("sgn", "sign("), k("exp", "exp(")},
-                        {k(engine.isRadiansMode() ? "RAD" : "DEG", "TOGGLE_ANGLE"), k("Konstanten", "TAB_2"), k("Plotter", "TAB_1"), k("Einstellungen", "TAB_3")}
+                        {k(",", ", "), k(")", ")"), k("inv", "inv("), k("trans", "trans(")}
                 }
         };
 
@@ -1246,12 +1406,25 @@ private static class FilledBackspaceDrawable extends Drawable {
             LinearLayout angleBar = new LinearLayout(this);
             angleBar.setOrientation(LinearLayout.HORIZONTAL);
             angleBar.setGravity(Gravity.CENTER);
-            angleBar.setPadding(0, dp(1), 0, dp(4));
+            angleBar.setPadding(dp(4), 0, dp(4), dp(2));
+
+            Button openParenBtn = makeMaterialButton("(", Color.TRANSPARENT, colOnSurface, 8, 13f, 1.2f);
+            openParenBtn.setPadding(dp(8), 0, dp(8), 0);
+            openParenBtn.setMinimumHeight(dp(18));
+            openParenBtn.setMinimumWidth(dp(30));
+            openParenBtn.setOnClickListener(v -> {
+                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                handleKeyPress("(");
+            });
+            angleBar.addView(openParenBtn);
+
+            View s1 = new View(this);
+            angleBar.addView(s1, new LinearLayout.LayoutParams(dp(8), dp(1)));
 
             LinearLayout segPill = new LinearLayout(this);
             segPill.setOrientation(LinearLayout.HORIZONTAL);
-            segPill.setBackground(roundedRect(colSurfaceHigh, 13));
-            segPill.setPadding(dp(2), dp(2), dp(2), dp(2));
+            segPill.setBackground(roundedRect(colSurfaceHigh, 8));
+            segPill.setPadding(dp(1), dp(1), dp(1), dp(1));
 
             boolean isRad = engine.isRadiansMode();
 
@@ -1259,19 +1432,21 @@ private static class FilledBackspaceDrawable extends Drawable {
                     "RAD",
                     isRad ? colPrimary : Color.TRANSPARENT,
                     isRad ? colOnPrimary : colOnSurfaceVariant,
-                    11,
-                    11.5f,
-                    1.4f,
+                    7,
+                    8.5f,
+                    1.1f,
                     isRad
             );
-            radBtn.setPadding(dp(16), dp(2), dp(16), dp(2));
-            radBtn.setMinimumHeight(dp(24));
+            radBtn.setPadding(dp(6), 0, dp(6), 0);
+            radBtn.setMinimumHeight(dp(17));
+            radBtn.setMinimumWidth(dp(30));
             radBtn.setIncludeFontPadding(false);
             radBtn.setOnClickListener(v -> {
                 v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
                 if (!engine.isRadiansMode()) {
                     engine.setRadiansMode(true);
                     saveState();
+                    updateInputAndPreview();
                     refreshKeyboardSection();
                 }
             });
@@ -1281,25 +1456,40 @@ private static class FilledBackspaceDrawable extends Drawable {
                     "DEG",
                     !isRad ? colPrimary : Color.TRANSPARENT,
                     !isRad ? colOnPrimary : colOnSurfaceVariant,
-                    11,
-                    11.5f,
-                    1.4f,
+                    7,
+                    8.5f,
+                    1.1f,
                     !isRad
             );
-            degBtn.setPadding(dp(16), dp(2), dp(16), dp(2));
-            degBtn.setMinimumHeight(dp(24));
+            degBtn.setPadding(dp(6), 0, dp(6), 0);
+            degBtn.setMinimumHeight(dp(17));
+            degBtn.setMinimumWidth(dp(30));
             degBtn.setIncludeFontPadding(false);
             degBtn.setOnClickListener(v -> {
                 v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
                 if (engine.isRadiansMode()) {
                     engine.setRadiansMode(false);
                     saveState();
+                    updateInputAndPreview();
                     refreshKeyboardSection();
                 }
             });
             segPill.addView(degBtn);
-
             angleBar.addView(segPill);
+
+            View s2 = new View(this);
+            angleBar.addView(s2, new LinearLayout.LayoutParams(dp(8), dp(1)));
+
+            Button closeParenBtn = makeMaterialButton(")", Color.TRANSPARENT, colOnSurface, 8, 13f, 1.2f);
+            closeParenBtn.setPadding(dp(8), 0, dp(8), 0);
+            closeParenBtn.setMinimumHeight(dp(18));
+            closeParenBtn.setMinimumWidth(dp(30));
+            closeParenBtn.setOnClickListener(v -> {
+                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                handleKeyPress(")");
+            });
+            angleBar.addView(closeParenBtn);
+
             grid.addView(angleBar, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         }
@@ -1368,6 +1558,37 @@ private static class FilledBackspaceDrawable extends Drawable {
         return input.substring(0, input.length() - 1);
     }
 
+    private void showMatrixDialog() {
+        final String[] options = {
+                "2×2 Einheitsmatrix: [[1, 0], [0, 1]]",
+                "2×2 Matrix Vorlage: [[1, 2], [3, 4]]",
+                "3×3 Einheitsmatrix: [[1, 0, 0], [0, 1, 0], [0, 0, 1]]",
+                "Klammern [ ] einfügen",
+                "Zeilentrenner ], [ einfügen",
+                "Komma , einfügen",
+                "Inversion: inv(",
+                "Determinante: det(",
+                "Transponieren: trans("
+        };
+        new AlertDialog.Builder(this)
+                .setTitle("Matrix einfügen")
+                .setItems(options, (dialog, which) -> {
+                    switch (which) {
+                        case 0: insertAtCursor("[[1, 0], [0, 1]]"); break;
+                        case 1: insertAtCursor("[[1, 2], [3, 4]]"); break;
+                        case 2: insertAtCursor("[[1, 0, 0], [0, 1, 0], [0, 0, 1]]"); break;
+                        case 3: insertAtCursor("[]"); break;
+                        case 4: insertAtCursor("], ["); break;
+                        case 5: insertAtCursor(", "); break;
+                        case 6: insertAtCursor("inv("); break;
+                        case 7: insertAtCursor("det("); break;
+                        case 8: insertAtCursor("trans("); break;
+                    }
+                })
+                .setNegativeButton("Abbrechen", null)
+                .show();
+    }
+
     private void handleKeyPress(String key) {
         if (key.equals("TOGGLE_VAR_MORE")) {
             showMoreVariables = !showMoreVariables;
@@ -1378,7 +1599,12 @@ private static class FilledBackspaceDrawable extends Drawable {
         if (key.equals("TOGGLE_ANGLE")) {
             engine.setRadiansMode(!engine.isRadiansMode());
             saveState();
-            rebuildScreen();
+            updateInputAndPreview();
+            refreshKeyboardSection();
+            return;
+        }
+        if (key.equals("SHOW_MATRIX_DIALOG")) {
+            showMatrixDialog();
             return;
         }
         if (key.equals("TAB_1")) {
@@ -1397,48 +1623,45 @@ private static class FilledBackspaceDrawable extends Drawable {
             return;
         }
         if (key.equals("AC_ALL")) {
-            currentInput = "";
-            saveState();
-            updateInputAndPreview();
+            clearInput();
             return;
         }
 
         if (key.equals("=")) {
-            if (!currentInput.trim().isEmpty()) {
+            if (currentInput != null && !currentInput.trim().isEmpty()) {
                 try {
                     CalculatorEngine.Result result = engine.evaluateAndCommit(currentInput);
                     String dec = result.decimalText;
                     String ex = result.exactText;
                     String rep = getIntegrationReportText(currentInput);
                     history.add(new HistoryEntry(currentInput, ex, dec, rep, showExactFirst));
-                    currentInput = "";
-                    saveState();
-                    refreshHistoryViews();
+                    clearInput();
+                    refreshHistoryViews(true);
                 } catch (Exception e) {
-                    history.add(new HistoryEntry(currentInput, "Fehler", "Fehler", true));
-                    saveState();
-                    refreshHistoryViews();
+                    String msg = e.getMessage() != null ? e.getMessage() : "";
+                    String errDesc = msg.contains("Division") ? "Division durch 0" : "Fehler";
+                    history.add(new HistoryEntry(currentInput, errDesc, errDesc, true));
+                    clearInput();
+                    refreshHistoryViews(true);
                 }
             }
         } else if (key.equals("DEL")) {
-            currentInput = deleteLastToken(currentInput);
-            saveState();
+            deleteAtCursor();
         } else if (key.equals(":=")) {
-            if (!currentInput.isEmpty() && !currentInput.endsWith(" ")) {
-                currentInput += " := ";
+            int start = Math.max(0, inputDisplayView != null ? inputDisplayView.getSelectionStart() : 0);
+            String cur = currentInput != null ? currentInput : "";
+            if (start > 0 && cur.charAt(start - 1) != ' ') {
+                insertAtCursor(" := ");
             } else {
-                currentInput += ":= ";
+                insertAtCursor(":= ");
             }
-            saveState();
         } else if (key.startsWith("AC")) {
             history.clear();
             saveState();
-            refreshHistoryViews();
+            refreshHistoryViews(true);
         } else {
-            currentInput += key;
-            saveState();
+            insertAtCursor(key);
         }
-        updateInputAndPreview();
     }
 
     private void buildPlotterTab(FrameLayout parent) {
@@ -1477,14 +1700,58 @@ private static class FilledBackspaceDrawable extends Drawable {
         final Plotter2DView plotView = new Plotter2DView(this);
         f1Input.addTextChangedListener(new SimpleWatcher(s -> {
             plotExpr1 = s;
+            String t = s.trim();
+            if (!t.isEmpty()) {
+                try {
+                    double v = engine.evaluateForX(t, 1.0);
+                    if (Double.isNaN(v)) {
+                        f1Input.setError("Ungültiger Ausdruck");
+                    } else {
+                        f1Input.setError(null);
+                    }
+                } catch (Exception e) {
+                    f1Input.setError("Ungültiger Ausdruck");
+                }
+            } else {
+                f1Input.setError(null);
+            }
             plotView.invalidate();
             saveState();
         }));
         f2Input.addTextChangedListener(new SimpleWatcher(s -> {
             plotExpr2 = s;
+            String t = s.trim();
+            if (!t.isEmpty()) {
+                try {
+                    double v = engine.evaluateForX(t, 1.0);
+                    if (Double.isNaN(v)) {
+                        f2Input.setError("Ungültiger Ausdruck");
+                    } else {
+                        f2Input.setError(null);
+                    }
+                } catch (Exception e) {
+                    f2Input.setError("Ungültiger Ausdruck");
+                }
+            } else {
+                f2Input.setError(null);
+            }
             plotView.invalidate();
             saveState();
         }));
+
+        if (currentInput != null && !currentInput.trim().isEmpty()) {
+            Button importBtn = makeMaterialButton(
+                    "Rechner-Formel übernehmen",
+                    Color.TRANSPARENT, colPrimary, 12, 11f, 1.2f, true);
+            importBtn.setBackground(outlinedPill(colPrimary, dp(1f), 12));
+            importBtn.setPadding(dp(10), dp(2), dp(10), dp(2));
+            importBtn.setOnClickListener(v -> {
+                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                plotExpr1 = currentInput.trim();
+                f1Input.setText(plotExpr1);
+            });
+            header.addView(importBtn);
+        }
 
         col.addView(header, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -1714,14 +1981,84 @@ private static class FilledBackspaceDrawable extends Drawable {
         };
     }
 
-    private void showUnsetDialog() {
-        final String[] vars = {"a", "b", "c", "d", "k", "l", "m", "n", "x", "y", "z"};
+    private void showVariableOptionsDialog(final String vName) {
+        String curVal = engine.formatVariable(vName, true);
+        String valDesc = (curVal != null) ? formatDisplayNumber(curVal) : "nicht gesetzt";
+
         new AlertDialog.Builder(this)
-                .setTitle("Variable löschen (unset)")
-                .setItems(vars, (dialog, which) -> {
-                    engine.unsetVariable(vars[which]);
-                    saveState();
-                    rebuildScreen();
+                .setTitle("Variable " + vName + " (" + valDesc + ")")
+                .setItems(new String[]{
+                        "Wert zuweisen (im Rechner: " + vName + " := )",
+                        "Wert direkt festlegen…",
+                        "Variable zurücksetzen (unset)",
+                        "In Rechner einsetzen (" + vName + ")"
+                }, (dialog, which) -> {
+                    if (which == 0) {
+                        currentInput += vName + " := ";
+                        activeTab = 0;
+                        saveState();
+                        rebuildScreen();
+                    } else if (which == 1) {
+                        showSetDirectValueDialog(vName);
+                    } else if (which == 2) {
+                        engine.unsetVariable(vName);
+                        saveState();
+                        rebuildScreen();
+                        Toast.makeText(this, "Variable " + vName + " zurückgesetzt", Toast.LENGTH_SHORT).show();
+                    } else if (which == 3) {
+                        currentInput += vName;
+                        activeTab = 0;
+                        saveState();
+                        rebuildScreen();
+                    }
+                })
+                .setNegativeButton("Abbrechen", null)
+                .show();
+    }
+
+    private void showSetDirectValueDialog(final String vName) {
+        final EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setTextColor(colOnSurface);
+        input.setHint("z. B. 42 oder 1/2 oder i");
+        input.setHintTextColor(colOnSurfaceVariant);
+        String curVal = engine.formatVariable(vName, true);
+        if (curVal != null) {
+            input.setText(curVal);
+            input.setSelection(input.getText().length());
+        }
+
+        FrameLayout container = new FrameLayout(this);
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.leftMargin = dp(20);
+        lp.rightMargin = dp(20);
+        lp.topMargin = dp(8);
+        container.addView(input, lp);
+
+        new AlertDialog.Builder(this)
+                .setTitle("Wert für " + vName + " festlegen")
+                .setView(container)
+                .setPositiveButton("Speichern", (dialog, which) -> {
+                    String text = input.getText().toString().trim().replace(",", ".");
+                    if (!text.isEmpty()) {
+                        try {
+                            engine.evaluateAndCommit(vName + " := " + text);
+                            saveState();
+                            rebuildScreen();
+                            Toast.makeText(this, vName + " := " + text, Toast.LENGTH_SHORT).show();
+                        } catch (Exception e) {
+                            try {
+                                double d = Double.parseDouble(text);
+                                engine.setVariable(vName, d);
+                                saveState();
+                                rebuildScreen();
+                                Toast.makeText(this, vName + " := " + text, Toast.LENGTH_SHORT).show();
+                            } catch (Exception ex) {
+                                Toast.makeText(this, "Ungültiger Wert", Toast.LENGTH_SHORT).show();
+                            }
+                        }
+                    }
                 })
                 .setNegativeButton("Abbrechen", null)
                 .show();
@@ -1744,8 +2081,8 @@ private static class FilledBackspaceDrawable extends Drawable {
                 int idx = r * cols + c;
                 if (idx < uVars.length) {
                     final String vName = uVars[idx];
-                    Double val = engine.getVariable(vName);
-                    String valStr = val != null ? formatDisplayNumber(Double.toString(val)) : "nicht gesetzt";
+                    String curVal = engine.formatVariable(vName, true);
+                    String valStr = curVal != null ? formatDisplayNumber(curVal) : "nicht gesetzt";
 
                     LinearLayout tile = new LinearLayout(this);
                     tile.setOrientation(LinearLayout.VERTICAL);
@@ -1793,6 +2130,15 @@ private static class FilledBackspaceDrawable extends Drawable {
                             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
                     insLp.topMargin = dp(4);
                     tile.addView(insBtn, insLp);
+
+                    View.OnLongClickListener onLong = v -> {
+                        v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+                        showVariableOptionsDialog(vName);
+                        return true;
+                    };
+                    tile.setOnLongClickListener(onLong);
+                    circle.setOnLongClickListener(onLong);
+                    insBtn.setOnLongClickListener(onLong);
 
                     tile.setClickable(true);
                     tile.setFocusable(true);
@@ -1922,40 +2268,17 @@ private static class FilledBackspaceDrawable extends Drawable {
         list.setOrientation(LinearLayout.VERTICAL);
         list.setPadding(dp(12), dp(10), dp(12), dp(16));
 
-        // Top Action Pills: set, unset, zur Tastatur hinzufügen (matching Vorlage screenshot)
+        // Top Action Pill: zur Tastatur hinzufügen
         LinearLayout topActions = new LinearLayout(this);
         topActions.setOrientation(LinearLayout.HORIZONTAL);
         topActions.setGravity(Gravity.CENTER);
-        topActions.setPadding(dp(4), dp(4), dp(4), dp(10));
+        topActions.setPadding(dp(4), dp(2), dp(4), dp(8));
 
-        Button setBtn = makeMaterialButton("set", Color.TRANSPARENT, colPrimary, 18, 13f, 1.4f, true);
-        setBtn.setBackground(outlinedPill(colPrimary, dp(1.5f), 18));
-        setBtn.setPadding(dp(18), dp(4), dp(18), dp(4));
-        setBtn.setOnClickListener(v -> {
-            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-            currentInput += " := ";
-            activeTab = 0;
-            saveState();
-            rebuildScreen();
-        });
-        topActions.addView(setBtn);
-
-        Button unsetBtn = makeMaterialButton("unset", Color.TRANSPARENT, colPrimary, 18, 13f, 1.4f, true);
-        unsetBtn.setBackground(outlinedPill(colPrimary, dp(1.5f), 18));
-        unsetBtn.setPadding(dp(18), dp(4), dp(18), dp(4));
-        LinearLayout.LayoutParams unsetLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        unsetLp.leftMargin = dp(8);
-        unsetLp.rightMargin = dp(8);
-        unsetBtn.setOnClickListener(v -> {
-            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-            showUnsetDialog();
-        });
-        topActions.addView(unsetBtn, unsetLp);
-
-        Button addKbBtn = makeMaterialButton("zur Tastatur hinzufügen", Color.TRANSPARENT, colPrimary, 18, 13f, 1.4f, true);
-        addKbBtn.setBackground(outlinedPill(colPrimary, dp(1.5f), 18));
-        addKbBtn.setPadding(dp(14), dp(4), dp(14), dp(4));
+        Button addKbBtn = makeMaterialButton(
+                showMoreVariables ? "Erweiterte Variablen ausblenden" : "zur Tastatur hinzufügen",
+                Color.TRANSPARENT, colPrimary, 16, 12f, 1.3f, true);
+        addKbBtn.setBackground(outlinedPill(colPrimary, dp(1.2f), 16));
+        addKbBtn.setPadding(dp(16), dp(3), dp(16), dp(3));
         addKbBtn.setOnClickListener(v -> {
             v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
             showMoreVariables = !showMoreVariables;
@@ -1964,7 +2287,6 @@ private static class FilledBackspaceDrawable extends Drawable {
             rebuildScreen();
         });
         topActions.addView(addKbBtn);
-
         list.addView(topActions);
 
         // Accordion Category Cards
@@ -1999,7 +2321,7 @@ private static class FilledBackspaceDrawable extends Drawable {
             hdr.addView(chev);
 
             TextView titleTv = new TextView(this);
-            titleTv.setText(cat.title);
+            titleTv.setText(catIndex == 0 ? "Benutzerdefinierte Variablen (lange drücken)" : cat.title);
             titleTv.setTextColor(colOnSurface);
             setScaledTextSize(titleTv, 15f, 2.0f);
             titleTv.setTypeface(Typeface.DEFAULT_BOLD);
@@ -2102,9 +2424,16 @@ private static class FilledBackspaceDrawable extends Drawable {
                 "Verlauf vollständig leeren",
                 colSecondaryContainer, colOnSecondaryContainer, 14, 14f, 2.0f);
         clearHist.setOnClickListener(v -> {
-            history.clear();
-            saveState();
-            rebuildScreen();
+            new AlertDialog.Builder(this)
+                    .setTitle("Verlauf leeren")
+                    .setMessage("Möchten Sie den gesamten Rechenverlauf wirklich löschen?")
+                    .setPositiveButton("Löschen", (dialog, which) -> {
+                        history.clear();
+                        saveState();
+                        rebuildScreen();
+                    })
+                    .setNegativeButton("Abbrechen", null)
+                    .show();
         });
         col.addView(clearHist);
 
@@ -2139,8 +2468,18 @@ private static class FilledBackspaceDrawable extends Drawable {
 
     public static String formatDisplayNumber(String numStr) {
         if (numStr == null || numStr.isEmpty()) return "";
-        if (numStr.contains("e") || numStr.contains("E") || numStr.contains("i") || numStr.contains("[") || numStr.contains("/")) {
+        if (numStr.contains("i") || numStr.contains("[") || numStr.contains("/")) {
             return numStr;
+        }
+        if (numStr.matches("^-?\\d+(\\.\\d+)?[eE][+-]?\\d+$")) {
+            String[] p = numStr.split("[eE]");
+            String mantissa = formatDisplayNumber(p[0]);
+            try {
+                int exp = Integer.parseInt(p[1]);
+                return mantissa + " × 10" + toSuperscript(exp);
+            } catch (Exception ignored) {
+                return numStr;
+            }
         }
         String clean = numStr.replace(',', '.');
         int dot = clean.indexOf('.');
@@ -2164,6 +2503,30 @@ private static class FilledBackspaceDrawable extends Drawable {
             return intPart + "," + sb.toString();
         }
         return numStr;
+    }
+
+    private static String toSuperscript(int n) {
+        String s = Integer.toString(n);
+        StringBuilder sb = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '-': sb.append('⁻'); break;
+                case '+': sb.append('⁺'); break;
+                case '0': sb.append('⁰'); break;
+                case '1': sb.append('¹'); break;
+                case '2': sb.append('²'); break;
+                case '3': sb.append('³'); break;
+                case '4': sb.append('⁴'); break;
+                case '5': sb.append('⁵'); break;
+                case '6': sb.append('⁶'); break;
+                case '7': sb.append('⁷'); break;
+                case '8': sb.append('⁸'); break;
+                case '9': sb.append('⁹'); break;
+                default: sb.append(c); break;
+            }
+        }
+        return sb.toString();
     }
 
     private View createFractionView(String num, String den) {

@@ -271,6 +271,18 @@ public final class CalculatorEngine {
         return v != null ? v.c.re : null;
     }
 
+    public String formatVariable(String name, boolean exact) {
+        Value v = variables.get(name);
+        if (v == null) return null;
+        if (exact && v.rat != null) {
+            if (v.rat.den.equals(BigInteger.ONE)) {
+                return v.rat.num.toString();
+            }
+            return v.rat.num.toString() + "/" + v.rat.den.toString();
+        }
+        return formatDecimalVal(v);
+    }
+
     private boolean isUserVariable(String name) {
         for (String v : USER_VARIABLES) {
             if (v.equals(name)) return true;
@@ -700,11 +712,14 @@ public final class CalculatorEngine {
                     if (ch == '.') hasDot = true;
                     nextChar();
                 }
-                if (ch == 'e' || ch == 'E') {
-                    hasExp = true;
-                    nextChar();
-                    if (ch == '+' || ch == '-') nextChar();
-                    while (ch >= '0' && ch <= '9') nextChar();
+                if ((ch == 'e' || ch == 'E') && pos + 1 < s.length()) {
+                    char next = s.charAt(pos + 1);
+                    if (Character.isDigit(next) || next == '+' || next == '-') {
+                        hasExp = true;
+                        nextChar();
+                        if (ch == '+' || ch == '-') nextChar();
+                        while (ch >= '0' && ch <= '9') nextChar();
+                    }
                 }
                 String numStr = s.substring(startPos, pos);
                 if (!hasDot && !hasExp) {
@@ -1108,6 +1123,9 @@ public final class CalculatorEngine {
                 return Value.fromInt(rem);
             }
             case "nthroot": {
+                if (args.size() == 1) {
+                    return v0.pow(Value.fromFloat(1.0 / 3.0));
+                }
                 Value v1 = evalExpression(args.get(1), ov);
                 return v1.pow(Value.fromFloat(1.0 / v0.c.re));
             }
@@ -2037,11 +2055,14 @@ public final class CalculatorEngine {
                     if (ch == '.') hasDot = true;
                     nextChar();
                 }
-                if (ch == 'e' || ch == 'E') {
-                    hasExp = true;
-                    nextChar();
-                    if (ch == '+' || ch == '-') nextChar();
-                    while (ch >= '0' && ch <= '9') nextChar();
+                if ((ch == 'e' || ch == 'E') && pos + 1 < s.length()) {
+                    char next = s.charAt(pos + 1);
+                    if (Character.isDigit(next) || next == '+' || next == '-') {
+                        hasExp = true;
+                        nextChar();
+                        if (ch == '+' || ch == '-') nextChar();
+                        while (ch >= '0' && ch <= '9') nextChar();
+                    }
                 }
                 String numStr = s.substring(startPos, pos);
                 if (!hasDot && !hasExp) {
