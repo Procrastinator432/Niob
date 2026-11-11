@@ -1,0 +1,62 @@
+# id	android_expression	rust_expression	check	expected	absolute_tolerance	relative_tolerance
+basic	2+3*4	2+3*4	number	14	1e-12	1e-10
+power	2^3^2	2^3^2	number	512	1e-12	1e-10
+unary	-2^2	-2^2	number	-4	1e-12	1e-10
+fraction	1/3+1/6	1/3+1/6	exact	1/2	0	0
+trig	sin(pi/3)	sin(pi/3)	exact	√3/2|1/2*3^(1/2)|sqrt(3)/2	0	0
+sum	sum(k^2,k,1,10)	sum(k^2,k,1,10)	number	385	1e-12	1e-10
+product	prod(k,k,1,5)	product(k,k,1,5)	number	120	1e-12	1e-10
+integral	int(x^2,x,0,3)	defint(x^2,x,0,3)	number	9	1e-10	1e-10
+derivative	deriv(x^3,x,2)	d(x^3,x,2)	number	12	1e-7	1e-8
+implicit	2(3+4)	2(3+4)	number	14	1e-12	1e-10
+scientific	1e3	1e3	number	1000	1e-12	1e-10
+asinh	asinh(1)	asinh(1)	number	0.881373587019543	1e-8	1e-8
+acosh	acosh(2)	acosh(2)	number	1.3169578969248166	1e-8	1e-8
+atanh	atanh(0.5)	atanh(0.5)	number	0.5493061443340549	1e-8	1e-8
+complex_i	i^2	i^2	number	-1	1e-12	1e-10
+complex_root	sqrt(-1)	sqrt(-1)	exact	i|1*i	0	0
+matrix_det	det([[4,2],[1,3]])	det([[4,2],[1,3]])	number	10	1e-12	1e-10
+matrix_add	[[1,2],[3,4]]+[[1,1],[1,1]]	[[1,2],[3,4]]+[[1,1],[1,1]]	exact	[[2,3],[4,5]]	0	0
+modulo	-7 mod 3	-7 mod 3	number	2	1e-12	1e-10
+assignment	m:=12.5	m:=12.5	assignment	50	1e-12	1e-10
+standalone_percent	%	%	number	0.01	0	1e-8
+symbolic	y+y	y+y	exact	2*y|2y	0	0
+symbolic_derivative	deriv(x^3,x)	d(x^3,x)	exact	3*x^2|3x^2	0	0
+indefinite_integral	integral(x^2,x)	integral(x^2,x)	exact	x^3/3|1/3*x^3|x^3*(1/3)	0	0
+small_number	1/100000000000000000000	1/100000000000000000000	number	1e-20	0	1e-8
+planck	h	h	number	6.6261e-34	0	1e-8
+tiny_product	h*10000000000000000000000000000000000	h*10000000000000000000000000000000000	number	6.6261	1e-8	1e-8
+large_integer	9007199254740993-9007199254740992	9007199254740993-9007199254740992	number	1	0	0
+false_exact	1666666667/5000000000	1666666667/5000000000	exact	1666666667/5000000000	0	0
+root_exact	sqrt(8)	sqrt(8)	exact	2√2|2*sqrt(2)|2*2^(1/2)	0	0
+binomial_large	binomial(200,1)	binomial(200,1)	number	200	1e-12	1e-10
+factorial_fractional	0.5!	0.5!	error	Non-natural factorial must be rejected	0	0
+factorial_negative	(-3)!	(-3)!	error	Negative factorial must be rejected	0	0
+divide_zero	1/0	1/0	error	Division by zero must be rejected	0	0
+derivative_large	deriv(x^2,x,1000000000000)	d(x^2,x,1000000000000)	number	2e12	0	1e-8
+derivative_oscillating	deriv(sin(x),x,1000000)	d(sin(x),x,1000000)	number	0.9367521275331447	1e-7	1e-7
+integral_oscillating	int(cos(800*pi*x),x,0,1)	defint(cos(800*pi*x),x,0,1)	number	0	1e-8	0
+symbolic_unknown	x^2+foo	x^2+foo	exact	x^2+foo|foo+x^2	0	0
+history_reuse	√3 / 2	√3 / 2	number	0.8660254037844386	1e-8	1e-8
+matrix_4x4	det([[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]])	det([[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]])	number	1	1e-12	1e-10
+integral_alias_1000	int(cos(1000*pi*x),x,0,1)	defint(cos(1000*pi*x),x,0,1)	number	0	1e-8	0
+integral_alias_2000	int(cos(2000*pi*x),x,0,1)	defint(cos(2000*pi*x),x,0,1)	number	0	1e-8	0
+integral_alias_4000	int(cos(4000*pi*x),x,0,1)	defint(cos(4000*pi*x),x,0,1)	number	0	1e-8	0
+integral_inverse_power	integral(x^-1,x)	integral(x^-1,x)	exact	log(x)|ln(x)|log(abs(x))|ln(abs(x))	0	0
+symbolic_sine_derivative	deriv(sin(x),x)	d(sin(x),x)	exact	cos(x)	0	0
+symbolic_chain_rule	deriv(sin(x^2),x)	d(sin(x^2),x)	exact	2*x*cos(x^2)|2*cos(x^2)*x|cos(x^2)*2*x|cos(x^2)*(2*x)	0	0
+symbolic_exponential_integral	integral(exp(x),x)	integral(exp(x),x)	exact	exp(x)|e^x	0	0
+matrix_singular_inverse	inv([[1,2],[2,4]])	inv([[1,2],[2,4]])	error	Singular inverse must be rejected	0	0
+matrix_incompatible_dimensions	[[1,2]]+[[1],[2]]	[[1,2]]+[[1],[2]]	error	Incompatible matrix dimensions must be rejected	0	0
+complex_sine_identity	sin(i)/i	sin(i)/i	number	1.1752011936438014	1e-8	1e-8
+complex_euler_identity	exp(i*pi)	exp(i*pi)	number	-1	1e-10	1e-10
+symbolic_cosine_derivative	deriv(cos(x),x)	d(cos(x),x)	exact	-sin(x)	0	0
+symbolic_sinh_derivative	deriv(sinh(x),x)	d(sinh(x),x)	exact	cosh(x)	0	0
+symbolic_cosh_derivative	deriv(cosh(x),x)	d(cosh(x),x)	exact	sinh(x)	0	0
+symbolic_sin_integral	integral(sin(x),x)	integral(sin(x),x)	exact	-cos(x)	0	0
+symbolic_cos_integral	integral(cos(x),x)	integral(cos(x),x)	exact	sin(x)	0	0
+symbolic_variable_power_samples	deriv(x^x,x)	d(x^x,x)	symbolic_samples	1:1;2:6.772588722239782;3:56.66253179403896	1e-8	1e-8
+symbolic_fractional_power_samples	deriv(x^0.5,x)	d(x^0.5,x)	symbolic_samples	0.25:1;1:0.5;4:0.25	1e-8	1e-8
+symbolic_negative_power_samples	deriv(x^-1,x)	d(x^-1,x)	symbolic_samples	1:-1;2:-0.25;4:-0.0625	1e-8	1e-8
+symbolic_chain_serialization_samples	deriv(sin(x^2+x),x)	d(sin(x^2+x),x)	symbolic_samples	0:1;1:-1.2484405096414273;2:4.80085143325183	1e-8	1e-8
+invalid_integrand_propagates_error	int(1/0,x,0,1)	defint(1/0,x,0,1)	error	Division by zero inside the integrand must not become a converged zero integral	0	0

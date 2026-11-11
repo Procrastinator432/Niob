@@ -1,0 +1,36 @@
+# Decompilation, APK analysis and research artifacts
+/attachments/
+/capture/
+/checks/
+/inbox/
+/investigation.cany/
+/pinned/
+/reference/
+/BEWERTUNG.md
+/NACHPRUEFUNG.md
+/PRUEFSTAND.md
+/BERECHNUNGSARCHITEKTUR.md
+/craft.json
+/feed.json
+/usage.json
+/build-activity.log
+/app/mechanics.json
+/app/MECHANICS.md
+
+# Build outputs and binaries
+/app/target/
+/app/android/build/
+/.test-results/
+*.apk
+*.apk.idsig
+*.idsig
+
+# IDE and OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+*.bak
+*.orig
+*~

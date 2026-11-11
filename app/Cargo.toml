@@ -1,0 +1,10 @@
+[package]
+name = "niob"
+version = "1.2.0"
+edition = "2021"
+description = "Niob: Offline Scientific Calculator with Material You styling, Symbolic & Exact Math, Constants Library, and 2D Function Plotter"
+
+[dependencies]
+eframe = "0.34.2"
+egui = "0.34.2"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
