@@ -586,33 +586,33 @@ impl JadeCalculatorApp {
             (
                 MainTab::Calculator,
                 if self.german_ui {
-                    "∑ Rechner"
+                    "Rechner"
                 } else {
-                    "∑ Calculator"
+                    "Calculator"
                 },
             ),
             (
                 MainTab::Plotter,
                 if self.german_ui {
-                    "📈 2D-Plotter"
+                    "2D-Plotter"
                 } else {
-                    "📈 Graphing"
+                    "Graphing"
                 },
             ),
             (
                 MainTab::VariablesAndConstants,
                 if self.german_ui {
-                    "🔬 Konstanten & Var."
+                    "Konstanten & Var."
                 } else {
-                    "🔬 Constants & Vars"
+                    "Constants & Vars"
                 },
             ),
             (
                 MainTab::ConverterAndSettings,
                 if self.german_ui {
-                    "⚙ Einheiten & Setup"
+                    "Einstellungen & Setup"
                 } else {
-                    "⚙ Converter & Setup"
+                    "Settings & Setup"
                 },
             ),
         ];
@@ -693,9 +693,9 @@ impl JadeCalculatorApp {
                         if !self.history.is_empty()
                             && ui
                                 .small_button(if self.german_ui {
-                                    "🗑 Verlauf leeren"
+                                    "Verlauf leeren"
                                 } else {
-                                    "🗑 Clear History"
+                                    "Clear History"
                                 })
                                 .clicked()
                         {
@@ -771,7 +771,7 @@ impl JadeCalculatorApp {
                                                     && !item.raw_input.contains("int(")
                                                 {
                                                     if ui
-                                                        .small_button("📈")
+                                                        .small_button("Plot")
                                                         .on_hover_text(if self.german_ui {
                                                             "Im 2D-Funktionsplotter zeichnen"
                                                         } else {
@@ -1464,9 +1464,9 @@ impl JadeCalculatorApp {
                     if Self::key_btn(
                         &mut cols[0],
                         if self.german_ui {
-                            "🔬 Alle 28 Naturkonstanten & Variablen"
+                            "Naturkonstanten & Variablen"
                         } else {
-                            "🔬 All 28 Physical Constants & Variables"
+                            "Physical Constants & Variables"
                         },
                         row_h,
                         pal.primary_container,
@@ -1477,9 +1477,9 @@ impl JadeCalculatorApp {
                     if Self::key_btn(
                         &mut cols[1],
                         if self.german_ui {
-                            "📈 Interaktiver 2D-Funktionsplotter"
+                            "2D-Funktionsplotter"
                         } else {
-                            "📈 Interactive 2D Function Plotter"
+                            "2D Function Plotter"
                         },
                         row_h,
                         pal.secondary_container,
@@ -1492,9 +1492,9 @@ impl JadeCalculatorApp {
                     if Self::key_btn(
                         &mut cols[0],
                         if self.german_ui {
-                            "⚙ Einstellungen & Zahlenformat"
+                            "Einstellungen & Zahlenformat"
                         } else {
-                            "⚙ Settings & Number Formatting"
+                            "Settings & Number Formatting"
                         },
                         row_h,
                         pal.surface_container_high,
@@ -1552,9 +1552,9 @@ impl JadeCalculatorApp {
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(if self.german_ui {
-                            "📈 2D-Funktionsplotter (Ziehen zum Verschieben, Mausrad zum Zoomen)"
+                            "2D-Funktionsplotter (Ziehen zum Verschieben, Mausrad zum Zoomen)"
                         } else {
-                            "📈 2D Function Plotter (Drag to pan, Scroll to zoom)"
+                            "2D Function Plotter (Drag to pan, Scroll to zoom)"
                         })
                         .font(FontId::proportional(14.5))
                         .strong(),
@@ -1908,9 +1908,9 @@ impl JadeCalculatorApp {
                     }
                     if ui
                         .button(if self.german_ui {
-                            "🗑 Löschen (unset)"
+                            "Löschen (unset)"
                         } else {
-                            "🗑 Unset"
+                            "Unset"
                         })
                         .clicked()
                     {
@@ -2344,7 +2344,7 @@ impl JadeCalculatorApp {
                         let passed_count = checks.iter().filter(|c| c.passed).count();
                         ui.label(
                             RichText::new(format!(
-                                "✓ Kompatibilitäts- & Fehlerdiagnose ({}/{} Tests bestanden)",
+                                "Kompatibilitäts- & Fehlerdiagnose ({}/{} Tests bestanden)",
                                 passed_count,
                                 checks.len()
                             ))

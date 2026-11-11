@@ -6,8 +6,13 @@ import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.ColorFilter;
 import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.PixelFormat;
+import android.graphics.Rect;
 import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.os.Bundle;
@@ -29,7 +34,10 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
+import android.widget.ImageButton;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.PopupMenu;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
@@ -52,6 +60,7 @@ public class MainActivity extends Activity {
     private int activeSection = 0; // 0=()√^, 1=sin, 2=∑∫i, 3=abc, 4=mehr
     private boolean dualKeyboard = true;
     private boolean showMoreVariables = false;
+    private boolean showBottomNavOnCalc = true;
 
     // Android 12 Monet Dynamic Colors
     private int colBgSurface;
@@ -108,6 +117,7 @@ public class MainActivity extends Activity {
         android.content.SharedPreferences prefs = getSharedPreferences("jade_calculator", MODE_PRIVATE);
         showExactFirst = prefs.getBoolean("show_exact_first", true);
         showMoreVariables = prefs.getBoolean("show_more_variables", false);
+        showBottomNavOnCalc = prefs.getBoolean("show_bottom_nav_calc", true);
         engine.setRadiansMode(prefs.getBoolean("radians_mode", true));
         engine.setModuloAlwaysPositive(prefs.getBoolean("modulo_always_positive", true));
 
@@ -165,6 +175,7 @@ public class MainActivity extends Activity {
         android.content.SharedPreferences.Editor ed = getSharedPreferences("jade_calculator", MODE_PRIVATE).edit();
         ed.putBoolean("show_exact_first", showExactFirst);
         ed.putBoolean("show_more_variables", showMoreVariables);
+        ed.putBoolean("show_bottom_nav_calc", showBottomNavOnCalc);
         ed.putBoolean("radians_mode", engine.isRadiansMode());
         ed.putBoolean("modulo_always_positive", engine.isModuloAlwaysPositive());
         ed.putString("ans_value", engine.serializeValue(engine.getLastAns()));
@@ -226,7 +237,7 @@ public class MainActivity extends Activity {
         if (expr != null && (expr.contains("int(") || expr.contains("defint("))) {
             CalculatorEngine.IntegrationReport r = engine.getLastIntegrationReport();
             if (r != null) {
-                String badge = r.converged ? "✓ konvergiert" : "⚠ langsame Konv.";
+                String badge = r.converged ? "konvergiert" : "langsame Konv.";
                 return String.format(java.util.Locale.US, "%s  •  Δ ≈ %.1e  •  n = %d", badge, r.absErr, r.subintervals);
             }
         }
@@ -258,12 +269,22 @@ public class MainActivity extends Activity {
             int padV = dp(isLandscape ? 6 : 10);
             topBar.setPadding(padH, padV, padH, padV);
 
+            Button backBtn = makeMaterialButton("← Rechner", Color.TRANSPARENT, colPrimary, 12, 13f, 1.4f, true);
+            backBtn.setPadding(dp(6), dp(2), dp(8), dp(2));
+            backBtn.setOnClickListener(v -> {
+                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                activeTab = 0;
+                rebuildScreen();
+            });
+            topBar.addView(backBtn);
+
             TextView titleView = new TextView(this);
             String titleText = (activeTab == 1) ? "2D-Plotter" : (activeTab == 2 ? "Physikalische Konstanten" : "Einstellungen");
             titleView.setText(titleText);
             titleView.setTextColor(colOnSurface);
             setScaledTextSize(titleView, isLandscape ? 15f : 17f, 2.0f);
             titleView.setTypeface(Typeface.DEFAULT_BOLD);
+            titleView.setGravity(Gravity.CENTER);
             LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
             topBar.addView(titleView, titleLp);
 
@@ -297,49 +318,124 @@ public class MainActivity extends Activity {
         }
 
         // 3. Bottom Material You Navigation Bar (Pill Indicators)
-        LinearLayout bottomNav = new LinearLayout(this);
-        bottomNav.setOrientation(LinearLayout.HORIZONTAL);
-        bottomNav.setBackgroundColor(colSurfaceContainer);
-        bottomNav.setPadding(dp(6), dp(isLandscape ? 4 : 6), dp(6), dp(isLandscape ? 4 : 6));
+        // Hidden on Calculator tab by default (showBottomNavOnCalc = false) to give full breathing room matching Vorlage
+        boolean showBottomNav = (activeTab != 0) || showBottomNavOnCalc;
+        if (showBottomNav) {
+            LinearLayout bottomNav = new LinearLayout(this);
+            bottomNav.setOrientation(LinearLayout.HORIZONTAL);
+            bottomNav.setBackgroundColor(colSurfaceContainer);
+            bottomNav.setPadding(dp(6), dp(isLandscape ? 4 : 6), dp(6), dp(isLandscape ? 4 : 6));
 
-        String[] navTitles = {"∑ Rechner", "📈 2D-Plot", "🔬 Konst.", "⚙ Setup"};
-        for (int i = 0; i < navTitles.length; i++) {
-            final int tabIdx = i;
-            boolean sel = (activeTab == i);
-            Button navBtn = makeMaterialButton(
-                    navTitles[i],
-                    sel ? colPrimaryContainer : Color.TRANSPARENT,
-                    sel ? colOnPrimaryContainer : colOnSurfaceVariant,
-                    18,
-                    isLandscape ? 12f : 12.5f,
-                    2.0f
-            );
-            navBtn.setSingleLine(false);
-            navBtn.setMaxLines(2);
-            navBtn.setGravity(Gravity.CENTER);
-            navBtn.setPadding(dp(2), dp(2), dp(2), dp(2));
-            navBtn.setMinimumHeight(dp(isLandscape ? 36 : 46));
-            navBtn.setAutoSizeTextTypeUniformWithConfiguration(
-                    8, Math.round((isLandscape ? 12f : 12.5f) * 2.0f), 1, TypedValue.COMPLEX_UNIT_DIP);
-            navBtn.setOnClickListener(v -> {
-                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-                activeTab = tabIdx;
-                rebuildScreen();
-            });
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-            lp.setMargins(dp(2), 0, dp(2), 0);
-            bottomNav.addView(navBtn, lp);
+            String[] navTitles = {"Rechner", "Plotter", "Konstanten", "Einstellungen"};
+            for (int i = 0; i < navTitles.length; i++) {
+                final int tabIdx = i;
+                boolean sel = (activeTab == i);
+                Button navBtn = makeMaterialButton(
+                        navTitles[i],
+                        sel ? colPrimaryContainer : Color.TRANSPARENT,
+                        sel ? colOnPrimaryContainer : colOnSurfaceVariant,
+                        18,
+                        isLandscape ? 12f : 12.5f,
+                        1.4f,
+                        sel
+                );
+                navBtn.setSingleLine(true);
+                navBtn.setGravity(Gravity.CENTER);
+                navBtn.setPadding(dp(4), dp(4), dp(4), dp(4));
+                navBtn.setMinimumHeight(dp(isLandscape ? 36 : 42));
+                navBtn.setAutoSizeTextTypeUniformWithConfiguration(
+                        8, Math.round((isLandscape ? 12f : 12.5f) * 1.4f), 1, TypedValue.COMPLEX_UNIT_DIP);
+                navBtn.setOnClickListener(v -> {
+                    v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                    activeTab = tabIdx;
+                    rebuildScreen();
+                });
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+                lp.setMargins(dp(2), 0, dp(2), 0);
+                bottomNav.addView(navBtn, lp);
+            }
+            rootContainer.addView(bottomNav, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         }
-        rootContainer.addView(bottomNav, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+    }
+
+    private static class FilledBackspaceDrawable extends Drawable {
+        private final Paint fillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint xPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path path = new Path();
+        private final float density;
+
+        FilledBackspaceDrawable(int fillColor, int xColor, float density) {
+            this.density = density;
+            fillPaint.setColor(fillColor);
+            fillPaint.setStyle(Paint.Style.FILL);
+            xPaint.setColor(xColor);
+            xPaint.setStyle(Paint.Style.STROKE);
+            xPaint.setStrokeCap(Paint.Cap.ROUND);
+            xPaint.setStrokeJoin(Paint.Join.ROUND);
+        }
+
+        @Override
+        public void draw(Canvas canvas) {
+            Rect b = getBounds();
+            // Solid filled backspace shape matching Vorlage
+            float iconW = 27f * density;
+            float iconH = 18f * density;
+            float left = b.exactCenterX() - iconW / 2f;
+            float top = b.exactCenterY() - iconH / 2f;
+            float right = left + iconW;
+            float bottom = top + iconH;
+
+            float tipX = left;
+            float tipY = top + iconH / 2f;
+            float shoulderX = left + iconH * 0.46f;
+            float r = 2.5f * density;
+
+            path.reset();
+            path.moveTo(right - r, top);
+            path.quadTo(right, top, right, top + r);
+            path.lineTo(right, bottom - r);
+            path.quadTo(right, bottom, right - r, bottom);
+            path.lineTo(shoulderX, bottom);
+            path.lineTo(tipX, tipY);
+            path.lineTo(shoulderX, top);
+            path.close();
+
+            canvas.drawPath(path, fillPaint);
+
+            // Draw dark 'X' cutout centered in rectangular body
+            xPaint.setStrokeWidth(1.9f * density);
+            float cx = shoulderX + (right - shoulderX) / 2f;
+            float cy = tipY;
+            float d = 3.2f * density;
+            canvas.drawLine(cx - d, cy - d, cx + d, cy + d, xPaint);
+            canvas.drawLine(cx + d, cy - d, cx - d, cy + d, xPaint);
+        }
+
+        @Override
+        public void setAlpha(int alpha) {
+            fillPaint.setAlpha(alpha);
+            xPaint.setAlpha(alpha);
+        }
+
+        @Override
+        public void setColorFilter(ColorFilter cf) {
+            fillPaint.setColorFilter(cf);
+            xPaint.setColorFilter(cf);
+        }
+
+        @Override
+        public int getOpacity() {
+            return PixelFormat.TRANSLUCENT;
+        }
     }
 
     private LinearLayout buildNumpadCard() {
         boolean isLandscape = getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.HORIZONTAL);
-        card.setBackground(roundedTopRect(colSurfaceContainer, 24));
-        card.setPadding(dp(8), dp(isLandscape ? 4 : 8), dp(8), dp(isLandscape ? 4 : 6));
+        card.setBackground(roundedTopRect(colSurfaceContainer, 28));
+        card.setPadding(dp(8), dp(isLandscape ? 4 : 10), dp(8), dp(isLandscape ? 4 : 8));
 
         // Digits part (3 columns x 4 rows)
         LinearLayout digitsCol = new LinearLayout(this);
@@ -362,21 +458,21 @@ public class MainActivity extends Activity {
                 final String tok = text.equals("ENTER") ? "=" : (text.equals(",") ? "." : text);
                 boolean isEnter = text.equals("ENTER");
                 int fg = isEnter ? colPrimary : colOnSurface;
-                float spSize = isEnter ? 14f : 23f;
+                float spSize = isEnter ? 14f : 24f;
 
-                Button b = makeMaterialButton(text, Color.TRANSPARENT, fg, 16, spSize, 2.0f);
+                Button b = makeMaterialButton(text, Color.TRANSPARENT, fg, 16, spSize, 1.4f, isEnter);
                 b.setSingleLine(true);
                 b.setIncludeFontPadding(false);
                 b.setPadding(0, 0, 0, 0);
                 b.setAutoSizeTextTypeUniformWithConfiguration(
-                        8, Math.round(spSize * 2.0f), 1, TypedValue.COMPLEX_UNIT_DIP);
+                        8, Math.round(spSize * 1.3f), 1, TypedValue.COMPLEX_UNIT_DIP);
                 b.setOnClickListener(v -> {
                     v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
                     handleKeyPress(tok);
                 });
 
                 LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
-                blp.setMargins(dp(2), dp(1), dp(2), dp(1));
+                blp.setMargins(dp(2), dp(2), dp(2), dp(2));
                 row.addView(b, blp);
             }
             digitsCol.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
@@ -396,20 +492,40 @@ public class MainActivity extends Activity {
                 {"\u2212", "-"}
         };
 
-        for (final String[] op : opDefs) {
-            Button b = makeMaterialButton(op[0], Color.TRANSPARENT, colOnSurface, 16, 21f, 2.0f);
-            b.setSingleLine(true);
-            b.setPadding(dp(2), dp(1), dp(2), dp(1));
-            b.setAutoSizeTextTypeUniformWithConfiguration(
-                    8, Math.round(21f * 2.0f), 1, TypedValue.COMPLEX_UNIT_DIP);
-            b.setOnClickListener(v -> {
-                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-                handleKeyPress(op[1]);
-            });
+        for (int i = 0; i < opDefs.length; i++) {
+            final String[] op = opDefs[i];
+            View btnView;
+            if (i == 0) {
+                // Filled Backspace Icon Button
+                ImageButton ib = new ImageButton(this);
+                ib.setImageDrawable(new FilledBackspaceDrawable(colOnSurface, colSurfaceContainer, getResources().getDisplayMetrics().density));
+                GradientDrawable mask = roundedRect(Color.WHITE, 16);
+                GradientDrawable content = roundedRect(Color.TRANSPARENT, 16);
+                RippleDrawable ripple = new RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), content, mask);
+                ib.setBackground(ripple);
+                ib.setScaleType(ImageView.ScaleType.CENTER);
+                ib.setContentDescription("\u232b");
+                ib.setOnClickListener(v -> {
+                    v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                    handleKeyPress("DEL");
+                });
+                btnView = ib;
+            } else {
+                Button b = makeMaterialButton(op[0], Color.TRANSPARENT, colOnSurface, 16, 22f, 1.4f, false);
+                b.setSingleLine(true);
+                b.setPadding(dp(2), dp(1), dp(2), dp(1));
+                b.setAutoSizeTextTypeUniformWithConfiguration(
+                        8, Math.round(22f * 1.3f), 1, TypedValue.COMPLEX_UNIT_DIP);
+                b.setOnClickListener(v -> {
+                    v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                    handleKeyPress(op[1]);
+                });
+                btnView = b;
+            }
 
             LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
-            blp.setMargins(dp(2), dp(1), dp(2), dp(1));
-            opsCol.addView(b, blp);
+            blp.setMargins(dp(2), dp(2), dp(2), dp(2));
+            opsCol.addView(btnView, blp);
         }
 
         return card;
@@ -470,6 +586,36 @@ public class MainActivity extends Activity {
             updateInputAndPreview();
         });
         inputRow.addView(acBtn, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        Button menuBtn = makeMaterialButton("⋮", Color.TRANSPARENT, 0x88FFFFFF, 12, 16f, 1.4f, false);
+        menuBtn.setSingleLine(true);
+        menuBtn.setMinimumWidth(dp(isLandscape ? 30 : 34));
+        menuBtn.setMinimumHeight(dp(isLandscape ? 28 : 32));
+        menuBtn.setPadding(dp(2), dp(1), dp(2), dp(1));
+        menuBtn.setOnClickListener(v -> {
+            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+            PopupMenu popup = new PopupMenu(this, v);
+            popup.getMenu().add(0, 1, 0, "2D-Plotter");
+            popup.getMenu().add(0, 2, 1, "Physikalische Konstanten");
+            popup.getMenu().add(0, 3, 2, "Einstellungen");
+            popup.getMenu().add(0, 4, 3, engine.isRadiansMode() ? "Winkel: RAD (auf DEG wechseln)" : "Winkel: DEG (auf RAD wechseln)");
+            popup.setOnMenuItemClickListener(item -> {
+                int id = item.getItemId();
+                if (id == 1) { activeTab = 1; rebuildScreen(); }
+                else if (id == 2) { activeTab = 2; rebuildScreen(); }
+                else if (id == 3) { activeTab = 3; rebuildScreen(); }
+                else if (id == 4) {
+                    engine.setRadiansMode(!engine.isRadiansMode());
+                    saveState();
+                    updateInputAndPreview();
+                    refreshKeyboardSection();
+                }
+                return true;
+            });
+            popup.show();
+        });
+        inputRow.addView(menuBtn, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
         inputCard.addView(inputRow);
 
         previewDisplayView = new TextView(this);
@@ -542,7 +688,7 @@ public class MainActivity extends Activity {
             col.setPadding(0, 0, 0, 0);
 
             LinearLayout.LayoutParams histLp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.40f);
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.36f);
             col.addView(historyScroll, histLp);
 
             LinearLayout.LayoutParams inLp = new LinearLayout.LayoutParams(
@@ -550,15 +696,15 @@ public class MainActivity extends Activity {
             col.addView(inputCard, inLp);
 
             LinearLayout.LayoutParams upperLp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.38f);
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.45f);
             kbContainer.addView(upperKb, upperLp);
 
             LinearLayout.LayoutParams numLp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.62f);
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.55f);
             kbContainer.addView(numpadCard, numLp);
 
             LinearLayout.LayoutParams kbLp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.60f);
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.64f);
             col.addView(kbContainer, kbLp);
 
             parent.addView(col, new FrameLayout.LayoutParams(
@@ -860,18 +1006,14 @@ public class MainActivity extends Activity {
                     sel ? colPrimary : colOnSurfaceVariant,
                     12,
                     isLandscape ? 12f : 13.5f,
-                    2.0f
+                    1.4f,
+                    sel
             );
-            if (sel) {
-                b.setTypeface(Typeface.DEFAULT_BOLD);
-            } else {
-                b.setTypeface(Typeface.DEFAULT);
-            }
             b.setSingleLine(true);
             b.setPadding(dp(4), dp(2), dp(4), dp(2));
             b.setMinimumHeight(dp(isLandscape ? 28 : 34));
             b.setAutoSizeTextTypeUniformWithConfiguration(
-                    8, Math.round(13.5f * 2.0f), 1, TypedValue.COMPLEX_UNIT_DIP);
+                    8, Math.round(13.5f * 1.4f), 1, TypedValue.COMPLEX_UNIT_DIP);
             b.setOnClickListener(v -> {
                 v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
                 activeSection = sIdx;
@@ -921,7 +1063,7 @@ public class MainActivity extends Activity {
                 {
                         {k("|x|", "abs("), k("⌊x⌋", "floor("), k("⌈x⌉", "ceil("), k("round", "round(")},
                         {k("gcd", "gcd("), k("lcm", "lcm("), k("sgn", "sign("), k("exp", "exp(")},
-                        {k(engine.isRadiansMode() ? "RAD" : "DEG", "TOGGLE_ANGLE"), k("🔬 Konst.", "TAB_2"), k("📈 2D-Plot", "TAB_1"), k("⚙ Setup", "TAB_3")}
+                        {k(engine.isRadiansMode() ? "RAD" : "DEG", "TOGGLE_ANGLE"), k("Konstanten", "TAB_2"), k("Plotter", "TAB_1"), k("Einstellungen", "TAB_3")}
                 }
         };
 
@@ -935,22 +1077,22 @@ public class MainActivity extends Activity {
                 boolean isAccent = tok.equals("TOGGLE_VAR_MORE") || tok.equals("TAB_1") || tok.equals("TAB_3");
                 int fg = isAccent ? colPrimary : colOnSurface;
 
-                float btnFontSize = 15.5f;
-                if (lbl.length() > 6) btnFontSize = 11.5f;
-                else if (lbl.length() > 4) btnFontSize = 13f;
+                float btnFontSize = 15f;
+                if (lbl.length() > 6) btnFontSize = 11f;
+                else if (lbl.length() > 4) btnFontSize = 12.5f;
 
-                Button kb = makeMaterialButton(lbl, Color.TRANSPARENT, fg, 14, btnFontSize, 2.0f);
+                Button kb = makeMaterialButton(lbl, Color.TRANSPARENT, fg, 14, btnFontSize, 1.4f, false);
                 kb.setSingleLine(true);
-                kb.setPadding(dp(2), dp(1), dp(2), dp(1));
+                kb.setPadding(dp(2), dp(2), dp(2), dp(2));
                 kb.setAutoSizeTextTypeUniformWithConfiguration(
-                        8, Math.round(btnFontSize * 2.0f), 1, TypedValue.COMPLEX_UNIT_DIP);
+                        8, Math.round(btnFontSize * 1.3f), 1, TypedValue.COMPLEX_UNIT_DIP);
                 kb.setOnClickListener(v -> {
                     v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
                     handleKeyPress(tok);
                 });
                 LinearLayout.LayoutParams klp = new LinearLayout.LayoutParams(
                         0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
-                klp.setMargins(dp(2), dp(1), dp(2), dp(1));
+                klp.setMargins(dp(2), dp(2), dp(2), dp(2));
                 rLayout.addView(kb, klp);
             }
             LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
@@ -1419,11 +1561,25 @@ public class MainActivity extends Activity {
         col.addView(toggleAngle);
 
         View sp3 = new View(this);
-        col.addView(sp3, new LinearLayout.LayoutParams(dp(1), dp(12)));
+        col.addView(sp3, new LinearLayout.LayoutParams(dp(1), dp(8)));
 
-        // Setting 4: Clear history
+        // Setting 4: Navigationsleiste im Rechner
+        Button toggleNav = makeMaterialButton(
+                "Navigationsleiste im Rechner: " + (showBottomNavOnCalc ? "Eingeblendet" : "Ausgeblendet (wie Vorlage)"),
+                colSurfaceContainer, colOnSurface, 14, 14f, 2.0f);
+        toggleNav.setOnClickListener(v -> {
+            showBottomNavOnCalc = !showBottomNavOnCalc;
+            saveState();
+            rebuildScreen();
+        });
+        col.addView(toggleNav);
+
+        View sp4 = new View(this);
+        col.addView(sp4, new LinearLayout.LayoutParams(dp(1), dp(12)));
+
+        // Setting 5: Clear history
         Button clearHist = makeMaterialButton(
-                "🗑 Verlauf vollständig leeren",
+                "Verlauf vollständig leeren",
                 colSecondaryContainer, colOnSecondaryContainer, 14, 14f, 2.0f);
         clearHist.setOnClickListener(v -> {
             history.clear();
@@ -1551,16 +1707,20 @@ public class MainActivity extends Activity {
     }
 
     private Button makeMaterialButton(String text, int bg, int fg, int cornerDp, float spSize) {
-        return makeMaterialButton(text, bg, fg, cornerDp, spSize, 2.0f);
+        return makeMaterialButton(text, bg, fg, cornerDp, spSize, 2.0f, false);
     }
 
     private Button makeMaterialButton(String text, int bg, int fg, int cornerDp, float spSize, float maxScale) {
+        return makeMaterialButton(text, bg, fg, cornerDp, spSize, maxScale, false);
+    }
+
+    private Button makeMaterialButton(String text, int bg, int fg, int cornerDp, float spSize, float maxScale, boolean bold) {
         Button b = new Button(this);
         b.setAllCaps(false);
         b.setText(text);
         b.setTextColor(fg);
         setScaledTextSize(b, spSize, maxScale);
-        b.setTypeface(Typeface.DEFAULT_BOLD);
+        b.setTypeface(bold ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
         b.setPadding(dp(2), dp(1), dp(2), dp(1));
         GradientDrawable mask = roundedRect(Color.WHITE, cornerDp);
         GradientDrawable content = roundedRect(bg, cornerDp);
