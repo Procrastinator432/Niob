@@ -1,3 +1,7 @@
+param(
+    [string]$Device = ""
+)
+
 $ErrorActionPreference = "Stop"
 
 function Test-TcpPortOpen ([string]$hostIp, [int]$port, [int]$timeoutMs = 500) {
@@ -27,7 +31,10 @@ if (-not (Test-Path $adb)) {
 $emulators = @(& $adb devices | Where-Object { $_ -match "^emulator-\d+\s+device$" })
 $activeDevices = @(& $adb devices | Where-Object { $_ -match "\tdevice$" })
 
-if ($emulators.Count -gt 0) {
+if ($Device -ne "") {
+    $firstDevice = $Device
+    Write-Host "Verwende angegebenes Geraet: $firstDevice" -ForegroundColor Green
+} elseif ($emulators.Count -gt 0) {
     $firstDevice = ($emulators[0].Trim() -split "\s+")[0]
     Write-Host "Verwende Android Emulator: $firstDevice" -ForegroundColor Green
 } elseif ($activeDevices.Count -gt 0) {
