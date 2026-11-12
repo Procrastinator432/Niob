@@ -14,7 +14,7 @@ test.bat
 
 Der Aufruf führt die Rust-Tests und die Tests des Android-Rechenkerns aus. Alle ausgewählten Tests müssen bestehen, damit der Befehl Exitcode 0 liefert. Fehler sind normale fehlgeschlagene Tests: Sie sind weder ignoriert noch als erwartete Fehlschläge versteckt.
 
-Aktueller Prüfstand vom 10.11.2026 nach dem letzten Fix: **Rust 87/87 und Android 89/89 bestanden, insgesamt 176/176, Exitcode 0**. Alle sechs Persistenztests bestehen; kleine und fast ganzzahlige Gleitkommazahlen bleiben bei der Wiederherstellung unverändert. Android kompiliert und die APK entspricht dem aktuellen Quellstand. Prüfgrenzen und Protokolle stehen in [PRUEFSTAND.md](PRUEFSTAND.md).
+Beim Prüfstand vom 12.11.2026 bestanden **202 Tests** (91 Rust und 111 Android/JVM). Die Ergebnisse der zusätzlichen Emulatorprüfungen stehen in der [Nachprüfung](CODE-SMELL-NACHPRUEFUNG.md).
 
 ## Einen Fix gezielt ausprobieren
 
@@ -72,8 +72,6 @@ Baseline nach Einbau der Tests, vor mathematischen Fixes:
 | Android-Rechenkern | 15 | 33 | 48 |
 
 Die Tests decken Rechenkern und Zahlenausgabe ab. Sie ersetzen keine Tests für Android-Oberfläche, Persistenz, Activity-Neustart oder Bedienhilfen. Der komplette Testprozess wird bei Überschreiten des Zeitlimits beendet; damit kann ein später eingeführter Endloslauf den Aufruf nicht unbegrenzt blockieren.
-
-Aktueller Stand der Regressionstests: **Rust 87/87 und Android 89/89 bestanden, insgesamt 176/176, Exitcode 0**. Alle sechs Persistenztests bestehen; kleine und fast ganzzahlige Gleitkommazahlen bleiben bei der Wiederherstellung unverändert.
 
 ## Wo die Fixes hingehören
 

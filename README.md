@@ -41,7 +41,7 @@ Das Repository enthält sowohl die plattformübergreifende Rust-Desktop-Anwendun
 
 ## Tests ausführen
 
-Alle 176 Tests (Rust + Android JVM) ausführen:
+Der folgende Befehl führt alle Rust- und Android-JVM-Tests aus.
 
 ```powershell
 .\test.ps1

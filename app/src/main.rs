@@ -69,6 +69,7 @@ struct HistoryItem {
     raw_input: String,
     exact_result: String,
     decimal_result: String,
+    reusable_result: String,
     has_distinct_exact: bool,
     showing_exact: bool,
     is_error: bool,
@@ -241,6 +242,7 @@ impl NiobCalculatorApp {
             if let Ok(out) = engine.evaluate_and_commit(s) {
                 history.push(HistoryItem {
                     raw_input: s.to_string(),
+                    reusable_result: out.reusable_expression(),
                     exact_result: out.exact_text,
                     decimal_result: out.decimal_text,
                     has_distinct_exact: out.has_distinct_exact,
@@ -348,6 +350,7 @@ impl NiobCalculatorApp {
             Ok(out) => {
                 self.history.push(HistoryItem {
                     raw_input: trimmed,
+                    reusable_result: out.reusable_expression(),
                     exact_result: out.exact_text,
                     decimal_result: out.decimal_text,
                     has_distinct_exact: out.has_distinct_exact,
@@ -360,6 +363,7 @@ impl NiobCalculatorApp {
             Err(err_msg) => {
                 self.history.push(HistoryItem {
                     raw_input: trimmed,
+                    reusable_result: String::new(),
                     exact_result: err_msg.clone(),
                     decimal_result: err_msg,
                     has_distinct_exact: false,
@@ -876,7 +880,9 @@ impl NiobCalculatorApp {
                                                     })
                                                     .clicked()
                                                 {
-                                                    paste_text = Some(shown_res.clone());
+                                                    if !item.is_error {
+                                                        paste_text = Some(item.reusable_result.clone());
+                                                    }
                                                 }
                                             },
                                         );

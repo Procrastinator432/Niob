@@ -407,6 +407,75 @@ public final class CalculatorRegressionTest {
             source.evaluateAndCommit("m:=3+4*i");
             number(restoreVariables(source).evaluate("(m-3)^2"), -16, 1e-10, 0);
         });
+        add("plot_compile_mod_large_int", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            CalculatorEngine.PlotFunction fn = engine.compilePlotFunction("mod(9007199254740993,2)+x");
+            require(fn != null, "plot fn is null");
+            close(fn.evaluate(2.0), 3.0, 1e-12, 0);
+        });
+        add("plot_compile_sum_and_defint", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            CalculatorEngine.PlotFunction sumFn = engine.compilePlotFunction("sum(k*x,k,1,3)");
+            require(sumFn != null, "sum plot fn is null");
+            close(sumFn.evaluate(2.0), 12.0, 1e-12, 0);
+            CalculatorEngine.PlotFunction intFn = engine.compilePlotFunction("defint(t,t,0,x)");
+            require(intFn != null, "defint plot fn is null");
+            close(intFn.evaluate(2.0), 2.0, 1e-8, 1e-8);
+        });
+        add("plot_compile_ans_and_factorial", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            engine.evaluateAndCommit("7");
+            CalculatorEngine.PlotFunction ansFn = engine.compilePlotFunction("ans*x");
+            require(ansFn != null, "ans plot fn is null");
+            close(ansFn.evaluate(3.0), 21.0, 1e-12, 0);
+            CalculatorEngine.PlotFunction factFn = engine.compilePlotFunction("x!");
+            require(factFn != null, "factorial plot fn is null");
+            close(factFn.evaluate(3.0), 6.0, 1e-12, 0);
+        });
+        add("plot_compile_keeps_matrix_cells_and_context", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            engine.evaluateAndCommit("a := 7");
+            CalculatorEngine.PlotFunction function =
+                    engine.compilePlotFunction("det(trans([[a,0],[x,2]]))+ans+sin(x)");
+            CalculatorEngine.PlotFunction snapshot = function.withContext(engine.snapshotForPlot());
+            engine.setRadiansMode(false);
+            engine.evaluateAndCommit("a := 42");
+            close(snapshot.evaluate(2), 21 + Math.sin(2), 1e-12, 0);
+            close(function.evaluate(2), 126 + Math.sin(Math.toRadians(2)), 1e-12, 0);
+            close(engine.compilePlotFunction("det([[x,2],[3,4]]+[[1,0],[0,1]])").evaluate(2), 9, 1e-12, 0);
+        });
+        add("plot_validate_rejects_masked_unknown_func", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            engine.validatePlotSyntax("1/(x-1)");
+            boolean threw = false;
+            try {
+                engine.validatePlotSyntax("1/(x-1)+foo(x)");
+            } catch (RuntimeException expected) {
+                threw = true;
+            }
+            require(threw, "validatePlotSyntax must reject 1/(x-1)+foo(x)");
+            require(Double.isNaN(engine.compilePlotFunction("1/(x-1)").evaluate(1)), "pole must produce a gap");
+        });
+        add("exact_display_no_float_guessing_and_reusable_text", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            CalculatorEngine.Result near = engine.evaluate("sqrt(2)+1e-15");
+            require(!normalized(near.exactText).equals("√2"), "sqrt(2)+1e-15 must not be √2");
+            CalculatorEngine.Result reused = engine.evaluate(near.reusableText);
+            require(reused.value == near.value, "the reusable expression must preserve the full double");
+            CalculatorEngine.Result near10 = engine.evaluate("sqrt(2)+1e-10");
+            require(!normalized(near10.exactText).equals("√2"), "sqrt(2)+1e-10 must not be √2");
+            require(normalized(engine.evaluate("sqrt(2)").exactText).equals("√2"), "sqrt(2) must be √2");
+            require(normalized(engine.evaluate("sqrt(8)").exactText).equals("2√2"), "sqrt(8) must be 2√2");
+            CalculatorEngine.Result surd = engine.evaluate("sqrt(8)");
+            close(engine.evaluate(surd.reusableText).value, surd.value, 1e-15, 0);
+            require(normalized(engine.evaluate("9223372036854775809/sqrt(2)").exactText)
+                    .equals("9223372036854775809√2/2"), "rationalizing a large coefficient must not truncate it");
+            require(normalized(engine.evaluate("sqrt(2305843009213693951)").exactText)
+                    .equals("√2305843009213693951"), "a large prime can remain under the radical");
+            CalculatorEngine.Result matrix = engine.evaluate("[[1.000000000001]]");
+            require(engine.evaluate("det(" + matrix.reusableText + ")").value == 1.000000000001,
+                    "matrix reuse and determinant must keep the difference from 1");
+        });
     }
 
     public static void main(String[] args) throws Exception {

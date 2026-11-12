@@ -635,6 +635,36 @@ pub struct EvalOutput {
     pub numeric_value: Option<Complex>,
     pub val: Option<Value>,
     pub integration_report: Option<IntegrationReport>,
+    matrix_expression: Option<String>,
+}
+
+impl EvalOutput {
+    pub fn reusable_expression(&self) -> String {
+        self.val.map(Value::reusable_expression).unwrap_or_else(|| {
+            self.matrix_expression.as_ref().unwrap_or(&self.exact_text).clone()
+        })
+    }
+}
+
+impl Value {
+    fn reusable_expression(self) -> String {
+        if let Some(rat) = self.rat {
+            if rat.den != 1 {
+                return format!("({}/{})", rat.num, rat.den);
+            }
+            return if rat.num < 0 {
+                format!("({})", rat.num)
+            } else {
+                rat.num.to_string()
+            };
+        }
+        let Complex { re, im } = self.c;
+        if im != 0.0 {
+            let sign = if im < 0.0 { '-' } else { '+' };
+            return format!("({re:e}{sign}{:e}*i)", im.abs());
+        }
+        if re < 0.0 { format!("({re:e})") } else { format!("{re:e}") }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -729,6 +759,7 @@ impl MathEngine {
                     numeric_value: None,
                     val: None,
                     integration_report: None,
+                    matrix_expression: None,
                 });
             }
         }
@@ -754,6 +785,7 @@ impl MathEngine {
                     numeric_value: Some(val.c),
                     val: Some(val),
                     integration_report: None,
+                    matrix_expression: None,
                 });
             } else {
                 return Err("Zuweisung erfordert numerischen Wert".to_string());
@@ -812,6 +844,7 @@ impl MathEngine {
                     numeric_value: Some(val.c),
                     val: Some(val),
                     integration_report: self.get_last_integration_report(),
+                    matrix_expression: None,
                 })
             }
             Err(err) => {
@@ -857,6 +890,7 @@ impl MathEngine {
                             numeric_value: None,
                             val: None,
                             integration_report: None,
+                            matrix_expression: None,
                         });
                     }
                 }
@@ -873,6 +907,7 @@ impl MathEngine {
                             numeric_value: None,
                             val: None,
                             integration_report: None,
+                            matrix_expression: None,
                         });
                     }
                 }
@@ -892,6 +927,7 @@ impl MathEngine {
                 numeric_value: None,
                 val: None,
                 integration_report: None,
+                matrix_expression: None,
             });
         }
         None
@@ -929,7 +965,7 @@ impl MathEngine {
         }
     }
 
-    fn try_format_exact_val(&self, _expr: &str, val: Value) -> Option<String> {
+    fn try_format_exact_val(&self, expr: &str, val: Value) -> Option<String> {
         if let Some(r) = val.rat {
             if r.den > 1 {
                 return Some(format!("{} / {}", r.num, r.den));
@@ -938,89 +974,197 @@ impl MathEngine {
                 return None; // Integer
             }
         }
-        self.try_format_exact(_expr, val.c)
+        if !val.c.is_real() {
+            return self.try_format_exact(expr, val.c);
+        }
+        if let Ok(ast) = AstParser::parse(expr) {
+            return self.try_exact_from_ast(&ast);
+        }
+        None
     }
 
     fn try_format_exact(&self, _expr: &str, c: Complex) -> Option<String> {
         if !c.is_real() {
-            let re_ex = self.try_real_exact(c.re).unwrap_or_else(|| self.number_format.format_f64(c.re));
-            let im_ex = self.try_real_exact(c.im.abs()).unwrap_or_else(|| self.number_format.format_f64(c.im.abs()));
+            let re_ex = self.number_format.format_f64(c.re);
+            let im_ex = self.number_format.format_f64(c.im.abs());
             if c.re.abs() < 1e-12 {
                 return Some(if (c.im - 1.0).abs() < 1e-12 {
                     "i".to_string()
                 } else if (c.im + 1.0).abs() < 1e-12 {
                     "-i".to_string()
                 } else {
-                    format!("{} · i", self.try_real_exact(c.im).unwrap_or(im_ex))
+                    format!("{} · i", self.number_format.format_f64(c.im))
                 });
             }
             let sign = if c.im >= 0.0 { "+" } else { "-" };
             return Some(format!("{} {} {} · i", re_ex, sign, im_ex));
         }
-
-        self.try_real_exact(c.re)
+        None
     }
 
-    fn try_real_exact(&self, x: f64) -> Option<String> {
-        if !x.is_finite() {
-            return None;
-        }
-        if (x - x.round()).abs() < 1e-11 {
-            return None; // Already an integer
-        }
-
-        // 1. Check exact rational fraction p / q with strict tolerance
-        if let Some((p, q)) = approximate_fraction(x, 100_000, 1e-12) {
-            if q > 1 && q <= 10_000 {
-                return Some(format!("{} / {}", p, q));
-            }
-        }
-
-        // 2. Check rational multiple of π: (p / q) * π
-        let over_pi = x / std::f64::consts::PI;
-        if let Some((p, q)) = approximate_fraction(over_pi, 720, 1e-10) {
-            if p != 0 && q <= 360 {
-                return Some(match (p, q) {
-                    (1, 1) => "π".to_string(),
-                    (-1, 1) => "-π".to_string(),
-                    (p, 1) => format!("{} π", p),
-                    (1, q) => format!("π / {}", q),
-                    (-1, q) => format!("-π / {}", q),
-                    (p, q) => format!("({} / {}) π", p, q),
-                });
-            }
-        }
-
-        // 3. Check rational multiple of √2, √3, √5, √6, etc.
-        for radicand in [2, 3, 5, 6, 7, 10] {
-            let root = (radicand as f64).sqrt();
-            let ratio = x / root;
-            if let Some((p, q)) = approximate_fraction(ratio, 100, 1e-10) {
-                if p != 0 && q <= 60 {
-                    return Some(match (p, q) {
-                        (1, 1) => format!("√{}", radicand),
-                        (-1, 1) => format!("-√{}", radicand),
-                        (p, 1) => format!("{} √{}", p, radicand),
-                        (1, q) => format!("√{} / {}", radicand, q),
-                        (-1, q) => format!("-√{} / {}", radicand, q),
-                        (p, q) => format!("({} √{}) / {}", p, radicand, q),
-                    });
+    fn try_exact_from_ast(&self, ast: &AstNode) -> Option<String> {
+        match ast {
+            AstNode::Neg(inner) => {
+                let s = self.try_exact_from_ast(inner)?;
+                if let Some(stripped) = s.strip_prefix('-') {
+                    Some(stripped.to_string())
+                } else {
+                    Some(format!("-{}", s))
                 }
             }
-        }
-
-        // 4. Check exact power of e
-        let ln_x = if x > 0.0 { x.ln() } else { -1000.0 };
-        if ln_x > -20.0 && (ln_x - ln_x.round()).abs() < 1e-10 {
-            let k = ln_x.round() as i32;
-            if k == 1 {
-                return Some("e".to_string());
-            } else if k != 0 && k.abs() <= 12 {
-                return Some(format!("e{}", to_superscript(k)));
+            AstNode::Func(name, args) if name == "sqrt" && args.len() == 1 => {
+                let r = try_exact_rat_ast(&args[0])?;
+                if r.num > 0 && r.den == 1 && r.num <= i64::MAX as i128 {
+                    return Some(format_surd_rust(1, r.num as i64, 1));
+                }
+                None
             }
+            AstNode::Func(name, args)
+                if (name == "sin" || name == "cos" || name == "tan") && args.len() == 1 =>
+            {
+                self.try_exact_trig_ast(name, &args[0])
+            }
+            AstNode::Func(name, args)
+                if (name == "asin" || name == "arcsin" || name == "acos" || name == "arccos"
+                    || name == "atan" || name == "arctan")
+                    && args.len() == 1 =>
+            {
+                self.try_exact_inv_trig_ast(name, &args[0])
+            }
+            AstNode::Div(left, right) => {
+                if let (Some(num), AstNode::Func(name, args)) = (try_exact_rat_ast(left), right.as_ref()) {
+                    if name == "sqrt" && args.len() == 1 && num.den == 1 {
+                        if let Some(r) = try_exact_rat_ast(&args[0]) {
+                            if r.num > 0 && r.den == 1 && r.num <= 1_000_000_000 {
+                                return Some(format_surd_rust(i64::try_from(num.num).ok()?, r.num as i64, r.num as i64));
+                            }
+                        }
+                    }
+                }
+                if let (AstNode::Func(name, args), Some(den)) = (left.as_ref(), try_exact_rat_ast(right)) {
+                    if name == "sqrt" && args.len() == 1 && den.num != 0 && den.den == 1 {
+                        if let Some(r) = try_exact_rat_ast(&args[0]) {
+                            if r.num > 0 && r.den == 1 && r.num <= i64::MAX as i128 {
+                                return Some(format_surd_rust(1, r.num as i64, i64::try_from(den.num).ok()?));
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            AstNode::Mul(left, right) => {
+                if let (Some(k), AstNode::Func(name, args)) = (try_exact_rat_ast(left), right.as_ref()) {
+                    if name == "sqrt" && args.len() == 1 && k.den == 1 {
+                        if let Some(r) = try_exact_rat_ast(&args[0]) {
+                            if r.num > 0 && r.den == 1 && r.num <= i64::MAX as i128 {
+                                return Some(format_surd_rust(i64::try_from(k.num).ok()?, r.num as i64, 1));
+                            }
+                        }
+                    }
+                }
+                if let (AstNode::Func(name, args), Some(k)) = (left.as_ref(), try_exact_rat_ast(right)) {
+                    if name == "sqrt" && args.len() == 1 && k.den == 1 {
+                        if let Some(r) = try_exact_rat_ast(&args[0]) {
+                            if r.num > 0 && r.den == 1 && r.num <= i64::MAX as i128 {
+                                return Some(format_surd_rust(i64::try_from(k.num).ok()?, r.num as i64, 1));
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
         }
+    }
 
-        None
+    fn try_exact_trig_ast(&self, fn_name: &str, arg: &AstNode) -> Option<String> {
+        let deg_rat = if matches!(self.angle_mode, AngleMode::Radians) {
+            let pi_coeff = try_pi_coeff_ast(arg).or_else(|| {
+                let z = try_exact_rat_ast(arg)?;
+                if z.num == 0 { Some(z) } else { None }
+            })?;
+            pi_coeff.mul(ExactRat::from_int(180))?
+        } else {
+            try_exact_rat_ast(arg)?
+        };
+        if deg_rat.den != 1 {
+            return None;
+        }
+        let deg = ((deg_rat.num % 360) + 360) % 360;
+        let res = match fn_name {
+            "sin" => match deg {
+                0 | 180 => Some("0"),
+                90 => Some("1"),
+                270 => Some("-1"),
+                30 | 150 => Some("1 / 2"),
+                210 | 330 => Some("-1 / 2"),
+                45 | 135 => Some("√2 / 2"),
+                225 | 315 => Some("-√2 / 2"),
+                60 | 120 => Some("√3 / 2"),
+                240 | 300 => Some("-√3 / 2"),
+                _ => None,
+            },
+            "cos" => match deg {
+                90 | 270 => Some("0"),
+                0 => Some("1"),
+                180 => Some("-1"),
+                60 | 300 => Some("1 / 2"),
+                120 | 240 => Some("-1 / 2"),
+                45 | 315 => Some("√2 / 2"),
+                135 | 225 => Some("-√2 / 2"),
+                30 | 330 => Some("√3 / 2"),
+                150 | 210 => Some("-√3 / 2"),
+                _ => None,
+            },
+            "tan" => match deg {
+                0 | 180 => Some("0"),
+                45 | 225 => Some("1"),
+                135 | 315 => Some("-1"),
+                30 | 210 => Some("√3 / 3"),
+                150 | 330 => Some("-√3 / 3"),
+                60 | 240 => Some("√3"),
+                120 | 300 => Some("-√3"),
+                _ => None,
+            },
+            _ => None,
+        };
+        res.map(|s| s.to_string())
+    }
+
+    fn try_exact_inv_trig_ast(&self, fn_name: &str, arg: &AstNode) -> Option<String> {
+        if !matches!(self.angle_mode, AngleMode::Radians) {
+            return None;
+        }
+        let val = if let Some(r) = try_exact_rat_ast(arg) {
+            Some((r.num as f64) / (r.den as f64))
+        } else if let AstNode::Num(v) = arg {
+            if v.c.is_real() { Some(v.c.re) } else { None }
+        } else {
+            None
+        }?;
+        let res = match fn_name {
+            "asin" | "arcsin" => {
+                if val == 0.5 { Some("π / 6") }
+                else if val == -0.5 { Some("-π / 6") }
+                else if val == 1.0 { Some("π / 2") }
+                else if val == -1.0 { Some("-π / 2") }
+                else { None }
+            }
+            "acos" | "arccos" => {
+                if val == 0.5 { Some("π / 3") }
+                else if val == -0.5 { Some("(2 / 3) π") }
+                else if val == 0.0 { Some("π / 2") }
+                else if val == -1.0 { Some("π") }
+                else { None }
+            }
+            "atan" | "arctan" => {
+                if val == 1.0 { Some("π / 4") }
+                else if val == -1.0 { Some("-π / 4") }
+                else { None }
+            }
+            _ => None,
+        };
+        res.map(|s| s.to_string())
     }
 
     fn evaluate_matrix_expression(&self, expr: &str) -> Result<EvalOutput, String> {
@@ -1028,37 +1172,41 @@ impl MathEngine {
         if let Some(inner) = trimmed.strip_prefix("det(").and_then(|s| s.strip_suffix(')')) {
             let mat = self.eval_matrix_expr(inner)?;
             let det = matrix_det(&mat)?;
-            let dec = self.number_format.format_f64(det);
-            let ex = self.try_real_exact(det).unwrap_or_else(|| dec.clone());
-            let val = if (det - det.round()).abs() < 1e-12 {
-                Value::from_int(det.round() as i128)
-            } else {
-                Value::from_f64(det)
-            };
+            let dec = self.format_value_decimal(det);
+            let exact = Self::format_exact_real(det).unwrap_or_else(|| dec.clone());
             return Ok(EvalOutput {
-                has_distinct_exact: ex != dec,
-                exact_text: ex,
+                has_distinct_exact: exact != dec,
+                exact_text: exact,
                 decimal_text: dec,
-                numeric_value: Some(Complex::real(det)),
-                val: Some(val),
+                numeric_value: Some(det.c),
+                val: Some(det),
                 integration_report: None,
+                matrix_expression: None,
             });
         }
 
         let mat = self.eval_matrix_expr(trimmed)?;
-        let formatted = self.format_matrix(&mat, true);
-        let formatted_dec = self.format_matrix(&mat, false);
+        let decimal = Self::format_matrix(&mat, |value| self.format_value_decimal(value));
+        let exact = Self::format_matrix(&mat, |value| {
+            Self::format_exact_real(value).unwrap_or_else(|| self.format_value_decimal(value))
+        });
         Ok(EvalOutput {
-            has_distinct_exact: formatted != formatted_dec,
-            exact_text: formatted,
-            decimal_text: formatted_dec,
+            has_distinct_exact: exact != decimal,
+            exact_text: exact,
+            decimal_text: decimal,
             numeric_value: None,
             val: None,
             integration_report: None,
+            matrix_expression: Some(Self::format_matrix(&mat, Value::reusable_expression)),
         })
     }
 
-    fn eval_matrix_expr(&self, s: &str) -> Result<Vec<Vec<f64>>, String> {
+    fn format_exact_real(value: Value) -> Option<String> {
+        let rat = value.rat?;
+        Some(if rat.den == 1 { rat.num.to_string() } else { format!("{} / {}", rat.num, rat.den) })
+    }
+
+    fn eval_matrix_expr(&self, s: &str) -> Result<Vec<Vec<Value>>, String> {
         let s = s.trim();
         let mut depth = 0;
         let mut split_pos = None;
@@ -1069,7 +1217,6 @@ impl MathEngine {
             else if depth == 0 && (ch == '+' || ch == '-') && i > 0 {
                 split_pos = Some(i);
                 op = ch;
-                break;
             }
         }
         if let Some(pos) = split_pos {
@@ -1080,10 +1227,14 @@ impl MathEngine {
             }
             let rows = left.len();
             let cols = left[0].len();
-            let mut res = vec![vec![0.0; cols]; rows];
+            let mut res = vec![vec![Value::from_int(0); cols]; rows];
             for r in 0..rows {
                 for c in 0..cols {
-                    res[r][c] = if op == '+' { left[r][c] + right[r][c] } else { left[r][c] - right[r][c] };
+                    res[r][c] = if op == '+' {
+                        left[r][c].add(right[r][c])
+                    } else {
+                        left[r][c].sub(right[r][c])
+                    };
                 }
             }
             return Ok(res);
@@ -1103,7 +1254,7 @@ impl MathEngine {
             let mat = self.eval_matrix_expr(inner)?;
             let rows = mat.len();
             let cols = mat[0].len();
-            let mut t = vec![vec![0.0; rows]; cols];
+            let mut t = vec![vec![Value::from_int(0); rows]; cols];
             for r in 0..rows {
                 for c in 0..cols {
                     t[c][r] = mat[r][c];
@@ -1114,7 +1265,7 @@ impl MathEngine {
         Err("Ungültiger Matrix-Ausdruck".to_string())
     }
 
-    fn parse_matrix(&self, s: &str) -> Result<Vec<Vec<f64>>, String> {
+    fn parse_matrix(&self, s: &str) -> Result<Vec<Vec<Value>>, String> {
         let s = s.trim();
         let inner = s
             .strip_prefix('[')
@@ -1136,10 +1287,23 @@ impl MathEngine {
                     depth -= 1;
                     if depth == 0 {
                         let mut row_vals = Vec::new();
-                        for cell in cur.split(',') {
+                        let mut nested = 0;
+                        let cells = cur.split(|ch| {
+                            match ch {
+                                '(' | '[' => nested += 1,
+                                ')' | ']' => nested -= 1,
+                                _ => {}
+                            }
+                            ch == ',' && nested == 0
+                        });
+                        for cell in cells {
                             let mut p = ExprParser::new(cell.trim(), self, None);
                             let v = p.parse_expr()?;
-                            row_vals.push(v.c.re);
+                            p.skip_ws();
+                            if p.pos < p.chars.len() || !v.c.is_real() || !v.c.re.is_finite() {
+                                return Err("Matrixzellen müssen endliche reelle Zahlen sein".to_string());
+                            }
+                            row_vals.push(v);
                         }
                         rows.push(row_vals);
                         cur.clear();
@@ -1165,20 +1329,13 @@ impl MathEngine {
         Ok(rows)
     }
 
-    fn format_matrix(&self, mat: &[Vec<f64>], exact: bool) -> String {
+    fn format_matrix(mat: &[Vec<Value>], format_cell: impl Fn(Value) -> String) -> String {
         let row_strs: Vec<String> = mat
             .iter()
             .map(|r| {
                 let cells: Vec<String> = r
                     .iter()
-                    .map(|&v| {
-                        if exact {
-                            self.try_real_exact(v)
-                                .unwrap_or_else(|| self.number_format.format_f64(v))
-                        } else {
-                            self.number_format.format_f64(v)
-                        }
-                    })
+                    .map(|&value| format_cell(value))
                     .collect();
                 format!("[{}]", cells.join(", "))
             })
@@ -1187,7 +1344,11 @@ impl MathEngine {
     }
 }
 
-fn matrix_det(m: &[Vec<f64>]) -> Result<f64, String> {
+fn matrix_minor(a: Value, b: Value, c: Value, d: Value) -> Value {
+    a.mul(d).sub(b.mul(c))
+}
+
+fn matrix_det(m: &[Vec<Value>]) -> Result<Value, String> {
     let n = m.len();
     if n == 0 || m[0].len() != n {
         return Err("Determinante erfordert eine quadratische Matrix".to_string());
@@ -1196,105 +1357,74 @@ fn matrix_det(m: &[Vec<f64>]) -> Result<f64, String> {
         return Ok(m[0][0]);
     }
     if n == 2 {
-        return Ok(m[0][0] * m[1][1] - m[0][1] * m[1][0]);
+        return Ok(matrix_minor(m[0][0], m[0][1], m[1][0], m[1][1]));
     }
     if n == 3 {
         return Ok(
-            m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
-                - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
-                + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]),
+            m[0][0].mul(matrix_minor(m[1][1], m[1][2], m[2][1], m[2][2]))
+                .sub(m[0][1].mul(matrix_minor(m[1][0], m[1][2], m[2][0], m[2][2])))
+                .add(m[0][2].mul(matrix_minor(m[1][0], m[1][1], m[2][0], m[2][1]))),
         );
     }
     // General NxN via LU / Gaussian elimination with partial pivoting
     let mut a = m.to_vec();
-    let mut det = 1.0;
-    let mut sign = 1.0;
+    let mut det = Value::from_int(1);
+    let mut sign = 1;
     for i in 0..n {
         let mut pivot_row = i;
-        let mut max_val = a[i][i].abs();
+        let mut max_val = a[i][i].c.re.abs();
         for k in (i + 1)..n {
-            if a[k][i].abs() > max_val {
-                max_val = a[k][i].abs();
+            if a[k][i].c.re.abs() > max_val {
+                max_val = a[k][i].c.re.abs();
                 pivot_row = k;
             }
         }
-        if max_val < 1e-15 {
-            return Ok(0.0);
+        if max_val == 0.0 {
+            return Ok(Value::from_int(0));
         }
         if pivot_row != i {
             a.swap(i, pivot_row);
             sign = -sign;
         }
         let pivot = a[i][i];
-        det *= pivot;
+        det = det.mul(pivot);
         for k in (i + 1)..n {
-            let factor = a[k][i] / pivot;
+            let factor = a[k][i].div(pivot)?;
             for j in (i + 1)..n {
-                a[k][j] -= factor * a[i][j];
+                a[k][j] = a[k][j].sub(factor.mul(a[i][j]));
             }
         }
     }
-    Ok(det * sign)
+    Ok(det.mul(Value::from_int(sign)))
 }
 
-fn matrix_inv(m: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, String> {
+fn matrix_inv(m: &[Vec<Value>]) -> Result<Vec<Vec<Value>>, String> {
     let det = matrix_det(m)?;
-    if det.abs() < 1e-14 {
+    if det.rat.map_or(det.c.re.abs() < 1e-14, |rat| rat.num == 0) {
         return Err("Matrix ist singulär (det = 0)".to_string());
     }
     let n = m.len();
+    let zero = Value::from_int(0);
     if n == 2 {
         Ok(vec![
-            vec![m[1][1] / det, -m[0][1] / det],
-            vec![-m[1][0] / det, m[0][0] / det],
+            vec![m[1][1].div(det)?, zero.sub(m[0][1]).div(det)?],
+            vec![zero.sub(m[1][0]).div(det)?, m[0][0].div(det)?],
         ])
     } else if n == 3 {
-        let mut inv = vec![vec![0.0; 3]; 3];
+        let mut inv = vec![vec![zero; 3]; 3];
         for r in 0..3 {
             for c in 0..3 {
                 let r1 = (r + 1) % 3;
                 let r2 = (r + 2) % 3;
                 let c1 = (c + 1) % 3;
                 let c2 = (c + 2) % 3;
-                inv[c][r] = (m[r1][c1] * m[r2][c2] - m[r1][c2] * m[r2][c1]) / det;
+                inv[c][r] = matrix_minor(m[r1][c1], m[r1][c2], m[r2][c1], m[r2][c2]).div(det)?;
             }
         }
         Ok(inv)
     } else {
         Err("Matrix-Invertierung wird für 2×2 und 3×3 unterstützt".to_string())
     }
-}
-
-pub fn approximate_fraction(x: f64, max_denom: i64, tol: f64) -> Option<(i64, i64)> {
-    let sign = if x < 0.0 { -1 } else { 1 };
-    let mut v = x.abs();
-    let mut h1: i64 = 1;
-    let mut h2: i64 = 0;
-    let mut k1: i64 = 0;
-    let mut k2: i64 = 1;
-
-    for _ in 0..32 {
-        let a = v.floor() as i64;
-        let h = a.checked_mul(h1)?.checked_add(h2)?;
-        let k = a.checked_mul(k1)?.checked_add(k2)?;
-        if k > max_denom {
-            break;
-        }
-        h2 = h1;
-        h1 = h;
-        k2 = k1;
-        k1 = k;
-
-        if k1 > 0 && ((h1 as f64 / k1 as f64) - x.abs()).abs() <= tol {
-            return Some((sign * h1, k1));
-        }
-        let rem = v - a as f64;
-        if rem.abs() < 1e-14 {
-            break;
-        }
-        v = 1.0 / rem;
-    }
-    None
 }
 
 // --- Adaptive Gauss-Legendre Quadrature with Error Control & Convergence Assertion ---
@@ -2288,7 +2418,7 @@ impl AstParser {
             } else if let Some(ch) = self.peek() {
                 if ch == '(' || ch == '√' || ch.is_alphabetic() || ch == '_' {
                     // Implicit multiplication
-                    let right = self.parse_power()?;
+                    let right = self.parse_unary()?;
                     left = AstNode::Mul(Box::new(left), Box::new(right));
                 } else {
                     break;
@@ -2376,27 +2506,49 @@ impl AstParser {
 
         // Decimal or Integer
         if ch.is_ascii_digit() || ch == '.' {
-            let start = self.pos;
+            let mut s = String::new();
             let mut has_dot = false;
             let mut has_exp = false;
             while self.pos < self.chars.len() {
                 let c = self.chars[self.pos];
                 if c == '.' {
                     has_dot = true;
+                    s.push(c);
                     self.pos += 1;
                 } else if c == 'e' || c == 'E' {
-                    has_exp = true;
-                    self.pos += 1;
-                    if self.pos < self.chars.len() && (self.chars[self.pos] == '+' || self.chars[self.pos] == '-') {
-                        self.pos += 1;
+                    let mut look = self.pos + 1;
+                    while look < self.chars.len() && self.chars[look].is_whitespace() {
+                        look += 1;
+                    }
+                    if look < self.chars.len()
+                        && (self.chars[look].is_ascii_digit()
+                            || self.chars[look] == '+'
+                            || self.chars[look] == '-')
+                    {
+                        has_exp = true;
+                        s.push(c);
+                        self.pos = look;
+                        if self.chars[self.pos] == '+' || self.chars[self.pos] == '-' {
+                            s.push(self.chars[self.pos]);
+                            self.pos += 1;
+                            while self.pos < self.chars.len() && self.chars[self.pos].is_whitespace() {
+                                self.pos += 1;
+                            }
+                        }
+                        while self.pos < self.chars.len() && self.chars[self.pos].is_ascii_digit() {
+                            s.push(self.chars[self.pos]);
+                            self.pos += 1;
+                        }
+                    } else {
+                        break;
                     }
                 } else if c.is_ascii_digit() {
+                    s.push(c);
                     self.pos += 1;
                 } else {
                     break;
                 }
             }
-            let s: String = self.chars[start..self.pos].iter().collect();
             if !has_dot && !has_exp {
                 if let Ok(n) = s.parse::<i128>() {
                     return Ok(AstNode::Num(Value::from_int(n)));
@@ -2541,7 +2693,7 @@ impl<'a> ExprParser<'a> {
                         || c == 'α'
                         || c == 'σ' =>
                 {
-                    let right = self.parse_power()?;
+                    let right = self.parse_unary()?;
                     left = left.mul(right);
                 }
                 _ => break,
@@ -3131,4 +3283,85 @@ fn binomial_coeff(n: f64, k: f64) -> f64 {
         res = res * ((n_u - k_u + i) as f64) / (i as f64);
     }
     res
+}
+
+fn try_exact_rat_ast(node: &AstNode) -> Option<ExactRat> {
+    match node {
+        AstNode::Num(v) => v.rat,
+        AstNode::Neg(inner) => try_exact_rat_ast(inner).and_then(|r| ExactRat::new(-r.num, r.den)),
+        AstNode::Add(a, b) => try_exact_rat_ast(a)?.add(try_exact_rat_ast(b)?),
+        AstNode::Sub(a, b) => try_exact_rat_ast(a)?.sub(try_exact_rat_ast(b)?),
+        AstNode::Mul(a, b) => try_exact_rat_ast(a)?.mul(try_exact_rat_ast(b)?),
+        AstNode::Div(a, b) => try_exact_rat_ast(a)?.div(try_exact_rat_ast(b)?),
+        _ => None,
+    }
+}
+
+fn try_pi_coeff_ast(node: &AstNode) -> Option<ExactRat> {
+    match node {
+        AstNode::Var(n) if n == "pi" || n == "π" => Some(ExactRat::from_int(1)),
+        AstNode::Neg(inner) => try_pi_coeff_ast(inner).and_then(|r| ExactRat::new(-r.num, r.den)),
+        AstNode::Mul(l, r) => {
+            if let (Some(a), Some(b)) = (try_exact_rat_ast(l), try_pi_coeff_ast(r)) {
+                return a.mul(b);
+            }
+            if let (Some(a), Some(b)) = (try_pi_coeff_ast(l), try_exact_rat_ast(r)) {
+                return a.mul(b);
+            }
+            None
+        }
+        AstNode::Div(l, r) => try_pi_coeff_ast(l)?.div(try_exact_rat_ast(r)?),
+        _ => None,
+    }
+}
+
+fn format_surd_rust(coeff: i64, radicand: i64, den: i64) -> String {
+    if coeff == 0 {
+        return "0".to_string();
+    }
+    let mut coeff = i128::from(coeff);
+    let mut den = i128::from(den);
+    if den < 0 {
+        coeff = -coeff;
+        den = -den;
+    }
+    let mut out = 1i64;
+    let mut rem = radicand;
+    let mut p = 2i64;
+    // Any square factors left in the radicand preserve the value.
+    while p <= 10_000 && p <= rem / p {
+        while rem % (p * p) == 0 {
+            out *= p;
+            rem /= p * p;
+        }
+        p += 1;
+    }
+    let root = (rem as f64).sqrt() as i64;
+    if i128::from(root) * i128::from(root) == i128::from(rem) {
+        out *= root;
+        rem = 1;
+    }
+    let mut num_coeff = coeff * i128::from(out);
+    let g = gcd_i128(num_coeff.abs(), den);
+    num_coeff /= g;
+    den /= g;
+    if rem == 1 {
+        return if den == 1 {
+            num_coeff.to_string()
+        } else {
+            format!("{} / {}", num_coeff, den)
+        };
+    }
+    let sign = if num_coeff < 0 { "-" } else { "" };
+    let abs_coeff = num_coeff.abs();
+    let top = if abs_coeff == 1 {
+        format!("√{}", rem)
+    } else {
+        format!("{}√{}", abs_coeff, rem)
+    };
+    if den == 1 {
+        format!("{}{}", sign, top)
+    } else {
+        format!("{}{} / {}", sign, top, den)
+    }
 }

@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.graphics.RectF;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.graphics.Canvas;
@@ -18,6 +19,8 @@ import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.Editable;
 import android.text.Layout;
 import android.text.TextPaint;
@@ -27,6 +30,7 @@ import android.text.style.ForegroundColorSpan;
 import android.text.style.RelativeSizeSpan;
 import android.text.style.SubscriptSpan;
 import android.util.TypedValue;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
@@ -45,8 +49,14 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 
 /**
  * Android 12 (API 31+) Material You (Monet Dynamic Color) Scientific Calculator.
@@ -55,6 +65,11 @@ import java.util.Map;
 public class MainActivity extends Activity {
 
     private final CalculatorEngine engine = new CalculatorEngine();
+    private static final ExecutorService RESULT_WRITER = Executors.newSingleThreadExecutor();
+    private boolean resultWritePending;
+    private long draftRevision;
+    private final Handler draftHandler = new Handler(Looper.getMainLooper());
+    private final Runnable writeDraft = this::saveDraft;
     private final CategoryDef[] constantCategories = getConstantCategories();
     private boolean moduloPositive = true;
     private boolean showExactFirst = true;
@@ -82,6 +97,7 @@ public class MainActivity extends Activity {
         String expr;
         String exactText;
         String decimalText;
+        String reusableText;
         String reportText;
         boolean showingExact;
         String formulaLayout = "";
@@ -91,9 +107,14 @@ public class MainActivity extends Activity {
         }
 
         HistoryEntry(String expr, String exactText, String decimalText, String reportText, boolean showingExact) {
+            this(expr, exactText, decimalText, exactText, reportText, showingExact);
+        }
+
+        HistoryEntry(String expr, String exactText, String decimalText, String reusableText, String reportText, boolean showingExact) {
             this.expr = expr;
             this.exactText = exactText;
             this.decimalText = decimalText;
+            this.reusableText = (reusableText != null && !reusableText.isEmpty()) ? reusableText : exactText;
             this.reportText = reportText;
             this.showingExact = showingExact;
         }
@@ -111,8 +132,10 @@ public class MainActivity extends Activity {
     private LinearLayout sectionHeaderRow;
     private FormulaEditor plotFormula1;
     private FormulaEditor plotFormula2;
-    private CalculatorEngine.PlotFunction compiledPlotFn1 = null;
-    private CalculatorEngine.PlotFunction compiledPlotFn2 = null;
+    private CalculatorEngine.PlotFunction compiledPlotFn1;
+    private CalculatorEngine.PlotFunction compiledPlotFn2;
+    private String compiledPlotExpression1;
+    private String compiledPlotExpression2;
     private Plotter2DView plotView;
 
     @Override
@@ -122,7 +145,8 @@ public class MainActivity extends Activity {
         resolveAndroid12DynamicColors();
 
         // Load saved state (Preferences & History & Calculations & UI Drafts)
-        android.content.SharedPreferences prefs = getSharedPreferences("niob_calculator", MODE_PRIVATE);
+        SharedPreferences prefs = getSharedPreferences("niob_calculator", MODE_PRIVATE);
+        SharedPreferences drafts = getSharedPreferences("niob_drafts", MODE_PRIVATE);
         showExactFirst = prefs.getBoolean("show_exact_first", true);
         showMoreVariables = prefs.getBoolean("show_more_variables", false);
         engine.setRadiansMode(prefs.getBoolean("radians_mode", true));
@@ -143,17 +167,23 @@ public class MainActivity extends Activity {
         }
 
         formula = new FormulaEditor(this, colOnSurface, colPrimary, editor -> {
-            saveDraft();
+            ++draftRevision;
+            scheduleDraftSave();
             updatePreviewOnly();
         }, () -> handleKeyPress("="), MULTI_CHAR_TOKENS);
-        formula.restore(prefs.getString("formula_draft", ""), prefs.getString("current_input", ""));
+        long savedRevision = drafts.getLong("calculator_revision", 0);
+        long committedRevision = prefs.getLong("committed_draft_revision", -1);
+        draftRevision = Math.max(savedRevision, committedRevision);
+        boolean restoreCalculatorDraft = savedRevision > committedRevision;
+        formula.restore(restoreCalculatorDraft ? drafts.getString("formula_draft", prefs.getString("formula_draft", "")) : "",
+                restoreCalculatorDraft ? drafts.getString("current_input", prefs.getString("current_input", "")) : "");
 
         plotFormula1 = makePlotFormula("f₁(x)", colPrimary,
-                prefs.getString("plot_layout_1", ""), prefs.getString("plot_expr_1", "sin(x) * cos(x/2)"));
+                drafts.getString("plot_layout_1", prefs.getString("plot_layout_1", "")),
+                drafts.getString("plot_expr_1", prefs.getString("plot_expr_1", "sin(x) * cos(x/2)")));
         plotFormula2 = makePlotFormula("f₂(x)", colOnSecondaryContainer,
-                prefs.getString("plot_layout_2", ""), prefs.getString("plot_expr_2", "x^2 / 4 - 2"));
-        compiledPlotFn1 = engine.compilePlotFunction(plottableExpression(plotFormula1));
-        compiledPlotFn2 = engine.compilePlotFunction(plottableExpression(plotFormula2));
+                drafts.getString("plot_layout_2", prefs.getString("plot_layout_2", "")),
+                drafts.getString("plot_expr_2", prefs.getString("plot_expr_2", "x^2 / 4 - 2")));
 
         int histCount = prefs.getInt("history_count", -1);
         if (histCount >= 0) {
@@ -161,10 +191,12 @@ public class MainActivity extends Activity {
                 String expr = prefs.getString("hist_expr_" + i, "");
                 String ex = prefs.getString("hist_ex_" + i, "");
                 String dec = prefs.getString("hist_dec_" + i, "");
+                String reuse = prefs.getString("hist_reuse_" + i, "");
                 String rep = prefs.getString("hist_rep_" + i, "");
                 boolean showEx = prefs.getBoolean("hist_show_ex_" + i, showExactFirst);
                 if (!expr.isEmpty()) {
-                    HistoryEntry entry = new HistoryEntry(expr, ex, dec, rep.isEmpty() ? null : rep, showEx);
+                    HistoryEntry entry = new HistoryEntry(expr, ex, dec, reuse.isEmpty() ? legacyResult(ex, dec) : reuse,
+                            rep.isEmpty() ? null : rep, showEx);
                     entry.formulaLayout = prefs.getString("hist_layout_" + i, "");
                     history.add(entry);
                 }
@@ -188,11 +220,28 @@ public class MainActivity extends Activity {
         rebuildScreen();
     }
 
+    private static String legacyResult(String exact, String decimal) {
+        int exactAssignment = exact.indexOf(":=");
+        int decimalAssignment = decimal.indexOf(":=");
+        String exactValue = exactAssignment < 0 ? exact : exact.substring(exactAssignment + 2).trim();
+        String decimalValue = decimalAssignment < 0 ? decimal : decimal.substring(decimalAssignment + 2).trim();
+        // Earlier versions inferred radicals from rounded values.
+        if (exactValue.contains("√") && !decimalValue.isEmpty()) return decimalValue;
+        return exactValue;
+    }
+
+    private void scheduleDraftSave() {
+        draftHandler.removeCallbacks(writeDraft);
+        draftHandler.postDelayed(writeDraft, 150);
+    }
+
     private void saveDraft() {
-        android.content.SharedPreferences.Editor ed = getSharedPreferences("niob_calculator", MODE_PRIVATE).edit();
+        draftHandler.removeCallbacks(writeDraft);
+        SharedPreferences.Editor ed = getSharedPreferences("niob_drafts", MODE_PRIVATE).edit();
         if (formula != null) {
             ed.putString("current_input", formula.expression());
             ed.putString("formula_draft", formula.layoutState());
+            ed.putLong("calculator_revision", draftRevision);
         }
         if (plotFormula1 != null) {
             ed.putString("plot_expr_1", plotFormula1.expression());
@@ -205,41 +254,25 @@ public class MainActivity extends Activity {
         ed.apply();
     }
 
-    private void saveHistory() {
-        android.content.SharedPreferences.Editor ed = getSharedPreferences("niob_calculator", MODE_PRIVATE).edit();
+    private void writeHistoryToEditor(SharedPreferences.Editor ed) {
         ed.putInt("history_count", history.size());
         for (int i = 0; i < history.size(); i++) {
-            HistoryEntry h = history.get(i);
-            ed.putString("hist_expr_" + i, h.expr);
-            ed.putString("hist_layout_" + i, h.formulaLayout);
-            ed.putString("hist_ex_" + i, h.exactText);
-            ed.putString("hist_dec_" + i, h.decimalText);
-            ed.putString("hist_rep_" + i, h.reportText != null ? h.reportText : "");
-            ed.putBoolean("hist_show_ex_" + i, h.showingExact);
+            writeHistoryEntry(ed, i, history.get(i));
         }
-        ed.apply();
     }
 
-    private void saveState() {
-        android.content.SharedPreferences.Editor ed = getSharedPreferences("niob_calculator", MODE_PRIVATE).edit();
-        ed.putBoolean("show_exact_first", showExactFirst);
-        ed.putBoolean("show_more_variables", showMoreVariables);
-        ed.putBoolean("radians_mode", engine.isRadiansMode());
-        ed.putBoolean("modulo_always_positive", engine.isModuloAlwaysPositive());
-        ed.putString("ans_value", engine.serializeValue(engine.getLastAns()));
-        if (formula != null) {
-            ed.putString("current_input", formula.expression());
-            ed.putString("formula_draft", formula.layoutState());
-        }
-        if (plotFormula1 != null) {
-            ed.putString("plot_expr_1", plotFormula1.expression());
-            ed.putString("plot_layout_1", plotFormula1.layoutState());
-        }
-        if (plotFormula2 != null) {
-            ed.putString("plot_expr_2", plotFormula2.expression());
-            ed.putString("plot_layout_2", plotFormula2.layoutState());
-        }
+    private void writeHistoryEntry(SharedPreferences.Editor ed, int index, HistoryEntry entry) {
+        ed.putString("hist_expr_" + index, entry.expr);
+        ed.putString("hist_layout_" + index, entry.formulaLayout);
+        ed.putString("hist_ex_" + index, entry.exactText);
+        ed.putString("hist_dec_" + index, entry.decimalText);
+        ed.putString("hist_reuse_" + index, entry.reusableText);
+        ed.putString("hist_rep_" + index, entry.reportText != null ? entry.reportText : "");
+        ed.putBoolean("hist_show_ex_" + index, entry.showingExact);
+    }
 
+    private void writeVarsAndAnsToEditor(SharedPreferences.Editor ed) {
+        ed.putString("ans_value", engine.serializeValue(engine.getLastAns()));
         Map<String, CalculatorEngine.Value> userVars = engine.getUserVariables();
         for (String varName : CalculatorEngine.USER_VARIABLES) {
             if (userVars.containsKey(varName)) {
@@ -248,30 +281,74 @@ public class MainActivity extends Activity {
                 ed.putString("var_" + varName, "__UNSET__");
             }
         }
+    }
 
-        ed.putInt("history_count", history.size());
-        for (int i = 0; i < history.size(); i++) {
-            HistoryEntry h = history.get(i);
-            ed.putString("hist_expr_" + i, h.expr);
-            ed.putString("hist_layout_" + i, h.formulaLayout);
-            ed.putString("hist_ex_" + i, h.exactText);
-            ed.putString("hist_dec_" + i, h.decimalText);
-            ed.putString("hist_rep_" + i, h.reportText != null ? h.reportText : "");
-            ed.putBoolean("hist_show_ex_" + i, h.showingExact);
+    private void persistResult(HistoryEntry entry, CalculatorEngine.Value previousAns,
+                               Map<String, CalculatorEngine.Value> previousVariables) {
+        SharedPreferences prefs = getSharedPreferences("niob_calculator", MODE_PRIVATE);
+        long previousCommittedDraft = prefs.getLong("committed_draft_revision", -1);
+        SharedPreferences.Editor ed = prefs.edit();
+        writeVarsAndAnsToEditor(ed);
+        writeHistoryEntry(ed, history.size(), entry);
+        ed.putInt("history_count", history.size() + 1);
+        // A process stop before the editor clears the draft must not restore this input.
+        long submittedDraft = draftRevision;
+        ed.putLong("committed_draft_revision", submittedDraft);
+        resultWritePending = true;
+        RESULT_WRITER.execute(() -> {
+            boolean saved = commitPreferences(ed);
+            runOnUiThread(() -> {
+                resultWritePending = false;
+                if (saved) {
+                    history.add(entry);
+                    if (draftRevision == submittedDraft) {
+                        clearInput();
+                    } else {
+                        saveDraft();
+                        updatePreviewOnly();
+                    }
+                    refreshHistoryViews(true);
+                } else {
+                    engine.setLastAns(previousAns);
+                    for (String name : CalculatorEngine.USER_VARIABLES) {
+                        CalculatorEngine.Value value = previousVariables.get(name);
+                        if (value == null) engine.unsetVariable(name);
+                        else engine.setUserVariable(name, value);
+                    }
+                    prefs.edit().putLong("committed_draft_revision", previousCommittedDraft).apply();
+                    saveState();
+                    saveDraft();
+                    updatePreviewOnly();
+                    Toast.makeText(this, "Rechnung konnte nicht gespeichert werden", Toast.LENGTH_LONG).show();
+                }
+            });
+        });
+    }
+
+    private static boolean commitPreferences(SharedPreferences.Editor editor) {
+        try {
+            return editor.commit();
+        } catch (RuntimeException e) {
+            Log.e("Niob", "Unable to save calculator result", e);
+            return false;
         }
+    }
+
+    private void saveState() {
+        android.content.SharedPreferences.Editor ed = getSharedPreferences("niob_calculator", MODE_PRIVATE).edit();
+        ed.putBoolean("show_exact_first", showExactFirst);
+        ed.putBoolean("show_more_variables", showMoreVariables);
+        ed.putBoolean("radians_mode", engine.isRadiansMode());
+        ed.putBoolean("modulo_always_positive", engine.isModuloAlwaysPositive());
+        writeVarsAndAnsToEditor(ed);
+        writeHistoryToEditor(ed);
         ed.apply();
     }
 
     @Override
     protected void onPause() {
         super.onPause();
-        saveState();
-    }
-
-    @Override
-    protected void onStop() {
-        super.onStop();
-        saveState();
+        saveDraft();
     }
 
     @Override
@@ -417,6 +494,7 @@ public class MainActivity extends Activity {
             itemWrap.setBackground(ripple);
 
             itemWrap.setOnClickListener(v -> {
+                if (resultWritePending) return;
                 v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
                 activeTab = tabIdx;
                 rebuildScreen();
@@ -1164,6 +1242,7 @@ private static class FilledBackspaceDrawable extends Drawable {
             exactBadge.setMinimumHeight(dp(28));
             exactBadge.setPadding(dp(9), dp(3), dp(9), dp(3));
             exactBadge.setOnClickListener(v -> {
+                if (resultWritePending) return;
                 v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
                 item.showingExact = !item.showingExact;
                 saveState();
@@ -1183,17 +1262,18 @@ private static class FilledBackspaceDrawable extends Drawable {
             resRow.addView(resSpacer, new LinearLayout.LayoutParams(0, 0, 1f));
 
             String rawShown = item.showingExact ? item.exactText : item.decimalText;
+            String reuseVal = (item.reusableText != null && !item.reusableText.isEmpty()) ? item.reusableText : item.exactText;
             String cleanFrac = rawShown != null ? rawShown.replace(" ", "") : "";
             boolean isFractionResult = item.showingExact && cleanFrac.matches("^-?\\d+/\\d+$");
 
-            View matrixResult = formula.matrixResult(rawShown, 15f, () -> insertHistoryValue(item.exactText));
+            View matrixResult = formula.matrixResult(rawShown, 15f, () -> insertHistoryValue(reuseVal));
             if (matrixResult != null) {
                 resRow.addView(matrixResult);
             } else if (isFractionResult) {
                 String[] fracParts = cleanFrac.split("/");
                 View fracResultView = createFractionView(fracParts[0].trim(), fracParts[1].trim(), 20f);
                 fracResultView.setOnClickListener(v -> {
-                    insertHistoryValue(item.exactText);
+                    insertHistoryValue(reuseVal);
                 });
                 LinearLayout.LayoutParams fracLp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -1208,7 +1288,7 @@ private static class FilledBackspaceDrawable extends Drawable {
                 setScaledTextSize(resTv, 23f, 2.0f);
                 resTv.setTypeface(Typeface.DEFAULT_BOLD);
                 resTv.setOnClickListener(v -> {
-                    insertHistoryValue(item.exactText);
+                    insertHistoryValue(reuseVal);
                 });
                 resRow.addView(resTv, new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -1252,11 +1332,11 @@ private static class FilledBackspaceDrawable extends Drawable {
     }
 
     private void clearInput() {
-        formula.clear();
+        if (!resultWritePending) formula.clear();
     }
 
     private void updatePreviewOnly() {
-        if (previewDisplayView == null) return;
+        if (previewDisplayView == null || resultWritePending) return;
         previewDisplayView.setVisibility(View.VISIBLE);
         previewMatrix.removeAllViews();
         previewMatrix.setVisibility(View.GONE);
@@ -1728,6 +1808,7 @@ private static class FilledBackspaceDrawable extends Drawable {
     }
 
     private void handleKeyPress(String key) {
+        if (resultWritePending) return;
         if (key.equals("TOGGLE_VAR_MORE")) {
             showMoreVariables = !showMoreVariables;
             saveState();
@@ -1796,16 +1877,14 @@ private static class FilledBackspaceDrawable extends Drawable {
             String expression = formula.expression();
             if (!expression.trim().isEmpty()) {
                 try {
+                    CalculatorEngine.Value previousAns = engine.getLastAns();
+                    Map<String, CalculatorEngine.Value> previousVariables = engine.getUserVariables();
                     CalculatorEngine.Result result = engine.evaluateAndCommit(expression);
                     String rep = getIntegrationReportText(expression);
                     HistoryEntry entry = new HistoryEntry(expression, result.exactText, result.decimalText,
-                            rep, showExactFirst);
+                            result.reusableText, rep, showExactFirst);
                     entry.formulaLayout = formula.layoutState();
-                    history.add(entry);
-                    saveHistory();
-                    saveDraft();
-                    clearInput();
-                    refreshHistoryViews(true);
+                    persistResult(entry, previousAns, previousVariables);
                 } catch (Exception e) {
                     formula.performHapticFeedback(HapticFeedbackConstants.REJECT);
                     updatePreviewOnly();
@@ -1841,23 +1920,35 @@ private static class FilledBackspaceDrawable extends Drawable {
     }
 
     private void plotFormulaChanged(FormulaEditor editor) {
+        preparePlotFormula(editor);
+        scheduleDraftSave();
+        invalidatePlot();
+    }
+
+    private void preparePlotFormula(FormulaEditor editor) {
         String expression = plottableExpression(editor);
+        boolean first = editor == plotFormula1;
+        String previous = first ? compiledPlotExpression1 : compiledPlotExpression2;
+        CalculatorEngine.PlotFunction function = first ? compiledPlotFn1 : compiledPlotFn2;
         String error = null;
-        if (!expression.isEmpty()) {
-            try {
-                engine.validatePlotSyntax(expression);
-            } catch (Exception e) {
-                error = "Ungültiger Ausdruck";
+        try {
+            if (function != null && expression.equals(previous)) {
+                engine.validatePlotFunction(function);
+            } else {
+                function = engine.compilePlotFunction(expression);
             }
+        } catch (RuntimeException e) {
+            error = e.getMessage();
+            function = null;
         }
         editor.setInputError(error);
-        if (editor == plotFormula1) {
-            compiledPlotFn1 = (error == null && !expression.isEmpty()) ? engine.compilePlotFunction(expression) : null;
-        } else if (editor == plotFormula2) {
-            compiledPlotFn2 = (error == null && !expression.isEmpty()) ? engine.compilePlotFunction(expression) : null;
+        if (first) {
+            compiledPlotExpression1 = expression;
+            compiledPlotFn1 = function;
+        } else {
+            compiledPlotExpression2 = expression;
+            compiledPlotFn2 = function;
         }
-        saveDraft();
-        invalidatePlot();
     }
 
     private static String plottableExpression(FormulaEditor editor) {
@@ -1865,7 +1956,7 @@ private static class FilledBackspaceDrawable extends Drawable {
     }
 
     private void invalidatePlot() {
-        if (plotView != null) plotView.invalidate();
+        if (plotView != null) plotView.requestCurves();
     }
 
     private void finishPlotEditing() {
@@ -1890,6 +1981,8 @@ private static class FilledBackspaceDrawable extends Drawable {
         float formulaSize = landscape ? 16f : 19f;
         addPlotFormula(formulas, "f₁(x)", plotFormula1, colPrimary, formulaSize, landscape);
         addPlotFormula(formulas, "f₂(x)", plotFormula2, colOnSecondaryContainer, formulaSize, landscape);
+        preparePlotFormula(plotFormula1);
+        preparePlotFormula(plotFormula2);
         header.addView(formulas);
 
         String draft = formula.expression().trim();
@@ -1961,6 +2054,12 @@ private static class FilledBackspaceDrawable extends Drawable {
         private final Paint curve1Paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint curve2Paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final ScaleGestureDetector scaleDetector;
+        private ScheduledThreadPoolExecutor plotExecutor;
+        private Future<?> pendingCurves;
+        private int renderGeneration;
+        private float[] cachedSegments1;
+        private float[] cachedSegments2;
+        private final Runnable computeCurves = this::scheduleCurveCompute;
         private float centerX = 0f;
         private float centerY = 0f;
         private float scale = 64f;
@@ -1991,7 +2090,7 @@ private static class FilledBackspaceDrawable extends Drawable {
                 public boolean onScale(ScaleGestureDetector detector) {
                     float factor = detector.getScaleFactor();
                     scale = Math.max(8f, Math.min(2048f, scale * factor));
-                    invalidate();
+                    requestCurves();
                     return true;
                 }
             });
@@ -2021,7 +2120,7 @@ private static class FilledBackspaceDrawable extends Drawable {
                     float dy = event.getY() - lastTouchY;
                     centerX -= dx / scale;
                     centerY += dy / scale;
-                    invalidate();
+                    requestCurves();
                 }
                 lastTouchX = event.getX();
                 lastTouchY = event.getY();
@@ -2060,30 +2159,103 @@ private static class FilledBackspaceDrawable extends Drawable {
             canvas.drawLine(x0, 0, x0, h, axisPaint);
             canvas.drawLine(0, y0, w, y0, axisPaint);
 
-            if (compiledPlotFn1 == null) {
-                String e1 = plottableExpression(plotFormula1);
-                if (!e1.isEmpty()) compiledPlotFn1 = engine.compilePlotFunction(e1);
+            if (cachedSegments1 != null && cachedSegments1.length >= 4) {
+                canvas.drawLines(cachedSegments1, curve1Paint);
             }
-            if (compiledPlotFn2 == null) {
-                String e2 = plottableExpression(plotFormula2);
-                if (!e2.isEmpty()) compiledPlotFn2 = engine.compilePlotFunction(e2);
+            if (cachedSegments2 != null && cachedSegments2.length >= 4) {
+                canvas.drawLines(cachedSegments2, curve2Paint);
             }
-            drawCurve(canvas, compiledPlotFn1, curve1Paint, w, cx, cy);
-            drawCurve(canvas, compiledPlotFn2, curve2Paint, w, cx, cy);
         }
 
-        private void drawCurve(Canvas canvas, CalculatorEngine.PlotFunction fn, Paint paint, int w, float cx, float cy) {
-            if (fn == null) return;
+        @Override
+        protected void onAttachedToWindow() {
+            super.onAttachedToWindow();
+            plotExecutor = new ScheduledThreadPoolExecutor(1);
+            plotExecutor.setRemoveOnCancelPolicy(true);
+            requestCurves();
+        }
+
+        @Override
+        protected void onSizeChanged(int w, int h, int oldWidth, int oldHeight) {
+            super.onSizeChanged(w, h, oldWidth, oldHeight);
+            requestCurves();
+        }
+
+        @Override
+        protected void onDetachedFromWindow() {
+            cancelCurves();
+            plotExecutor.shutdownNow();
+            plotExecutor = null;
+            super.onDetachedFromWindow();
+        }
+
+        private void cancelCurves() {
+            ++renderGeneration;
+            removeCallbacks(computeCurves);
+            if (pendingCurves != null) {
+                pendingCurves.cancel(true);
+                pendingCurves = null;
+            }
+        }
+
+        void requestCurves() {
+            cancelCurves();
+            cachedSegments1 = null;
+            cachedSegments2 = null;
+            invalidate();
+            if (plotExecutor != null) postOnAnimation(computeCurves);
+        }
+
+        private void scheduleCurveCompute() {
+            int w = getWidth();
+            int h = getHeight();
+            if (plotExecutor == null || w <= 0 || h <= 0
+                    || compiledPlotFn1 == null && compiledPlotFn2 == null) return;
+            int generation = renderGeneration;
+            float x = centerX;
+            float y = centerY;
+            float zoom = scale;
+            CalculatorEngine context = engine.snapshotForPlot();
+            CalculatorEngine.PlotFunction fn1 = compiledPlotFn1 == null ? null : compiledPlotFn1.withContext(context);
+            CalculatorEngine.PlotFunction fn2 = compiledPlotFn2 == null ? null : compiledPlotFn2.withContext(context);
+            pendingCurves = plotExecutor.submit(() -> {
+                try {
+                    float[] first = computeCurveSegments(fn1, w, h, x, y, zoom);
+                    float[] second = computeCurveSegments(fn2, w, h, x, y, zoom);
+                    post(() -> {
+                        if (generation != renderGeneration) return;
+                        cachedSegments1 = first;
+                        cachedSegments2 = second;
+                        invalidate();
+                    });
+                } catch (CancellationException ignored) {
+                    // An edit or a viewport change superseded this request.
+                }
+            });
+        }
+
+        private float[] computeCurveSegments(CalculatorEngine.PlotFunction fn, int w, int h,
+                                             float reqCenterX, float reqCenterY, float reqScale) {
+            if (fn == null) return null;
+            float cx = w * 0.5f;
+            float cy = h * 0.5f;
+            int maxSegs = (w / 3) + 2;
+            float[] buf = new float[maxSegs * 4];
+            int count = 0;
             float prevX = 0f, prevY = 0f;
             boolean hasPrev = false;
             for (int px = 0; px <= w; px += 3) {
-                double xv = centerX + (px - cx) / scale;
+                if (Thread.currentThread().isInterrupted()) throw new CancellationException();
+                double xv = reqCenterX + (px - cx) / reqScale;
                 try {
                     double yv = fn.evaluate(xv);
                     if (Double.isFinite(yv)) {
-                        float sy = (float) (cy - (yv - centerY) * scale);
-                        if (hasPrev && Math.abs(sy - prevY) < getHeight()) {
-                            canvas.drawLine(prevX, prevY, px, sy, paint);
+                        float sy = (float) (cy - (yv - reqCenterY) * reqScale);
+                        if (hasPrev && Math.abs(sy - prevY) < h && count + 4 <= buf.length) {
+                            buf[count++] = prevX;
+                            buf[count++] = prevY;
+                            buf[count++] = px;
+                            buf[count++] = sy;
                         }
                         prevX = px;
                         prevY = sy;
@@ -2091,10 +2263,13 @@ private static class FilledBackspaceDrawable extends Drawable {
                     } else {
                         hasPrev = false;
                     }
-                } catch (Exception e) {
+                } catch (CancellationException e) {
+                    throw e;
+                } catch (RuntimeException e) {
                     hasPrev = false;
                 }
             }
+            return Arrays.copyOf(buf, count);
         }
     }
 

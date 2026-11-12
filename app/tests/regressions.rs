@@ -554,3 +554,49 @@ fn integration_report_matches_successful_result() {
         "reported convergence exceeds configured tolerance"
     );
 }
+
+#[test]
+fn exact_display_rejects_float_proximity() {
+    let mut engine = new_engine();
+    let near10 = engine.evaluate_preview("sqrt(2)+1e-10", false).unwrap();
+    assert_ne!(normalized(&near10.exact_text), "√2");
+    let near15 = engine.evaluate_preview("sqrt(2)+1e-15", false).unwrap();
+    assert_ne!(normalized(&near15.exact_text), "√2");
+    for original in [near10, near15] {
+        let reused = engine.evaluate_preview(&original.reusable_expression(), false).unwrap();
+        assert_eq!(
+            reused.numeric_value.unwrap().re.to_bits(),
+            original.numeric_value.unwrap().re.to_bits()
+        );
+    }
+    assert_eq!(
+        normalized(&engine.evaluate_preview("sqrt(2)", false).unwrap().exact_text),
+        "√2"
+    );
+    assert_eq!(
+        normalized(&engine.evaluate_preview("sqrt(8)", false).unwrap().exact_text),
+        "2√2"
+    );
+    assert_eq!(
+        normalized(&engine.evaluate_preview("sin(pi/3)", false).unwrap().exact_text),
+        "√3/2"
+    );
+    assert_eq!(
+        normalized(&engine.evaluate_preview("sqrt(2305843009213693951)", false).unwrap().exact_text),
+        "√2305843009213693951"
+    );
+    let matrix = engine.evaluate_preview("[[1.000000000001]]", false).unwrap();
+    let determinant = engine
+        .evaluate_preview(&format!("det({})", matrix.reusable_expression()), false)
+        .unwrap();
+    assert_eq!(determinant.numeric_value.unwrap().re, 1.000000000001);
+}
+
+#[test]
+fn symbolic_derivative_with_spaced_scientific_notation() {
+    let mut engine = new_engine();
+    let output = engine.evaluate_preview("d(1e - 3*x,x)", false).unwrap();
+    assert_eq!(output.exact_text, "0.001");
+    let numeric = engine.evaluate_preview(&output.exact_text, false).unwrap();
+    check_number(numeric, 0.001, 1e-12, 1e-12);
+}
