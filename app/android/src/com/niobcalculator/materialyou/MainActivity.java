@@ -19,9 +19,10 @@ import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.os.Bundle;
 import android.text.Editable;
+import android.text.Layout;
+import android.text.TextPaint;
 import android.text.SpannableString;
 import android.text.Spanned;
-import android.text.TextWatcher;
 import android.text.style.ForegroundColorSpan;
 import android.text.style.RelativeSizeSpan;
 import android.text.style.SubscriptSpan;
@@ -35,7 +36,6 @@ import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
-import android.widget.HorizontalScrollView;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -55,10 +55,11 @@ import java.util.Map;
 public class MainActivity extends Activity {
 
     private final CalculatorEngine engine = new CalculatorEngine();
+    private final CategoryDef[] constantCategories = getConstantCategories();
     private boolean moduloPositive = true;
     private boolean showExactFirst = true;
 
-    private String currentInput = "";
+    private FormulaEditor formula;
     private int activeTab = 0;     // 0=Calc, 1=Plotter, 2=Constants, 3=Converter/Settings
     private int activeSection = 0; // 0=()√^, 1=sin, 2=∑∫i, 3=abc, 4=mehr
     private boolean dualKeyboard = true;
@@ -83,6 +84,7 @@ public class MainActivity extends Activity {
         String decimalText;
         String reportText;
         boolean showingExact;
+        String formulaLayout = "";
 
         HistoryEntry(String expr, String exactText, String decimalText, boolean showingExact) {
             this(expr, exactText, decimalText, null, showingExact);
@@ -99,41 +101,19 @@ public class MainActivity extends Activity {
 
     private final List<HistoryEntry> history = new ArrayList<>();
     private LinearLayout rootContainer;
-    private EditText inputDisplayView;
+
     private TextView previewDisplayView;
-    private View cursorView;
+    private FrameLayout previewMatrix;
+
     private ScrollView historyScrollView;
     private LinearLayout historyListContainer;
     private FrameLayout keyboardBodyContainer;
     private LinearLayout sectionHeaderRow;
-    private boolean isSyncingInput = false;
-
-    private enum InputMode { MAIN, FRACTION, EXPONENT }
-    private InputMode currentInputMode = InputMode.MAIN;
-
-    private LinearLayout mainInputRow;
-    private LinearLayout fracTemplateRow;
-    private TextView fracPrefixTv;
-    private EditText fracNumEt;
-    private EditText fracDenEt;
-    private Button toggleFracFieldBtn;
-    private boolean focusNumerator = true;
-    private String fracPrefix = "";
-    private String fracSuffix = "";
-    private String fracNumStr = "";
-    private String fracDenStr = "";
-
-    private LinearLayout expTemplateRow;
-    private TextView expPrefixTv;
-    private TextView expBaseTv;
-    private EditText expValueEt;
-    private String expPrefix = "";
-    private String expBaseStr = "";
-    private String expSuffix = "";
-    private String expValueStr = "";
-
-    private String plotExpr1 = "sin(x) * cos(x/2)";
-    private String plotExpr2 = "x^2 / 4 - 2";
+    private FormulaEditor plotFormula1;
+    private FormulaEditor plotFormula2;
+    private CalculatorEngine.PlotFunction compiledPlotFn1 = null;
+    private CalculatorEngine.PlotFunction compiledPlotFn2 = null;
+    private Plotter2DView plotView;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -155,17 +135,25 @@ public class MainActivity extends Activity {
 
         for (String varName : CalculatorEngine.USER_VARIABLES) {
             String vStr = prefs.getString("var_" + varName, null);
-            if (vStr != null) {
+            if ("__UNSET__".equals(vStr)) {
+                engine.unsetVariable(varName);
+            } else if (vStr != null) {
                 engine.setUserVariable(varName, engine.deserializeValue(vStr));
             }
         }
 
-        if (prefs.contains("current_input")) {
-            currentInput = prefs.getString("current_input", "");
-        }
+        formula = new FormulaEditor(this, colOnSurface, colPrimary, editor -> {
+            saveDraft();
+            updatePreviewOnly();
+        }, () -> handleKeyPress("="), MULTI_CHAR_TOKENS);
+        formula.restore(prefs.getString("formula_draft", ""), prefs.getString("current_input", ""));
 
-        plotExpr1 = prefs.getString("plot_expr_1", "sin(x) * cos(x/2)");
-        plotExpr2 = prefs.getString("plot_expr_2", "x^2 / 4 - 2");
+        plotFormula1 = makePlotFormula("f₁(x)", colPrimary,
+                prefs.getString("plot_layout_1", ""), prefs.getString("plot_expr_1", "sin(x) * cos(x/2)"));
+        plotFormula2 = makePlotFormula("f₂(x)", colOnSecondaryContainer,
+                prefs.getString("plot_layout_2", ""), prefs.getString("plot_expr_2", "x^2 / 4 - 2"));
+        compiledPlotFn1 = engine.compilePlotFunction(plottableExpression(plotFormula1));
+        compiledPlotFn2 = engine.compilePlotFunction(plottableExpression(plotFormula2));
 
         int histCount = prefs.getInt("history_count", -1);
         if (histCount >= 0) {
@@ -176,7 +164,9 @@ public class MainActivity extends Activity {
                 String rep = prefs.getString("hist_rep_" + i, "");
                 boolean showEx = prefs.getBoolean("hist_show_ex_" + i, showExactFirst);
                 if (!expr.isEmpty()) {
-                    history.add(new HistoryEntry(expr, ex, dec, rep.isEmpty() ? null : rep, showEx));
+                    HistoryEntry entry = new HistoryEntry(expr, ex, dec, rep.isEmpty() ? null : rep, showEx);
+                    entry.formulaLayout = prefs.getString("hist_layout_" + i, "");
+                    history.add(entry);
                 }
             }
         } else {
@@ -198,6 +188,38 @@ public class MainActivity extends Activity {
         rebuildScreen();
     }
 
+    private void saveDraft() {
+        android.content.SharedPreferences.Editor ed = getSharedPreferences("niob_calculator", MODE_PRIVATE).edit();
+        if (formula != null) {
+            ed.putString("current_input", formula.expression());
+            ed.putString("formula_draft", formula.layoutState());
+        }
+        if (plotFormula1 != null) {
+            ed.putString("plot_expr_1", plotFormula1.expression());
+            ed.putString("plot_layout_1", plotFormula1.layoutState());
+        }
+        if (plotFormula2 != null) {
+            ed.putString("plot_expr_2", plotFormula2.expression());
+            ed.putString("plot_layout_2", plotFormula2.layoutState());
+        }
+        ed.apply();
+    }
+
+    private void saveHistory() {
+        android.content.SharedPreferences.Editor ed = getSharedPreferences("niob_calculator", MODE_PRIVATE).edit();
+        ed.putInt("history_count", history.size());
+        for (int i = 0; i < history.size(); i++) {
+            HistoryEntry h = history.get(i);
+            ed.putString("hist_expr_" + i, h.expr);
+            ed.putString("hist_layout_" + i, h.formulaLayout);
+            ed.putString("hist_ex_" + i, h.exactText);
+            ed.putString("hist_dec_" + i, h.decimalText);
+            ed.putString("hist_rep_" + i, h.reportText != null ? h.reportText : "");
+            ed.putBoolean("hist_show_ex_" + i, h.showingExact);
+        }
+        ed.apply();
+    }
+
     private void saveState() {
         android.content.SharedPreferences.Editor ed = getSharedPreferences("niob_calculator", MODE_PRIVATE).edit();
         ed.putBoolean("show_exact_first", showExactFirst);
@@ -205,19 +227,33 @@ public class MainActivity extends Activity {
         ed.putBoolean("radians_mode", engine.isRadiansMode());
         ed.putBoolean("modulo_always_positive", engine.isModuloAlwaysPositive());
         ed.putString("ans_value", engine.serializeValue(engine.getLastAns()));
-        ed.putString("current_input", currentInput != null ? currentInput : "");
-        ed.putString("plot_expr_1", plotExpr1 != null ? plotExpr1 : "");
-        ed.putString("plot_expr_2", plotExpr2 != null ? plotExpr2 : "");
+        if (formula != null) {
+            ed.putString("current_input", formula.expression());
+            ed.putString("formula_draft", formula.layoutState());
+        }
+        if (plotFormula1 != null) {
+            ed.putString("plot_expr_1", plotFormula1.expression());
+            ed.putString("plot_layout_1", plotFormula1.layoutState());
+        }
+        if (plotFormula2 != null) {
+            ed.putString("plot_expr_2", plotFormula2.expression());
+            ed.putString("plot_layout_2", plotFormula2.layoutState());
+        }
 
         Map<String, CalculatorEngine.Value> userVars = engine.getUserVariables();
-        for (Map.Entry<String, CalculatorEngine.Value> entry : userVars.entrySet()) {
-            ed.putString("var_" + entry.getKey(), engine.serializeValue(entry.getValue()));
+        for (String varName : CalculatorEngine.USER_VARIABLES) {
+            if (userVars.containsKey(varName)) {
+                ed.putString("var_" + varName, engine.serializeValue(userVars.get(varName)));
+            } else {
+                ed.putString("var_" + varName, "__UNSET__");
+            }
         }
 
         ed.putInt("history_count", history.size());
         for (int i = 0; i < history.size(); i++) {
             HistoryEntry h = history.get(i);
             ed.putString("hist_expr_" + i, h.expr);
+            ed.putString("hist_layout_" + i, h.formulaLayout);
             ed.putString("hist_ex_" + i, h.exactText);
             ed.putString("hist_dec_" + i, h.decimalText);
             ed.putString("hist_rep_" + i, h.reportText != null ? h.reportText : "");
@@ -303,7 +339,15 @@ public class MainActivity extends Activity {
             titleView.setTypeface(Typeface.DEFAULT_BOLD);
             titleView.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
             topBar.addView(titleView, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            if (activeTab == 1) {
+                titleView.setSingleLine(true);
+                titleView.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                topBar.addView(buildAngleSwitches(dp(isLandscape ? 26 : 28), () -> {
+                    finishPlotEditing();
+                    invalidatePlot();
+                }));
+            }
 
             rootContainer.addView(topBar, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -315,6 +359,7 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
         rootContainer.addView(contentArea, contentLp);
 
+        plotView = null;
         if (activeTab == 0) {
             buildCalculatorTab(contentArea);
         } else if (activeTab == 1) {
@@ -772,250 +817,12 @@ private static class FilledBackspaceDrawable extends Drawable {
         inputCard.setBackgroundColor(0xFF000000);
         inputCard.setPadding(dp(14), dp(6), dp(14), dp(6));
 
-        // 2a. Main Input Row
-        LinearLayout inputRow = new LinearLayout(this);
-        mainInputRow = inputRow;
-        inputRow.setOrientation(LinearLayout.HORIZONTAL);
-        inputRow.setGravity(Gravity.CENTER_VERTICAL);
-
-        EditText inputEt = new EditText(this);
-        inputDisplayView = inputEt;
-        inputEt.setBackground(null);
-        inputEt.setPadding(0, 0, dp(6), 0);
-        setScaledTextSize(inputEt, isLandscape ? 19f : 24f, 2.0f);
-        inputEt.setTextColor(colOnSurface);
-        inputEt.setTypeface(Typeface.DEFAULT_BOLD);
-        inputEt.setShowSoftInputOnFocus(false);
-        inputEt.setTextIsSelectable(true);
-        inputEt.setCursorVisible(true);
-        inputEt.setSingleLine(true);
-        inputEt.setHorizontallyScrolling(true);
-        inputEt.setContentDescription("input_expression");
-        inputEt.addTextChangedListener(new TextWatcher() {
-            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
-            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
-            @Override public void afterTextChanged(Editable s) {
-                if (isSyncingInput) return;
-                currentInput = s.toString();
-                saveState();
-                updatePreviewOnly();
-            }
-        });
-        inputRow.addView(inputEt, new LinearLayout.LayoutParams(
+        if (formula.getParent() != null) {
+            ((ViewGroup) formula.getParent()).removeView(formula);
+        }
+        inputCard.addView(formula, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        inputCard.addView(inputRow);
-
-        // 2b. 2D Fraction Template Row (Separate Numerator & Denominator fields with horizontal fraction bar)
-        fracTemplateRow = new LinearLayout(this);
-        fracTemplateRow.setOrientation(LinearLayout.HORIZONTAL);
-        fracTemplateRow.setGravity(Gravity.CENTER_VERTICAL);
-        fracTemplateRow.setVisibility(currentInputMode == InputMode.FRACTION ? View.VISIBLE : View.GONE);
-        fracTemplateRow.setPadding(0, dp(2), 0, dp(2));
-
-        fracPrefixTv = new TextView(this);
-        fracPrefixTv.setTextColor(colOnSurfaceVariant);
-        fracPrefixTv.setTypeface(Typeface.DEFAULT_BOLD);
-        setScaledTextSize(fracPrefixTv, isLandscape ? 17f : 20f, 2.0f);
-        fracPrefixTv.setText(prettifyMath(fracPrefix));
-        fracPrefixTv.setVisibility(fracPrefix != null && !fracPrefix.trim().isEmpty() ? View.VISIBLE : View.GONE);
-        fracTemplateRow.addView(fracPrefixTv);
-
-        LinearLayout fracBox = new LinearLayout(this);
-        fracBox.setOrientation(LinearLayout.VERTICAL);
-        fracBox.setGravity(Gravity.CENTER_HORIZONTAL);
-        fracBox.setBackground(roundedRect(colSurfaceContainer, 8));
-        fracBox.setPadding(dp(8), dp(2), dp(8), dp(2));
-
-        fracNumEt = new EditText(this);
-        fracNumEt.setContentDescription("frac_num");
-        fracNumEt.setHint("Zähler");
-        fracNumEt.setHintTextColor(colOnSurfaceVariant);
-        fracNumEt.setTextColor(colOnSurface);
-        fracNumEt.setTypeface(Typeface.DEFAULT_BOLD);
-        fracNumEt.setBackground(null);
-        fracNumEt.setGravity(Gravity.CENTER);
-        fracNumEt.setSingleLine(true);
-        fracNumEt.setShowSoftInputOnFocus(false);
-        fracNumEt.setTextIsSelectable(true);
-        fracNumEt.setCursorVisible(true);
-        setScaledTextSize(fracNumEt, isLandscape ? 16f : 19f, 2.0f);
-        fracNumEt.setText(fracNumStr != null ? fracNumStr : "");
-        fracNumEt.setOnClickListener(v -> setFractionFocus(true));
-        fracNumEt.setOnFocusChangeListener((v, hasFocus) -> {
-            if (hasFocus) setFractionFocus(true);
-        });
-        fracNumEt.setOnTouchListener((v, ev) -> {
-            if (ev.getAction() == MotionEvent.ACTION_UP) setFractionFocus(true);
-            return false;
-        });
-        fracNumEt.addTextChangedListener(new TextWatcher() {
-            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
-            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
-            @Override public void afterTextChanged(Editable s) {
-                if (isSyncingInput) return;
-                fracNumStr = s != null ? s.toString() : "";
-                syncCurrentInputFromActiveMode();
-                saveState();
-                updatePreviewOnly();
-            }
-        });
-        fracBox.addView(fracNumEt, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        View fracDiv = new View(this);
-        fracDiv.setBackgroundColor(colPrimary);
-        LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(dp(72), dp(2));
-        divLp.topMargin = dp(1);
-        divLp.bottomMargin = dp(1);
-        fracBox.addView(fracDiv, divLp);
-
-        fracDenEt = new EditText(this);
-        fracDenEt.setContentDescription("frac_den");
-        fracDenEt.setHint("Nenner");
-        fracDenEt.setHintTextColor(colOnSurfaceVariant);
-        fracDenEt.setTextColor(colOnSurface);
-        fracDenEt.setTypeface(Typeface.DEFAULT_BOLD);
-        fracDenEt.setBackground(null);
-        fracDenEt.setGravity(Gravity.CENTER);
-        fracDenEt.setSingleLine(true);
-        fracDenEt.setShowSoftInputOnFocus(false);
-        fracDenEt.setTextIsSelectable(true);
-        fracDenEt.setCursorVisible(true);
-        setScaledTextSize(fracDenEt, isLandscape ? 16f : 19f, 2.0f);
-        fracDenEt.setText(fracDenStr != null ? fracDenStr : "");
-        fracDenEt.setOnClickListener(v -> setFractionFocus(false));
-        fracDenEt.setOnFocusChangeListener((v, hasFocus) -> {
-            if (hasFocus) setFractionFocus(false);
-        });
-        fracDenEt.setOnTouchListener((v, ev) -> {
-            if (ev.getAction() == MotionEvent.ACTION_UP) setFractionFocus(false);
-            return false;
-        });
-        fracDenEt.addTextChangedListener(new TextWatcher() {
-            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
-            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
-            @Override public void afterTextChanged(Editable s) {
-                if (isSyncingInput) return;
-                fracDenStr = s != null ? s.toString() : "";
-                syncCurrentInputFromActiveMode();
-                saveState();
-                updatePreviewOnly();
-            }
-        });
-        fracBox.addView(fracDenEt, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        fracTemplateRow.addView(fracBox);
-
-        LinearLayout fracCtrl = new LinearLayout(this);
-        fracCtrl.setOrientation(LinearLayout.HORIZONTAL);
-        fracCtrl.setGravity(Gravity.CENTER_VERTICAL);
-        fracCtrl.setPadding(dp(10), 0, 0, 0);
-
-        toggleFracFieldBtn = makeMaterialButton(
-                focusNumerator ? "↓ Nenner" : "↑ Zähler",
-                colSurfaceHigh, colPrimary, 8, 11f, 1.2f, true);
-        toggleFracFieldBtn.setPadding(dp(8), dp(3), dp(8), dp(3));
-        toggleFracFieldBtn.setOnClickListener(v -> {
-            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-            setFractionFocus(!focusNumerator);
-        });
-        fracCtrl.addView(toggleFracFieldBtn);
-
-        Button exitFracBtn = makeMaterialButton(
-                "↵ Grundlinie", colPrimary, colOnPrimary, 8, 11.5f, 1.2f, true);
-        exitFracBtn.setPadding(dp(10), dp(3), dp(10), dp(3));
-        LinearLayout.LayoutParams exitLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        exitLp.leftMargin = dp(6);
-        exitFracBtn.setOnClickListener(v -> {
-            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-            exitFractionMode(true);
-        });
-        fracCtrl.addView(exitFracBtn, exitLp);
-
-        fracTemplateRow.addView(fracCtrl);
-        inputCard.addView(fracTemplateRow);
-        setFractionFocus(focusNumerator);
-
-        // 2c. 2D Exponent Template Row (Superscript exponent box with Grundlinie exit)
-        expTemplateRow = new LinearLayout(this);
-        expTemplateRow.setOrientation(LinearLayout.HORIZONTAL);
-        expTemplateRow.setGravity(Gravity.CENTER_VERTICAL);
-        expTemplateRow.setVisibility(currentInputMode == InputMode.EXPONENT ? View.VISIBLE : View.GONE);
-        expTemplateRow.setPadding(0, dp(4), 0, dp(4));
-
-        expPrefixTv = new TextView(this);
-        expPrefixTv.setTextColor(colOnSurfaceVariant);
-        expPrefixTv.setTypeface(Typeface.DEFAULT_BOLD);
-        setScaledTextSize(expPrefixTv, isLandscape ? 17f : 20f, 2.0f);
-        expPrefixTv.setText(prettifyMath(expPrefix));
-        expPrefixTv.setVisibility(expPrefix != null && !expPrefix.trim().isEmpty() ? View.VISIBLE : View.GONE);
-        expTemplateRow.addView(expPrefixTv);
-
-        expBaseTv = new TextView(this);
-        expBaseTv.setTextColor(colOnSurface);
-        expBaseTv.setTypeface(Typeface.DEFAULT_BOLD);
-        setScaledTextSize(expBaseTv, isLandscape ? 20f : 24f, 2.0f);
-        expBaseTv.setText(prettifyMath(expBaseStr != null ? expBaseStr : ""));
-        expTemplateRow.addView(expBaseTv);
-
-        FrameLayout expBox = new FrameLayout(this);
-        expBox.setBackground(roundedRect(colSurfaceContainer, 6));
-        expBox.setPadding(dp(6), dp(1), dp(6), dp(1));
-        LinearLayout.LayoutParams expBoxLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        expBoxLp.bottomMargin = dp(10);
-        expBoxLp.leftMargin = dp(2);
-
-        expValueEt = new EditText(this);
-        expValueEt.setContentDescription("exp_value");
-        expValueEt.setHint("exp");
-        expValueEt.setHintTextColor(colOnSurfaceVariant);
-        expValueEt.setTextColor(colPrimary);
-        expValueEt.setTypeface(Typeface.DEFAULT_BOLD);
-        expValueEt.setBackground(null);
-        expValueEt.setSingleLine(true);
-        expValueEt.setShowSoftInputOnFocus(false);
-        expValueEt.setTextIsSelectable(true);
-        expValueEt.setCursorVisible(true);
-        setScaledTextSize(expValueEt, isLandscape ? 14f : 16f, 1.8f);
-        expValueEt.setText(expValueStr != null ? expValueStr : "");
-        if (currentInputMode == InputMode.EXPONENT) {
-            expValueEt.requestFocus();
-            expValueEt.setSelection(expValueStr != null ? expValueStr.length() : 0);
-        }
-        expValueEt.addTextChangedListener(new TextWatcher() {
-            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
-            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
-            @Override public void afterTextChanged(Editable s) {
-                if (isSyncingInput) return;
-                expValueStr = s != null ? s.toString() : "";
-                syncCurrentInputFromActiveMode();
-                saveState();
-                updatePreviewOnly();
-            }
-        });
-        expBox.addView(expValueEt);
-        expTemplateRow.addView(expBox, expBoxLp);
-
-        Button exitExpBtn = makeMaterialButton(
-                "↵ Grundlinie", colPrimary, colOnPrimary, 8, 11.5f, 1.2f, true);
-        exitExpBtn.setPadding(dp(10), dp(3), dp(10), dp(3));
-        LinearLayout.LayoutParams exitExpLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        exitExpLp.leftMargin = dp(12);
-        exitExpBtn.setOnClickListener(v -> {
-            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-            exitExponentMode(true);
-        });
-        expTemplateRow.addView(exitExpBtn, exitExpLp);
-
-        inputCard.addView(expTemplateRow);
-
-        if (currentInputMode != InputMode.MAIN) {
-            mainInputRow.setVisibility(View.GONE);
-        }
+        formula.show(isLandscape ? 20f : 25f);
 
         previewDisplayView = new TextView(this);
         previewDisplayView.setContentDescription("preview_result");
@@ -1029,6 +836,11 @@ private static class FilledBackspaceDrawable extends Drawable {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         prevLp.topMargin = dp(2);
         inputCard.addView(previewDisplayView, prevLp);
+        previewMatrix = new FrameLayout(this);
+        previewMatrix.setContentDescription("Matrixergebnis");
+        previewMatrix.setVisibility(View.GONE);
+        inputCard.addView(previewMatrix, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         // 3. Dual Keyboard Container
         LinearLayout kbContainer = new LinearLayout(this);
@@ -1075,11 +887,12 @@ private static class FilledBackspaceDrawable extends Drawable {
             leftLp.rightMargin = dp(6);
             row.addView(leftCol, leftLp);
 
+            // Give the scientific rows room for the angle switches in a short window.
             LinearLayout.LayoutParams upperLp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.45f);
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.54f);
             kbContainer.addView(upperKb, upperLp);
             LinearLayout.LayoutParams numLp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.55f);
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.46f);
             kbContainer.addView(numpadCard, numLp);
 
             LinearLayout.LayoutParams rightLp = new LinearLayout.LayoutParams(
@@ -1118,7 +931,7 @@ private static class FilledBackspaceDrawable extends Drawable {
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         }
 
-        updateInputAndPreview();
+        updatePreviewOnly();
         refreshKeyboardSection();
     }
 
@@ -1236,7 +1049,8 @@ private static class FilledBackspaceDrawable extends Drawable {
 
     private void insertHistoryValue(String rawVal) {
         if (rawVal == null || rawVal.isEmpty()) return;
-        EditText activeEt = getActiveInputEditText();
+        if (formula.insertExactFraction(rawVal) || formula.insertMatrixResult(rawVal)) return;
+        EditText activeEt = formula.activeField();
         int start = 0;
         String curText = "";
         if (activeEt != null) {
@@ -1297,7 +1111,15 @@ private static class FilledBackspaceDrawable extends Drawable {
                 isFraction = true;
             }
 
-            if (isFraction && fNum != null && fDen != null) {
+            Runnable reuseExpression = () -> {
+                if (!formula.restoreHistory(item.formulaLayout)) insertHistoryValue(item.expr);
+            };
+            View savedFormula = formula.historyView(item.formulaLayout, 19f, reuseExpression);
+            if (savedFormula == null) savedFormula = formula.matrixResult(item.expr, 15f, reuseExpression);
+            if (savedFormula != null) {
+                itemBox.addView(savedFormula, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            } else if (isFraction && fNum != null && fDen != null) {
                 View fracView = createFractionView(fNum, fDen);
                 fracView.setOnClickListener(v -> {
                     insertHistoryValue(item.expr);
@@ -1322,23 +1144,25 @@ private static class FilledBackspaceDrawable extends Drawable {
                 itemBox.addView(exprTv, expLp);
             }
 
-            // Row 2: Left-aligned pill badge "> dezi." / "> exakt" + "=" + right-aligned result
+            // Result display toggle and right-aligned value.
             LinearLayout resRow = new LinearLayout(this);
             resRow.setOrientation(LinearLayout.HORIZONTAL);
             resRow.setGravity(Gravity.CENTER_VERTICAL);
 
             Button exactBadge = makeMaterialButton(
-                    item.showingExact ? "dezi." : "exakt",
-                    colSurfaceHigh,
+                    item.showingExact ? "dezimal" : "exakt",
                     colPrimary,
-                    10,
-                    11.5f,
-                    1.2f,
+                    colOnPrimary,
+                    14,
+                    12.5f,
+                    1.4f,
                     true
             );
             exactBadge.setSingleLine(true);
             exactBadge.setIncludeFontPadding(false);
-            exactBadge.setPadding(dp(9), dp(2.5f), dp(9), dp(2.5f));
+            exactBadge.setMinimumWidth(dp(60));
+            exactBadge.setMinimumHeight(dp(28));
+            exactBadge.setPadding(dp(9), dp(3), dp(9), dp(3));
             exactBadge.setOnClickListener(v -> {
                 v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
                 item.showingExact = !item.showingExact;
@@ -1362,7 +1186,10 @@ private static class FilledBackspaceDrawable extends Drawable {
             String cleanFrac = rawShown != null ? rawShown.replace(" ", "") : "";
             boolean isFractionResult = item.showingExact && cleanFrac.matches("^-?\\d+/\\d+$");
 
-            if (isFractionResult) {
+            View matrixResult = formula.matrixResult(rawShown, 15f, () -> insertHistoryValue(item.exactText));
+            if (matrixResult != null) {
+                resRow.addView(matrixResult);
+            } else if (isFractionResult) {
                 String[] fracParts = cleanFrac.split("/");
                 View fracResultView = createFractionView(fracParts[0].trim(), fracParts[1].trim(), 20f);
                 fracResultView.setOnClickListener(v -> {
@@ -1420,396 +1247,24 @@ private static class FilledBackspaceDrawable extends Drawable {
         }
     }
 
-    private EditText getActiveInputEditText() {
-        if (currentInputMode == InputMode.FRACTION) {
-            return focusNumerator ? fracNumEt : fracDenEt;
-        } else if (currentInputMode == InputMode.EXPONENT) {
-            return expValueEt;
-        }
-        return inputDisplayView;
-    }
-
-    private void setFractionFocus(boolean toNumerator) {
-        focusNumerator = toNumerator;
-        if (toNumerator) {
-            if (fracNumEt != null) {
-                fracNumEt.requestFocus();
-                fracNumEt.setSelection(fracNumEt.getText() != null ? fracNumEt.getText().length() : 0);
-            }
-            if (toggleFracFieldBtn != null) toggleFracFieldBtn.setText("↓ Nenner");
-        } else {
-            if (fracDenEt != null) {
-                fracDenEt.requestFocus();
-                fracDenEt.setSelection(fracDenEt.getText() != null ? fracDenEt.getText().length() : 0);
-            }
-            if (toggleFracFieldBtn != null) toggleFracFieldBtn.setText("↑ Zähler");
-        }
-    }
-
-    private void syncCurrentInputFromActiveMode() {
-        if (currentInputMode == InputMode.FRACTION) {
-            String n;
-            String d;
-            if (fracNumEt != null && fracNumEt.isAttachedToWindow() && fracNumEt.getText() != null) {
-                n = fracNumEt.getText().toString().trim();
-                fracNumStr = n;
-            } else {
-                n = fracNumStr != null ? fracNumStr.trim() : "";
-            }
-            if (fracDenEt != null && fracDenEt.isAttachedToWindow() && fracDenEt.getText() != null) {
-                d = fracDenEt.getText().toString().trim();
-                fracDenStr = d;
-            } else {
-                d = fracDenStr != null ? fracDenStr.trim() : "";
-            }
-            String fStr;
-            if (d.isEmpty()) {
-                fStr = n.isEmpty() ? "" : (n + " / ");
-            } else {
-                String nPart = (n.contains("+") || n.contains("-") || n.contains("−") || n.contains(" ") || n.contains("÷") || n.contains("×")) ? "(" + n + ")" : (n.isEmpty() ? "1" : n);
-                String dPart = (d.contains("+") || d.contains("-") || d.contains("−") || d.contains(" ") || d.contains("÷") || d.contains("×")) ? "(" + d + ")" : d;
-                String trimmedPrefix = fracPrefix != null ? fracPrefix.trim() : "";
-                boolean needDivisorParens = trimmedPrefix.endsWith("÷") || trimmedPrefix.endsWith("/")
-                        || trimmedPrefix.endsWith("×") || trimmedPrefix.endsWith("*")
-                        || trimmedPrefix.endsWith("^");
-                if (needDivisorParens) {
-                    fStr = "(" + nPart + " / " + dPart + ")";
-                } else {
-                    fStr = nPart + " / " + dPart;
-                }
-            }
-            currentInput = (fracPrefix != null ? fracPrefix : "") + fStr + (fracSuffix != null ? fracSuffix : "");
-        } else if (currentInputMode == InputMode.EXPONENT) {
-            String exp;
-            if (expValueEt != null && expValueEt.isAttachedToWindow() && expValueEt.getText() != null) {
-                exp = expValueEt.getText().toString().trim();
-                expValueStr = exp;
-            } else {
-                exp = expValueStr != null ? expValueStr.trim() : "";
-            }
-            String pStr;
-            if (exp.isEmpty()) {
-                pStr = expBaseStr;
-            } else {
-                pStr = expBaseStr + "^(" + exp + ")";
-            }
-            currentInput = (expPrefix != null ? expPrefix : "") + pStr + (expSuffix != null ? expSuffix : "");
-        } else {
-            if (inputDisplayView != null && inputDisplayView.getText() != null) {
-                currentInput = inputDisplayView.getText().toString();
-            }
-        }
-    }
-
-    private void exitFractionMode(boolean commit) {
-        if (currentInputMode != InputMode.FRACTION) return;
-        if (commit) {
-            syncCurrentInputFromActiveMode();
-        }
-        currentInputMode = InputMode.MAIN;
-        if (fracTemplateRow != null) fracTemplateRow.setVisibility(View.GONE);
-        if (mainInputRow != null) mainInputRow.setVisibility(View.VISIBLE);
-        int targetCursor = currentInput != null ? currentInput.length() - (fracSuffix != null ? fracSuffix.length() : 0) : 0;
-        fracPrefix = "";
-        fracSuffix = "";
-        fracNumStr = "";
-        fracDenStr = "";
-        if (inputDisplayView != null) {
-            isSyncingInput = true;
-            try {
-                inputDisplayView.setText(currentInput != null ? currentInput : "");
-                inputDisplayView.setSelection(Math.max(0, Math.min(targetCursor, inputDisplayView.length())));
-                inputDisplayView.requestFocus();
-            } finally {
-                isSyncingInput = false;
-            }
-        }
-        saveState();
-        updatePreviewOnly();
-    }
-
-    private void exitExponentMode(boolean commit) {
-        if (currentInputMode != InputMode.EXPONENT) return;
-        if (commit) {
-            syncCurrentInputFromActiveMode();
-        }
-        currentInputMode = InputMode.MAIN;
-        if (expTemplateRow != null) expTemplateRow.setVisibility(View.GONE);
-        if (mainInputRow != null) mainInputRow.setVisibility(View.VISIBLE);
-        int targetCursor = currentInput != null ? currentInput.length() - (expSuffix != null ? expSuffix.length() : 0) : 0;
-        expPrefix = "";
-        expSuffix = "";
-        expBaseStr = "";
-        expValueStr = "";
-        if (inputDisplayView != null) {
-            isSyncingInput = true;
-            try {
-                inputDisplayView.setText(currentInput != null ? currentInput : "");
-                inputDisplayView.setSelection(Math.max(0, Math.min(targetCursor, inputDisplayView.length())));
-                inputDisplayView.requestFocus();
-            } finally {
-                isSyncingInput = false;
-            }
-        }
-        saveState();
-        updatePreviewOnly();
-    }
-
-    private void openFractionTemplate() {
-        if (currentInputMode == InputMode.EXPONENT) {
-            exitExponentMode(true);
-        }
-        if (currentInputMode == InputMode.FRACTION) {
-            setFractionFocus(!focusNumerator);
-            return;
-        }
-        String cur = currentInput != null ? currentInput : "";
-        int selStart = inputDisplayView != null ? inputDisplayView.getSelectionStart() : cur.length();
-        int selEnd = inputDisplayView != null ? inputDisplayView.getSelectionEnd() : cur.length();
-        if (selStart < 0 || selStart > cur.length()) selStart = cur.length();
-        if (selEnd < 0 || selEnd > cur.length()) selEnd = cur.length();
-        if (selStart > selEnd) { int tmp = selStart; selStart = selEnd; selEnd = tmp; }
-        String before = cur.substring(0, selStart);
-        fracSuffix = cur.substring(selEnd);
-
-        String initialNum = "";
-        String prefix = before;
-        String trimmedBefore = before.replaceAll("\\s+$", "");
-        if (trimmedBefore.endsWith(")")) {
-            int depth = 1;
-            int idx = trimmedBefore.length() - 2;
-            while (idx >= 0 && depth > 0) {
-                if (trimmedBefore.charAt(idx) == ')') depth++;
-                else if (trimmedBefore.charAt(idx) == '(') depth--;
-                idx--;
-            }
-            if (depth == 0) {
-                initialNum = trimmedBefore.substring(idx + 1);
-                prefix = before.substring(0, idx + 1);
-            }
-        } else {
-            int idx = trimmedBefore.length() - 1;
-            while (idx >= 0 && (Character.isLetterOrDigit(trimmedBefore.charAt(idx)) || trimmedBefore.charAt(idx) == '.')) {
-                idx--;
-            }
-            if (idx < trimmedBefore.length() - 1) {
-                initialNum = trimmedBefore.substring(idx + 1);
-                prefix = before.substring(0, idx + 1);
-            }
-        }
-
-        fracPrefix = prefix;
-        fracNumStr = initialNum;
-        fracDenStr = "";
-        currentInputMode = InputMode.FRACTION;
-        if (mainInputRow != null) mainInputRow.setVisibility(View.GONE);
-        if (expTemplateRow != null) expTemplateRow.setVisibility(View.GONE);
-        if (fracTemplateRow != null) fracTemplateRow.setVisibility(View.VISIBLE);
-
-        if (fracPrefixTv != null) {
-            fracPrefixTv.setText(prettifyMath(fracPrefix));
-            fracPrefixTv.setVisibility(fracPrefix.trim().isEmpty() ? View.GONE : View.VISIBLE);
-        }
-
-        isSyncingInput = true;
-        try {
-            if (fracNumEt != null) fracNumEt.setText(initialNum);
-            if (fracDenEt != null) fracDenEt.setText("");
-        } finally {
-            isSyncingInput = false;
-        }
-
-        if (!initialNum.isEmpty()) {
-            setFractionFocus(false);
-        } else {
-            setFractionFocus(true);
-        }
-        syncCurrentInputFromActiveMode();
-        updatePreviewOnly();
-    }
-
-    private void openExponentTemplate(String fixedBase) {
-        if (currentInputMode == InputMode.FRACTION) {
-            exitFractionMode(true);
-        }
-        if (currentInputMode == InputMode.EXPONENT) {
-            exitExponentMode(true);
-            return;
-        }
-        String cur = currentInput != null ? currentInput : "";
-        int selStart = inputDisplayView != null ? inputDisplayView.getSelectionStart() : cur.length();
-        int selEnd = inputDisplayView != null ? inputDisplayView.getSelectionEnd() : cur.length();
-        if (selStart < 0 || selStart > cur.length()) selStart = cur.length();
-        if (selEnd < 0 || selEnd > cur.length()) selEnd = cur.length();
-        if (selStart > selEnd) { int tmp = selStart; selStart = selEnd; selEnd = tmp; }
-        String before = cur.substring(0, selStart);
-        expSuffix = cur.substring(selEnd);
-
-        String base = fixedBase != null ? fixedBase : "";
-        String prefix = before;
-        if (base.isEmpty()) {
-            String trimmedBefore = before.replaceAll("\\s+$", "");
-            if (trimmedBefore.endsWith(")")) {
-                int depth = 1;
-                int idx = trimmedBefore.length() - 2;
-                while (idx >= 0 && depth > 0) {
-                    if (trimmedBefore.charAt(idx) == ')') depth++;
-                    else if (trimmedBefore.charAt(idx) == '(') depth--;
-                    idx--;
-                }
-                if (depth == 0) {
-                    base = trimmedBefore.substring(idx + 1);
-                    prefix = before.substring(0, idx + 1);
-                }
-            } else {
-                int idx = trimmedBefore.length() - 1;
-                while (idx >= 0 && (Character.isLetterOrDigit(trimmedBefore.charAt(idx)) || trimmedBefore.charAt(idx) == '.')) {
-                    idx--;
-                }
-                if (idx < trimmedBefore.length() - 1) {
-                    base = trimmedBefore.substring(idx + 1);
-                    prefix = before.substring(0, idx + 1);
-                }
-            }
-        }
-        if (base.isEmpty()) {
-            base = "x";
-        }
-
-        expPrefix = prefix;
-        expBaseStr = base;
-        expValueStr = "";
-        currentInputMode = InputMode.EXPONENT;
-
-        if (mainInputRow != null) mainInputRow.setVisibility(View.GONE);
-        if (fracTemplateRow != null) fracTemplateRow.setVisibility(View.GONE);
-        if (expTemplateRow != null) expTemplateRow.setVisibility(View.VISIBLE);
-
-        if (expPrefixTv != null) {
-            expPrefixTv.setText(prettifyMath(expPrefix));
-            expPrefixTv.setVisibility(expPrefix.trim().isEmpty() ? View.GONE : View.VISIBLE);
-        }
-        if (expBaseTv != null) {
-            expBaseTv.setText(prettifyMath(expBaseStr));
-        }
-        if (expValueEt != null) {
-            isSyncingInput = true;
-            try {
-                expValueEt.setText("");
-            } finally {
-                isSyncingInput = false;
-            }
-            expValueEt.requestFocus();
-            expValueEt.setSelection(0);
-        }
-        syncCurrentInputFromActiveMode();
-        updatePreviewOnly();
-    }
-
     private void insertAtCursor(String text) {
-        if (text == null || text.isEmpty()) return;
-        EditText activeEt = getActiveInputEditText();
-        if (activeEt != null) {
-            int start = Math.max(0, activeEt.getSelectionStart());
-            int end = Math.max(0, activeEt.getSelectionEnd());
-            if (start > end) { int tmp = start; start = end; end = tmp; }
-            Editable editable = activeEt.getText();
-            if (editable != null) {
-                isSyncingInput = true;
-                try {
-                    editable.replace(start, end, text);
-                    activeEt.setSelection(start + text.length());
-                } finally {
-                    isSyncingInput = false;
-                }
-            }
-        } else {
-            currentInput += text;
-        }
-        syncCurrentInputFromActiveMode();
-        saveState();
-        updatePreviewOnly();
-    }
-
-    private void deleteAtCursor() {
-        EditText activeEt = getActiveInputEditText();
-        if (activeEt != null) {
-            int start = Math.max(0, activeEt.getSelectionStart());
-            int end = Math.max(0, activeEt.getSelectionEnd());
-            if (start > end) { int tmp = start; start = end; end = tmp; }
-            Editable editable = activeEt.getText();
-            if (editable != null && editable.length() > 0) {
-                isSyncingInput = true;
-                try {
-                    if (start != end) {
-                        editable.delete(start, end);
-                        activeEt.setSelection(start);
-                    } else if (start > 0) {
-                        String sub = editable.toString().substring(0, start);
-                        int delLen = 1;
-                        for (String tok : MULTI_CHAR_TOKENS) {
-                            if (sub.endsWith(tok)) {
-                                delLen = tok.length();
-                                break;
-                            }
-                        }
-                        editable.delete(start - delLen, start);
-                        activeEt.setSelection(start - delLen);
-                    }
-                } finally {
-                    isSyncingInput = false;
-                }
-            } else {
-                if (currentInputMode == InputMode.FRACTION) {
-                    if (!focusNumerator) {
-                        setFractionFocus(true);
-                    } else {
-                        exitFractionMode(false);
-                    }
-                } else if (currentInputMode == InputMode.EXPONENT) {
-                    exitExponentMode(false);
-                }
-            }
-        } else {
-            currentInput = deleteLastToken(currentInput);
-        }
-        syncCurrentInputFromActiveMode();
-        saveState();
-        updatePreviewOnly();
+        formula.insert(text);
     }
 
     private void clearInput() {
-        if (currentInputMode != InputMode.MAIN) {
-            currentInputMode = InputMode.MAIN;
-            if (fracTemplateRow != null) fracTemplateRow.setVisibility(View.GONE);
-            if (expTemplateRow != null) expTemplateRow.setVisibility(View.GONE);
-            if (mainInputRow != null) mainInputRow.setVisibility(View.VISIBLE);
-        }
-        currentInput = "";
-        fracPrefix = "";
-        fracSuffix = "";
-        fracNumStr = "";
-        fracDenStr = "";
-        expPrefix = "";
-        expSuffix = "";
-        expBaseStr = "";
-        expValueStr = "";
-        isSyncingInput = true;
-        try {
-            if (inputDisplayView != null) inputDisplayView.setText("");
-            if (fracNumEt != null) fracNumEt.setText("");
-            if (fracDenEt != null) fracDenEt.setText("");
-            if (expValueEt != null) expValueEt.setText("");
-        } finally {
-            isSyncingInput = false;
-        }
-        saveState();
-        updateInputAndPreview();
+        formula.clear();
     }
 
     private void updatePreviewOnly() {
         if (previewDisplayView == null) return;
-        String cur = currentInput != null ? currentInput.trim() : "";
+        previewDisplayView.setVisibility(View.VISIBLE);
+        previewMatrix.removeAllViews();
+        previewMatrix.setVisibility(View.GONE);
+        if (formula.hasMissingField()) {
+            previewDisplayView.setText("");
+            return;
+        }
+        String cur = formula.expression().trim();
         if (cur.isEmpty()) {
             String ansStr = engine.formatAns(false);
             if (ansStr != null && !ansStr.isEmpty() && !ansStr.equals("0")) {
@@ -1822,7 +1277,16 @@ private static class FilledBackspaceDrawable extends Drawable {
         }
 
         try {
-            CalculatorEngine.Result result = engine.evaluate(currentInput);
+            CalculatorEngine.Result result = engine.evaluate(cur);
+            View matrix = formula.matrixResult(result.decimalText, 13f, null);
+            if (matrix != null) {
+                previewDisplayView.setVisibility(View.GONE);
+                previewMatrix.setVisibility(View.VISIBLE);
+                FrameLayout.LayoutParams matrixParams = new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.END);
+                previewMatrix.addView(matrix, matrixParams);
+                return;
+            }
             String dec = formatDisplayNumber(result.decimalText);
             if (result.exactText != null && !result.exactText.isEmpty() && !result.exactText.equals(result.decimalText)) {
                 previewDisplayView.setText("= " + dec + "  (" + result.exactText + ")");
@@ -1849,38 +1313,64 @@ private static class FilledBackspaceDrawable extends Drawable {
         }
     }
 
-    private void updateInputAndPreview() {
-        if (inputDisplayView != null) {
-            String cur = currentInput != null ? currentInput : "";
-            if (!inputDisplayView.getText().toString().equals(cur)) {
-                isSyncingInput = true;
-                try {
-                    inputDisplayView.setText(cur);
-                    inputDisplayView.setSelection(cur.length());
-                } finally {
-                    isSyncingInput = false;
-                }
-            }
-        }
-        updatePreviewOnly();
-    }
-
     private static final class KeyDef {
         final String label;
         final String token;
+        final MathKeyDrawable.Symbol symbol;
 
-        KeyDef(String label, String token) {
+        KeyDef(String label, String token, MathKeyDrawable.Symbol symbol) {
             this.label = label;
             this.token = token;
+            this.symbol = symbol;
         }
     }
 
     private static KeyDef k(String label, String token) {
-        return new KeyDef(label, token);
+        return new KeyDef(label, token, null);
     }
 
     private static KeyDef k(String same) {
-        return new KeyDef(same, same);
+        return k(same, same);
+    }
+
+    private static KeyDef icon(String label, String token, MathKeyDrawable.Symbol symbol) {
+        return new KeyDef(label, token, symbol);
+    }
+
+    private static final class ScientificKeyGrid extends LinearLayout {
+        private final List<Button> textKeys = new ArrayList<>();
+        private final TextPaint measurement = new TextPaint();
+        private final float preferredSize;
+
+        ScientificKeyGrid(Context context, float preferredSize) {
+            super(context);
+            setOrientation(VERTICAL);
+            this.preferredSize = preferredSize;
+        }
+
+        @Override protected void onMeasure(int widthSpec, int heightSpec) {
+            super.onMeasure(widthSpec, heightSpec);
+            float commonSize = preferredSize;
+            for (Button key : textKeys) {
+                measurement.set(key.getPaint());
+                measurement.setTextSize(preferredSize);
+                float textWidth = Layout.getDesiredWidth(key.getText(), measurement);
+                float textHeight = measurement.descent() - measurement.ascent();
+                int availableWidth = key.getMeasuredWidth() - key.getPaddingLeft() - key.getPaddingRight();
+                int availableHeight = key.getMeasuredHeight() - key.getPaddingTop() - key.getPaddingBottom();
+                if (textWidth > 0) commonSize = Math.min(commonSize, preferredSize * availableWidth / textWidth);
+                if (textHeight > 0) commonSize = Math.min(commonSize, preferredSize * availableHeight / textHeight);
+            }
+            int size = Math.max(1, (int) Math.floor(commonSize));
+            boolean changed = false;
+            for (Button key : textKeys) {
+                if (key.getTextSize() != size) {
+                    key.setTextSize(TypedValue.COMPLEX_UNIT_PX, size);
+                    changed = true;
+                }
+            }
+            if (changed) super.onMeasure(widthSpec, heightSpec);
+        }
     }
 
     private void refreshKeyboardSection() {
@@ -1917,27 +1407,34 @@ private static class FilledBackspaceDrawable extends Drawable {
         }
 
         keyboardBodyContainer.removeAllViews();
-        LinearLayout grid = new LinearLayout(this);
-        grid.setOrientation(LinearLayout.VERTICAL);
+        float keyTextSize = isLandscape ? 14.5f : 16f;
+        float fontScale = Math.min(getResources().getConfiguration().fontScale, 1.4f);
+        ScientificKeyGrid grid = new ScientificKeyGrid(this, dp(keyTextSize * fontScale));
 
         KeyDef[][][] sections = {
                 // 0: ( ) √ ^
                 {
                         {k("("), k(")"), k("π", "pi"), k("e")},
-                        {k("x²", "^2"), k("xⁿ", "TEMPLATE_POWER"), k("√x", "sqrt("), k("a/b", "TEMPLATE_FRACTION")},
-                        {k("ln", "ln("), k("logₐ(x)", "log("), k("ⁿ√x", "nthroot("), k("10ⁿ", "TEMPLATE_POWER_10")}
+                        {k("x²", "TEMPLATE_SQUARE"), k("xⁿ", "TEMPLATE_POWER"),
+                                icon("Quadratwurzel", "sqrt(", MathKeyDrawable.Symbol.ROOT),
+                                icon("Wurzel mit Index", "nthroot(", MathKeyDrawable.Symbol.INDEXED_ROOT)},
+                        {k("ln", "ln("), k("logₐ(x)", "log("), k("10ⁿ", "TEMPLATE_POWER_10"), k("ans")}
                 },
                 // 1: sin
                 {
-                        {k("sin", "sin("), k("sin⁻¹", "asin("), k("sinh", "sinh("), k("sinh⁻¹", "asinh(")},
-                        {k("cos", "cos("), k("cos⁻¹", "acos("), k("cosh", "cosh("), k("cosh⁻¹", "acosh(")},
-                        {k("tan", "tan("), k("tan⁻¹", "atan("), k("tanh", "tanh("), k("tanh⁻¹", "atanh(")}
+                        {k("sin", "sin("), k("asin", "asin("), k("sinh", "sinh("), k("asinh", "asinh(")},
+                        {k("cos", "cos("), k("acos", "acos("), k("cosh", "cosh("), k("acosh", "acosh(")},
+                        {k("tan", "tan("), k("atan", "atan("), k("tanh", "tanh("), k("atanh", "atanh(")}
                 },
                 // 2: ∑ ∫ i
                 {
-                        {k("∑", "sum("), k("∏", "prod("), k("(ⁿₖ)", "binomial("), k("n!", "!")},
-                        {k("∫", "int("), k("d/dx", "deriv("), k("mod", "mod("), k("i")},
-                        {k("[ Matrix ]", "SHOW_MATRIX_DIALOG"), k(",", ", "), k(")", ")"), k("det", "det(")}
+                        {k("∑", "sum("), k("∏", "prod("),
+                                icon("Binomialkoeffizient", "binomial(", MathKeyDrawable.Symbol.BINOMIAL), k("n!", "!")},
+                        {k("∫", "int("), icon("Ableitung", "deriv(", MathKeyDrawable.Symbol.DERIVATIVE),
+                                k("mod", "mod("), k("i")},
+                        {icon("Matrix", "SHOW_MATRIX_DIALOG", MathKeyDrawable.Symbol.MATRIX),
+                                icon("Inverse Matrix", "inv(", MathKeyDrawable.Symbol.INVERSE),
+                                icon("Transponierte Matrix", "trans(", MathKeyDrawable.Symbol.TRANSPOSE), k("det", "det(")}
                 },
                 // 3: a b c
                 showMoreVariables ?
@@ -1953,130 +1450,128 @@ private static class FilledBackspaceDrawable extends Drawable {
                 },
                 // 4: mehr
                 {
-                        {k("|x|", "abs("), k("⌊x⌋", "floor("), k("⌈x⌉", "ceil("), k("round", "round(")},
-                        {k("gcd", "gcd("), k("lcm", "lcm("), k("sgn", "sign("), k("exp", "exp(")},
-                        {k(",", ", "), k(")", ")"), k("inv", "inv("), k("trans", "trans(")}
+                        {k("|x|", "abs("), k("⌊x⌋", "floor("), k("⌈x⌉", "ceil("), k("runden", "round(")},
+                        {k("ggT", "gcd("), k("kgV", "lcm("), k("sgn", "sign(")}
                 }
         };
 
         if (activeSection == 1) {
-            LinearLayout angleBar = new LinearLayout(this);
-            angleBar.setOrientation(LinearLayout.HORIZONTAL);
-            angleBar.setGravity(Gravity.CENTER);
-            angleBar.setPadding(dp(4), 0, dp(4), dp(2));
-
-            Button openParenBtn = makeMaterialButton("(", Color.TRANSPARENT, colOnSurface, 8, 14f, 1.2f);
-            openParenBtn.setPadding(dp(12), dp(2), dp(12), dp(2));
-            openParenBtn.setOnClickListener(v -> {
-                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-                handleKeyPress("(");
-            });
-            angleBar.addView(openParenBtn);
-
-            View s1 = new View(this);
-            angleBar.addView(s1, new LinearLayout.LayoutParams(dp(10), dp(1)));
-
-            LinearLayout segPill = new LinearLayout(this);
-            segPill.setOrientation(LinearLayout.HORIZONTAL);
-            segPill.setBackground(roundedRect(colSurfaceHigh, 8));
-            segPill.setPadding(dp(1.5f), dp(1.5f), dp(1.5f), dp(1.5f));
-
-            boolean isRad = engine.isRadiansMode();
-
-            Button radBtn = makeMaterialButton(
-                    "RAD",
-                    isRad ? colPrimary : Color.TRANSPARENT,
-                    isRad ? colOnPrimary : colOnSurfaceVariant,
-                    6,
-                    9.5f,
-                    1.1f,
-                    isRad
-            );
-            radBtn.setIncludeFontPadding(false);
-            radBtn.setPadding(dp(10), dp(2), dp(10), dp(2));
-            radBtn.setOnClickListener(v -> {
-                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-                if (!engine.isRadiansMode()) {
-                    engine.setRadiansMode(true);
-                    saveState();
-                    updateInputAndPreview();
-                    refreshKeyboardSection();
-                }
-            });
-            segPill.addView(radBtn);
-
-            Button degBtn = makeMaterialButton(
-                    "DEG",
-                    !isRad ? colPrimary : Color.TRANSPARENT,
-                    !isRad ? colOnPrimary : colOnSurfaceVariant,
-                    6,
-                    9.5f,
-                    1.1f,
-                    !isRad
-            );
-            degBtn.setIncludeFontPadding(false);
-            degBtn.setPadding(dp(10), dp(2), dp(10), dp(2));
-            degBtn.setOnClickListener(v -> {
-                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-                if (engine.isRadiansMode()) {
-                    engine.setRadiansMode(false);
-                    saveState();
-                    updateInputAndPreview();
-                    refreshKeyboardSection();
-                }
-            });
-            segPill.addView(degBtn);
-            angleBar.addView(segPill);
-
-            View s2 = new View(this);
-            angleBar.addView(s2, new LinearLayout.LayoutParams(dp(10), dp(1)));
-
-            Button closeParenBtn = makeMaterialButton(")", Color.TRANSPARENT, colOnSurface, 8, 14f, 1.2f);
-            closeParenBtn.setPadding(dp(12), dp(2), dp(12), dp(2));
-            closeParenBtn.setOnClickListener(v -> {
-                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-                handleKeyPress(")");
-            });
-            angleBar.addView(closeParenBtn);
-
-            grid.addView(angleBar, new LinearLayout.LayoutParams(
+            grid.addView(buildAngleBar(isLandscape), new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         }
 
-        KeyDef[][] rows = sections[Math.min(activeSection, sections.length - 1)];
+        KeyDef[][] rows = sections[activeSection];
+        if (rows.length < 3) {
+            grid.setWeightSum(3f);
+            grid.setGravity(Gravity.CENTER_VERTICAL);
+        }
         for (KeyDef[] row : rows) {
-            LinearLayout rLayout = new LinearLayout(this);
-            rLayout.setOrientation(LinearLayout.HORIZONTAL);
-            for (final KeyDef keyDef : row) {
-                final String tok = keyDef.token;
-                final String lbl = keyDef.label;
-                boolean isAccent = tok.equals("TOGGLE_VAR_MORE") || tok.equals("TAB_1") || tok.equals("TAB_3");
-                int fg = isAccent ? colPrimary : colOnSurface;
-
-                float btnFontSize = 15f;
-                if (lbl.length() > 6) btnFontSize = 11f;
-                else if (lbl.length() > 4) btnFontSize = 12.5f;
-
-                Button kb = makeMaterialButton(lbl, Color.TRANSPARENT, fg, 14, btnFontSize, 1.4f, false);
-                kb.setSingleLine(true);
-                kb.setPadding(dp(2), dp(2), dp(2), dp(2));
-                kb.setAutoSizeTextTypeUniformWithConfiguration(
-                        8, Math.round(btnFontSize * 1.3f), 1, TypedValue.COMPLEX_UNIT_DIP);
-                kb.setOnClickListener(v -> {
-                    v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-                    handleKeyPress(tok);
-                });
-                LinearLayout.LayoutParams klp = new LinearLayout.LayoutParams(
+            LinearLayout rowLayout = new LinearLayout(this);
+            rowLayout.setWeightSum(4f);
+            rowLayout.setGravity(Gravity.CENTER_HORIZONTAL);
+            int missingMargins = (4 - row.length) * dp(2);
+            rowLayout.setPadding(missingMargins, 0, missingMargins, 0);
+            for (KeyDef definition : row) {
+                View key = makeScientificKey(definition, keyTextSize);
+                if (key instanceof Button) grid.textKeys.add((Button) key);
+                LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                         0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
-                klp.setMargins(dp(2), dp(2), dp(2), dp(2));
-                rLayout.addView(kb, klp);
+                params.setMargins(dp(2), dp(2), dp(2), dp(2));
+                rowLayout.addView(key, params);
             }
-            LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
-            grid.addView(rLayout, rlp);
+            grid.addView(rowLayout, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         }
         keyboardBodyContainer.addView(grid, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+    }
+
+    private LinearLayout buildAngleBar(boolean landscape) {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setGravity(Gravity.CENTER);
+        bar.setPadding(0, 0, 0, dp(2));
+        int height = dp(landscape ? 26 : 28);
+        bar.addView(makeScientificKey(k("("), 15f), new LinearLayout.LayoutParams(dp(36), height));
+
+        LinearLayout.LayoutParams switches = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        switches.setMargins(dp(6), 0, dp(6), 0);
+        bar.addView(buildAngleSwitches(height, this::updatePreviewOnly), switches);
+        bar.addView(makeScientificKey(k(")"), 15f), new LinearLayout.LayoutParams(dp(36), height));
+        return bar;
+    }
+
+    private LinearLayout buildAngleSwitches(int height, Runnable modeChanged) {
+        LinearLayout switches = new LinearLayout(this);
+        switches.setGravity(Gravity.CENTER_VERTICAL);
+        Button rad = makeAngleButton("RAD");
+        Button deg = makeAngleButton("DEG");
+        LinearLayout.LayoutParams radParams = new LinearLayout.LayoutParams(dp(58), height);
+        radParams.rightMargin = dp(12);
+        switches.addView(rad, radParams);
+        switches.addView(deg, new LinearLayout.LayoutParams(dp(58), height));
+        styleAngleSwitches(rad, deg);
+        rad.setOnClickListener(v -> changeAngleMode(true, rad, deg, modeChanged));
+        deg.setOnClickListener(v -> changeAngleMode(false, rad, deg, modeChanged));
+        return switches;
+    }
+
+    private Button makeAngleButton(String label) {
+        Button button = makeMaterialButton(label, Color.TRANSPARENT, colOnSurface, 14, 12f, 1.3f, true);
+        button.setSingleLine(true);
+        button.setIncludeFontPadding(false);
+        button.setPadding(0, 0, 0, 0);
+        return button;
+    }
+
+    private void styleAngleSwitches(Button rad, Button deg) {
+        boolean radians = engine.isRadiansMode();
+        styleAngleButton(rad, radians);
+        styleAngleButton(deg, !radians);
+    }
+
+    private void styleAngleButton(Button button, boolean selected) {
+        button.setSelected(selected);
+        button.setTextColor(selected ? colOnPrimary : colOnSurface);
+        button.setBackground(selected ? materialRipple(colPrimary, 14) : outlinedPill(colOnSurfaceVariant, dp(1), 14));
+    }
+
+    private void changeAngleMode(boolean radians, Button rad, Button deg, Runnable modeChanged) {
+        (radians ? rad : deg).performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+        if (engine.isRadiansMode() == radians) return;
+        engine.setRadiansMode(radians);
+        styleAngleSwitches(rad, deg);
+        saveState();
+        modeChanged.run();
+    }
+
+    private View makeScientificKey(KeyDef key, float textSize) {
+        View view;
+        if (key.symbol != null) {
+            ImageButton button = new ImageButton(this);
+            button.setContentDescription(key.label);
+            button.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+            button.setPadding(dp(2), dp(2), dp(2), dp(2));
+            button.setBackground(materialRipple(Color.TRANSPARENT, 14));
+            button.setImageDrawable(new MathKeyDrawable(key.symbol, dp(34), colOnSurface));
+            view = button;
+        } else {
+            int color = key.token.equals("TOGGLE_VAR_MORE") ? colPrimary : colOnSurface;
+            Button button = makeMaterialButton(key.label, Color.TRANSPARENT, color, 14, textSize, 1.4f);
+            button.setSingleLine(true);
+            button.setIncludeFontPadding(false);
+            button.setPadding(dp(2), dp(2), dp(2), dp(2));
+            if (key.label.contains("_")) {
+                button.setText(formatSubscriptSymbol(key.label));
+                button.setContentDescription(key.label);
+            }
+            view = button;
+        }
+        view.setOnClickListener(v -> {
+            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+            handleKeyPress(key.token);
+        });
+        return view;
     }
 
     private static final String[] MULTI_CHAR_TOKENS = {
@@ -2098,18 +1593,8 @@ private static class FilledBackspaceDrawable extends Drawable {
             "Z0", "K_J", "R_K", "G0", "E_h", "N_A", "m_u", "m_e", "m_p", "m_n"
     };
 
-    private static String deleteLastToken(String input) {
-        if (input == null || input.isEmpty()) return "";
-        for (String tok : MULTI_CHAR_TOKENS) {
-            if (input.endsWith(tok)) {
-                return input.substring(0, input.length() - tok.length());
-            }
-        }
-        return input.substring(0, input.length() - 1);
-    }
-
     private void handleOperatorPress(String op) {
-        EditText activeEt = getActiveInputEditText();
+        EditText activeEt = formula.activeField();
         if (activeEt == null) return;
         int start = Math.max(0, activeEt.getSelectionStart());
         int end = Math.max(0, activeEt.getSelectionEnd());
@@ -2126,7 +1611,7 @@ private static class FilledBackspaceDrawable extends Drawable {
         String before = cur.substring(0, start);
 
         // If field is empty and op is minus or plus, insert unary sign (e.g. -3 or +3)
-        if (before.trim().isEmpty() && (op.equals("−") || op.equals("+") || op.equals("-"))) {
+        if (before.trim().isEmpty() && !formula.hasTemplateBeforeCaret() && (op.equals("−") || op.equals("+") || op.equals("-"))) {
             String sign = op.equals("+") ? "+" : "−";
             insertAtCursor(sign);
             return;
@@ -2145,16 +1630,7 @@ private static class FilledBackspaceDrawable extends Drawable {
             // Replace previous exponent sign
             String expSign = op.equals("+") ? "+" : "−";
             int signPos = trimmedBefore.length() - 1;
-            isSyncingInput = true;
-            try {
-                editable.replace(signPos, start, expSign);
-                activeEt.setSelection(signPos + 1);
-            } finally {
-                isSyncingInput = false;
-            }
-            syncCurrentInputFromActiveMode();
-            saveState();
-            updatePreviewOnly();
+            formula.replace(signPos, start, expSign);
             return;
         }
 
@@ -2169,49 +1645,84 @@ private static class FilledBackspaceDrawable extends Drawable {
             }
             int opStart = trimmedBefore.length() - 1;
             while (opStart > 0 && cur.charAt(opStart - 1) == ' ') opStart--;
-            isSyncingInput = true;
-            try {
-                editable.replace(opStart, start, " " + op + " ");
-                activeEt.setSelection(opStart + op.length() + 2);
-            } finally {
-                isSyncingInput = false;
-            }
-            syncCurrentInputFromActiveMode();
-            saveState();
-            updatePreviewOnly();
+            formula.replace(opStart, start, " " + op + " ");
             return;
         }
 
         insertAtCursor(" " + op + " ");
     }
 
-    private void showMatrixDialog() {
-        final String[] options = {
-                "2×2 Einheitsmatrix: [[1, 0], [0, 1]]",
-                "2×2 Matrix Vorlage: [[1, 2], [3, 4]]",
-                "3×3 Einheitsmatrix: [[1, 0, 0], [0, 1, 0], [0, 0, 1]]",
-                "Klammern [ ] einfügen",
-                "Zeilentrenner ], [ einfügen",
-                "Komma , einfügen",
-                "Inversion: inv(",
-                "Determinante: det(",
-                "Transponieren: trans("
-        };
+    private void showMatrixDialog(SpecialInput operation) {
+        String[] sizes = {"2 × 2", "3 × 3", "2 × 2 Einheitsmatrix",
+                "3 × 3 Einheitsmatrix", "2 × 2 Beispielmatrix", "Eigene Größe …"};
+        String title = operation == SpecialInput.DET ? "Determinante"
+                : operation == SpecialInput.INVERSE ? "Inverse Matrix"
+                : operation == SpecialInput.TRANSPOSE ? "Transponierte Matrix" : "Matrix einfügen";
         new AlertDialog.Builder(this)
-                .setTitle("Matrix einfügen")
-                .setItems(options, (dialog, which) -> {
-                    switch (which) {
-                        case 0: insertAtCursor("[[1, 0], [0, 1]]"); break;
-                        case 1: insertAtCursor("[[1, 2], [3, 4]]"); break;
-                        case 2: insertAtCursor("[[1, 0, 0], [0, 1, 0], [0, 0, 1]]"); break;
-                        case 3: insertAtCursor("[]"); break;
-                        case 4: insertAtCursor("], ["); break;
-                        case 5: insertAtCursor(", "); break;
-                        case 6: insertAtCursor("inv("); break;
-                        case 7: insertAtCursor("det("); break;
-                        case 8: insertAtCursor("trans("); break;
+                .setTitle(title)
+                .setItems(sizes, (dialog, choice) -> {
+                    if (choice == sizes.length - 1) {
+                        showMatrixSize(operation);
+                        return;
                     }
+                    int size = choice == 1 || choice == 3 ? 3 : 2;
+                    List<String> cells = new ArrayList<>();
+                    if (choice == 2 || choice == 3) {
+                        for (int i = 0; i < size * size; i++) {
+                            cells.add(i / size == i % size ? "1" : "0");
+                        }
+                    } else if (choice == 4) {
+                        cells.addAll(java.util.Arrays.asList("1", "2", "3", "4"));
+                    }
+                    formula.matrix(size, size, cells, operation);
                 })
+                .setNegativeButton("Abbrechen", null)
+                .show();
+    }
+
+    private void showMatrixSize(SpecialInput operation) {
+        LinearLayout inputs = new LinearLayout(this);
+        inputs.setOrientation(LinearLayout.VERTICAL);
+        inputs.setPadding(dp(24), 0, dp(24), dp(8));
+        EditText rows = matrixDimension(inputs, "Zeilen");
+        EditText columns = matrixDimension(inputs, "Spalten");
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Matrixgröße")
+                .setView(inputs)
+                .setNegativeButton("Abbrechen", null)
+                .setPositiveButton("Einfügen", null)
+                .create();
+        dialog.show();
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            try {
+                int height = Integer.parseInt(rows.getText().toString().trim());
+                int width = Integer.parseInt(columns.getText().toString().trim());
+                if (height <= 0 || width <= 0 || (long) height * width > 100) {
+                    columns.setError("Mindestens eine Zeile und Spalte, höchstens 100 Zellen");
+                    return;
+                }
+                dialog.dismiss();
+                formula.matrix(height, width, java.util.Collections.emptyList(), operation);
+            } catch (NumberFormatException e) {
+                columns.setError("Bitte Zeilen und Spalten als ganze Zahlen eingeben");
+            }
+        });
+    }
+
+    private EditText matrixDimension(LinearLayout inputs, String name) {
+        EditText dimension = new EditText(this);
+        dimension.setHint(name);
+        dimension.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        dimension.setSingleLine(true);
+        inputs.addView(dimension);
+        return dimension;
+    }
+
+    private void showCalculusChoice(SpecialInput first, SpecialInput second, String firstLabel, String secondLabel) {
+        new AlertDialog.Builder(this)
+                .setTitle(first == SpecialInput.INTEGRAL ? "Integral" : "Ableitung")
+                .setItems(new String[]{firstLabel, secondLabel},
+                        (dialog, which) -> formula.function(which == 0 ? first : second))
                 .setNegativeButton("Abbrechen", null)
                 .show();
     }
@@ -2226,14 +1737,28 @@ private static class FilledBackspaceDrawable extends Drawable {
         if (key.equals("TOGGLE_ANGLE")) {
             engine.setRadiansMode(!engine.isRadiansMode());
             saveState();
-            updateInputAndPreview();
+            updatePreviewOnly();
             refreshKeyboardSection();
             return;
         }
         if (key.equals("SHOW_MATRIX_DIALOG")) {
-            showMatrixDialog();
+            showMatrixDialog(null);
             return;
         }
+        SpecialInput special = SpecialInput.forKey(key);
+        if (special != null) {
+            if (special == SpecialInput.DET || special == SpecialInput.INVERSE || special == SpecialInput.TRANSPOSE) {
+                showMatrixDialog(special);
+            } else if (special == SpecialInput.INTEGRAL) {
+                showCalculusChoice(special, SpecialInput.ANTIDERIVATIVE, "Bestimmtes Integral", "Stammfunktion");
+            } else if (special == SpecialInput.DERIVATIVE) {
+                showCalculusChoice(special, SpecialInput.DERIVATIVE_AT, "Symbolische Ableitung", "Ableitung an einer Stelle");
+            } else {
+                formula.function(special);
+            }
+            return;
+        }
+        if ((key.equals(", ") && formula.advanceField()) || (key.equals(")") && formula.closeTemplate())) return;
         if (key.equals("TAB_1")) {
             activeTab = 1;
             rebuildScreen();
@@ -2253,190 +1778,180 @@ private static class FilledBackspaceDrawable extends Drawable {
             clearInput();
             return;
         }
-        if (key.equals("TEMPLATE_FRACTION")) {
-            openFractionTemplate();
+        if (key.equals("÷") || key.equals("/")) {
+            formula.fraction();
             return;
         }
-        if (key.equals("TEMPLATE_POWER")) {
-            openExponentTemplate(null);
-            return;
-        }
-        if (key.equals("TEMPLATE_POWER_10")) {
-            openExponentTemplate("10");
+        if (key.equals("TEMPLATE_POWER") || key.equals("TEMPLATE_POWER_10") || key.equals("TEMPLATE_SQUARE")) {
+            formula.power(key.equals("TEMPLATE_POWER_10") ? "10" : null,
+                    key.equals("TEMPLATE_SQUARE") ? "2" : "");
             return;
         }
 
         if (key.equals("=")) {
-            if (currentInputMode == InputMode.FRACTION) {
-                String dText = fracDenEt != null && fracDenEt.getText() != null ? fracDenEt.getText().toString().trim() : (fracDenStr != null ? fracDenStr.trim() : "");
-                String nText = fracNumEt != null && fracNumEt.getText() != null ? fracNumEt.getText().toString().trim() : (fracNumStr != null ? fracNumStr.trim() : "");
-                if (dText.isEmpty()) {
-                    setFractionFocus(false);
-                    if (fracDenEt != null) fracDenEt.performHapticFeedback(HapticFeedbackConstants.REJECT);
-                    return;
-                }
-                if (nText.isEmpty()) {
-                    setFractionFocus(true);
-                    if (fracNumEt != null) fracNumEt.performHapticFeedback(HapticFeedbackConstants.REJECT);
-                    return;
-                }
-            } else if (currentInputMode == InputMode.EXPONENT) {
-                String expText = expValueEt != null && expValueEt.getText() != null ? expValueEt.getText().toString().trim() : (expValueStr != null ? expValueStr.trim() : "");
-                if (expText.isEmpty()) {
-                    if (expValueEt != null) {
-                        expValueEt.requestFocus();
-                        expValueEt.performHapticFeedback(HapticFeedbackConstants.REJECT);
-                    }
-                    return;
-                }
+            if (formula.focusMissingField()) {
+                formula.performHapticFeedback(HapticFeedbackConstants.REJECT);
+                return;
             }
-            if (currentInputMode != InputMode.MAIN) {
-                exitFractionMode(true);
-                exitExponentMode(true);
-            }
-            if (currentInput != null && !currentInput.trim().isEmpty()) {
+            String expression = formula.expression();
+            if (!expression.trim().isEmpty()) {
                 try {
-                    CalculatorEngine.Result result = engine.evaluateAndCommit(currentInput);
-                    String dec = result.decimalText;
-                    String ex = result.exactText;
-                    String rep = getIntegrationReportText(currentInput);
-                    history.add(new HistoryEntry(currentInput, ex, dec, rep, showExactFirst));
+                    CalculatorEngine.Result result = engine.evaluateAndCommit(expression);
+                    String rep = getIntegrationReportText(expression);
+                    HistoryEntry entry = new HistoryEntry(expression, result.exactText, result.decimalText,
+                            rep, showExactFirst);
+                    entry.formulaLayout = formula.layoutState();
+                    history.add(entry);
+                    saveHistory();
+                    saveDraft();
                     clearInput();
                     refreshHistoryViews(true);
                 } catch (Exception e) {
-                    // Do NOT clear the input field on error!
-                    // Keep the expression intact so user can fix the error.
-                    // The live preview already reports the error (e.g. "⚠ Division durch Null").
-                    if (inputDisplayView != null) {
-                        inputDisplayView.performHapticFeedback(HapticFeedbackConstants.REJECT);
-                    }
+                    formula.performHapticFeedback(HapticFeedbackConstants.REJECT);
                     updatePreviewOnly();
                 }
             }
         } else if (key.equals("DEL")) {
-            deleteAtCursor();
-        } else if (key.equals("÷") || key.equals("×") || key.equals("+") || key.equals("−")) {
+            formula.backspace();
+        } else if (key.equals("×") || key.equals("+") || key.equals("−")) {
             handleOperatorPress(key);
-        } else if (key.equals("/")) {
-            handleOperatorPress("÷");
         } else if (key.equals("*")) {
             handleOperatorPress("×");
         } else if (key.equals("-")) {
             handleOperatorPress("−");
         } else if (key.equals(":=")) {
-            int start = Math.max(0, inputDisplayView != null ? inputDisplayView.getSelectionStart() : 0);
-            String cur = currentInput != null ? currentInput : "";
-            if (start > 0 && cur.charAt(start - 1) != ' ') {
-                insertAtCursor(" := ");
-            } else {
-                insertAtCursor(":= ");
-            }
+            EditText field = formula.activeField();
+            int start = Math.max(0, field.getSelectionStart());
+            insertAtCursor(start > 0 && field.getText().charAt(start - 1) != ' ' ? " := " : ":= ");
         } else if (key.startsWith("AC")) {
             history.clear();
             saveState();
             refreshHistoryViews(true);
         } else {
-            insertAtCursor(key);
+            insertCalculatorSymbol(key);
         }
     }
 
+    private FormulaEditor makePlotFormula(String label, int color, String layout, String expression) {
+        FormulaEditor editor = new FormulaEditor(this, color, colPrimary, this::plotFormulaChanged,
+                null, MULTI_CHAR_TOKENS);
+        editor.enableSystemKeyboard(label);
+        editor.restore(layout, expression);
+        return editor;
+    }
+
+    private void plotFormulaChanged(FormulaEditor editor) {
+        String expression = plottableExpression(editor);
+        String error = null;
+        if (!expression.isEmpty()) {
+            try {
+                engine.validatePlotSyntax(expression);
+            } catch (Exception e) {
+                error = "Ungültiger Ausdruck";
+            }
+        }
+        editor.setInputError(error);
+        if (editor == plotFormula1) {
+            compiledPlotFn1 = (error == null && !expression.isEmpty()) ? engine.compilePlotFunction(expression) : null;
+        } else if (editor == plotFormula2) {
+            compiledPlotFn2 = (error == null && !expression.isEmpty()) ? engine.compilePlotFunction(expression) : null;
+        }
+        saveDraft();
+        invalidatePlot();
+    }
+
+    private static String plottableExpression(FormulaEditor editor) {
+        return editor.hasMissingField() ? "" : editor.expression().trim();
+    }
+
+    private void invalidatePlot() {
+        if (plotView != null) plotView.invalidate();
+    }
+
+    private void finishPlotEditing() {
+        plotFormula1.finishSystemEditing();
+        plotFormula2.finishSystemEditing();
+    }
+
     private void buildPlotterTab(FrameLayout parent) {
-        boolean isLandscape = getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
+        boolean landscape = getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
         col.setPadding(dp(10), dp(8), dp(10), dp(8));
+        col.setFocusableInTouchMode(true);
 
         LinearLayout header = new LinearLayout(this);
-        header.setOrientation(isLandscape ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
+        header.setOrientation(LinearLayout.VERTICAL);
         header.setBackground(roundedRect(colSurfaceContainer, 16));
-        header.setPadding(dp(10), isLandscape ? dp(4) : dp(8), dp(10), isLandscape ? dp(4) : dp(8));
+        header.setPadding(dp(10), landscape ? dp(4) : dp(8), dp(10), landscape ? dp(4) : dp(8));
 
-        EditText f1Input = new EditText(this);
-        f1Input.setText(plotExpr1);
-        f1Input.setTextColor(colPrimary);
-        f1Input.setHint("f₁(x)");
-        if (isLandscape) {
-            header.addView(f1Input, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-            View gap = new View(this);
-            header.addView(gap, new LinearLayout.LayoutParams(dp(8), dp(1)));
-        } else {
-            header.addView(f1Input);
-        }
+        LinearLayout formulas = new LinearLayout(this);
+        formulas.setOrientation(landscape ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
+        float formulaSize = landscape ? 16f : 19f;
+        addPlotFormula(formulas, "f₁(x)", plotFormula1, colPrimary, formulaSize, landscape);
+        addPlotFormula(formulas, "f₂(x)", plotFormula2, colOnSecondaryContainer, formulaSize, landscape);
+        header.addView(formulas);
 
-        EditText f2Input = new EditText(this);
-        f2Input.setText(plotExpr2);
-        f2Input.setTextColor(colOnSecondaryContainer);
-        f2Input.setHint("f₂(x)");
-        if (isLandscape) {
-            header.addView(f2Input, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        } else {
-            header.addView(f2Input);
-        }
-
-        final Plotter2DView plotView = new Plotter2DView(this);
-        f1Input.addTextChangedListener(new SimpleWatcher(s -> {
-            plotExpr1 = s;
-            String t = s.trim();
-            if (!t.isEmpty()) {
-                try {
-                    double v = engine.evaluateForX(t, 1.0);
-                    if (Double.isNaN(v)) {
-                        f1Input.setError("Ungültiger Ausdruck");
-                    } else {
-                        f1Input.setError(null);
-                    }
-                } catch (Exception e) {
-                    f1Input.setError("Ungültiger Ausdruck");
-                }
-            } else {
-                f1Input.setError(null);
-            }
-            plotView.invalidate();
-            saveState();
-        }));
-        f2Input.addTextChangedListener(new SimpleWatcher(s -> {
-            plotExpr2 = s;
-            String t = s.trim();
-            if (!t.isEmpty()) {
-                try {
-                    double v = engine.evaluateForX(t, 1.0);
-                    if (Double.isNaN(v)) {
-                        f2Input.setError("Ungültiger Ausdruck");
-                    } else {
-                        f2Input.setError(null);
-                    }
-                } catch (Exception e) {
-                    f2Input.setError("Ungültiger Ausdruck");
-                }
-            } else {
-                f2Input.setError(null);
-            }
-            plotView.invalidate();
-            saveState();
-        }));
-
-        if (currentInput != null && !currentInput.trim().isEmpty()) {
-            Button importBtn = makeMaterialButton(
-                    "Rechner-Formel übernehmen",
-                    Color.TRANSPARENT, colPrimary, 12, 11f, 1.2f, true);
-            importBtn.setBackground(outlinedPill(colPrimary, dp(1f), 12));
-            importBtn.setPadding(dp(10), dp(2), dp(10), dp(2));
-            importBtn.setOnClickListener(v -> {
-                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-                plotExpr1 = currentInput.trim();
-                f1Input.setText(plotExpr1);
-            });
-            header.addView(importBtn);
+        String draft = formula.expression().trim();
+        if (draft.isEmpty() && !history.isEmpty()) {
+            HistoryEntry latest = history.get(history.size() - 1);
+            addPlotImportButton(header, latest.expr, latest.formulaLayout);
+        } else if (!draft.isEmpty() && !formula.hasMissingField()) {
+            addPlotImportButton(header, draft, formula.layoutState());
         }
 
         col.addView(header, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        LinearLayout.LayoutParams pLp = new LinearLayout.LayoutParams(
+        plotView = new Plotter2DView(this);
+        plotView.setContentDescription("Funktionsgraph");
+        LinearLayout.LayoutParams plotParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
-        pLp.topMargin = dp(6);
-        col.addView(plotView, pLp);
+        plotParams.topMargin = dp(6);
+        col.addView(plotView, plotParams);
         parent.addView(col);
+        col.requestFocus();
+    }
+
+    private void addPlotFormula(LinearLayout container, String label, FormulaEditor editor, int color,
+                                float formulaSize, boolean landscape) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        TextView name = new TextView(this);
+        name.setText(label + " =");
+        name.setTextColor(color);
+        setScaledTextSize(name, 13f, 1.4f);
+        LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        nameParams.rightMargin = dp(3);
+        row.addView(name, nameParams);
+
+        if (editor.getParent() instanceof ViewGroup) {
+            ((ViewGroup) editor.getParent()).removeView(editor);
+        }
+        row.addView(editor, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        editor.show(formulaSize);
+
+        Button clear = makeMaterialButton("×", Color.TRANSPARENT, colOnSurfaceVariant, 12, 16f, 1.4f);
+        clear.setContentDescription(label + " löschen");
+        clear.setOnClickListener(v -> editor.clear());
+        row.addView(clear, new LinearLayout.LayoutParams(dp(36), dp(40)));
+
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                landscape ? 0 : ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                landscape ? 1f : 0f);
+        container.addView(row, params);
+    }
+
+    private void addPlotImportButton(LinearLayout header, String expression, String layout) {
+        Button button = makeMaterialButton(
+                "Rechner-Formel übernehmen", Color.TRANSPARENT, colPrimary, 12, 11f, 1.2f, true);
+        button.setBackground(outlinedPill(colPrimary, dp(1), 12));
+        button.setPadding(dp(10), dp(4), dp(10), dp(4));
+        button.setOnClickListener(v -> {
+            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+            plotFormula1.replaceDraft(layout, expression);
+        });
+        header.addView(button);
     }
 
     private class Plotter2DView extends View {
@@ -2492,6 +2007,7 @@ private static class FilledBackspaceDrawable extends Drawable {
             }
             int action = event.getActionMasked();
             if (action == MotionEvent.ACTION_DOWN) {
+                finishPlotEditing();
                 lastTouchX = event.getX();
                 lastTouchY = event.getY();
                 return true;
@@ -2544,18 +2060,26 @@ private static class FilledBackspaceDrawable extends Drawable {
             canvas.drawLine(x0, 0, x0, h, axisPaint);
             canvas.drawLine(0, y0, w, y0, axisPaint);
 
-            drawCurve(canvas, plotExpr1, curve1Paint, w, cx, cy);
-            drawCurve(canvas, plotExpr2, curve2Paint, w, cx, cy);
+            if (compiledPlotFn1 == null) {
+                String e1 = plottableExpression(plotFormula1);
+                if (!e1.isEmpty()) compiledPlotFn1 = engine.compilePlotFunction(e1);
+            }
+            if (compiledPlotFn2 == null) {
+                String e2 = plottableExpression(plotFormula2);
+                if (!e2.isEmpty()) compiledPlotFn2 = engine.compilePlotFunction(e2);
+            }
+            drawCurve(canvas, compiledPlotFn1, curve1Paint, w, cx, cy);
+            drawCurve(canvas, compiledPlotFn2, curve2Paint, w, cx, cy);
         }
 
-        private void drawCurve(Canvas canvas, String expr, Paint paint, int w, float cx, float cy) {
-            if (expr == null || expr.trim().isEmpty()) return;
+        private void drawCurve(Canvas canvas, CalculatorEngine.PlotFunction fn, Paint paint, int w, float cx, float cy) {
+            if (fn == null) return;
             float prevX = 0f, prevY = 0f;
             boolean hasPrev = false;
             for (int px = 0; px <= w; px += 3) {
                 double xv = centerX + (px - cx) / scale;
                 try {
-                    double yv = engine.evaluateForX(expr, xv);
+                    double yv = fn.evaluate(xv);
                     if (Double.isFinite(yv)) {
                         float sy = (float) (cy - (yv - centerY) * scale);
                         if (hasPrev && Math.abs(sy - prevY) < getHeight()) {
@@ -2574,7 +2098,7 @@ private static class FilledBackspaceDrawable extends Drawable {
         }
     }
 
-    private static CharSequence formatSubscriptSymbol(String sym) {
+    static CharSequence formatSubscriptSymbol(String sym) {
         int idx = sym.indexOf('_');
         if (idx < 0 || idx == sym.length() - 1) return sym;
         String base = sym.substring(0, idx);
@@ -2673,10 +2197,7 @@ private static class FilledBackspaceDrawable extends Drawable {
                         "Zur Tastatur hinzufügen (Variablen a..z)"
                 }, (dialog, which) -> {
                     if (which == 0) {
-                        currentInput += vName + " := ";
-                        activeTab = 0;
-                        saveState();
-                        rebuildScreen();
+                        insertConstantOrVariable(vName + " := ");
                     } else if (which == 1) {
                         showSetDirectValueDialog(vName);
                     } else if (which == 2) {
@@ -2698,52 +2219,21 @@ private static class FilledBackspaceDrawable extends Drawable {
     }
 
     private void insertConstantOrVariable(String token) {
-        if (currentInputMode == InputMode.EXPONENT) {
-            expValueStr = (expValueStr != null ? expValueStr : "") + token;
-            if (expValueEt != null) {
-                isSyncingInput = true;
-                try {
-                    expValueEt.setText(expValueStr);
-                    expValueEt.setSelection(expValueStr.length());
-                } finally {
-                    isSyncingInput = false;
+        insertCalculatorSymbol(token);
+        activeTab = 0;
+        rebuildScreen();
+    }
+
+    private void insertCalculatorSymbol(String token) {
+        for (CategoryDef category : constantCategories) {
+            for (ConstantDef constant : category.items) {
+                if (constant.token.equals(token) && !constant.symbol.equals(token)) {
+                    formula.symbol(constant.symbol, token);
+                    return;
                 }
-            }
-        } else if (currentInputMode == InputMode.FRACTION) {
-            if (focusNumerator) {
-                fracNumStr = (fracNumStr != null ? fracNumStr : "") + token;
-                if (fracNumEt != null) {
-                    isSyncingInput = true;
-                    try {
-                        fracNumEt.setText(fracNumStr);
-                        fracNumEt.setSelection(fracNumStr.length());
-                    } finally {
-                        isSyncingInput = false;
-                    }
-                }
-            } else {
-                fracDenStr = (fracDenStr != null ? fracDenStr : "") + token;
-                if (fracDenEt != null) {
-                    isSyncingInput = true;
-                    try {
-                        fracDenEt.setText(fracDenStr);
-                        fracDenEt.setSelection(fracDenStr.length());
-                    } finally {
-                        isSyncingInput = false;
-                    }
-                }
-            }
-        } else {
-            if (inputDisplayView != null && inputDisplayView.isAttachedToWindow()) {
-                insertAtCursor(token);
-            } else {
-                currentInput = (currentInput != null ? currentInput : "") + token;
             }
         }
-        activeTab = 0;
-        syncCurrentInputFromActiveMode();
-        saveState();
-        rebuildScreen();
+        formula.insert(token);
     }
 
     private void showSetDirectValueDialog(final String vName) {
@@ -2985,7 +2475,7 @@ private static class FilledBackspaceDrawable extends Drawable {
         list.setPadding(dp(12), dp(10), dp(12), dp(16));
 
         // Accordion Category Cards (No top pills, clean direct view)
-        CategoryDef[] cats = getConstantCategories();
+        CategoryDef[] cats = constantCategories;
         for (int cIdx = 0; cIdx < cats.length; cIdx++) {
             final int catIndex = cIdx;
             final CategoryDef cat = cats[cIdx];
@@ -3168,7 +2658,7 @@ private static class FilledBackspaceDrawable extends Drawable {
 
     public static String formatDisplayNumber(String numStr) {
         if (numStr == null || numStr.isEmpty()) return "";
-        if (numStr.contains("i") || numStr.contains("[") || numStr.contains("/")) {
+        if (numStr.contains("i") || numStr.contains("[")) {
             return numStr;
         }
         if (numStr.matches("^-?\\d+(\\.\\d+)?[eE][+-]?\\d+$")) {
@@ -3183,11 +2673,14 @@ private static class FilledBackspaceDrawable extends Drawable {
         }
         String clean = numStr.replace(',', '.');
         int dot = clean.indexOf('.');
-        if (dot >= 0) {
+        if (dot >= 0 && clean.matches("[+-]?\\d+\\.\\d+")) {
             String fracPart = clean.substring(dot + 1);
             if (fracPart.length() > 6) {
                 try {
                     double d = Double.parseDouble(clean);
+                    if (d != 0 && Math.abs(d) < 1e-4) {
+                        return formatDisplayNumber(String.format(java.util.Locale.US, "%.6g", d));
+                    }
                     clean = String.format(java.util.Locale.US, "%.6f", d);
                     dot = clean.indexOf('.');
                 } catch (Exception ignored) {
@@ -3202,7 +2695,7 @@ private static class FilledBackspaceDrawable extends Drawable {
             }
             return intPart + "," + sb.toString();
         }
-        return numStr;
+        return formatUnchainedSuperscripts(numStr);
     }
 
     private static String toSuperscript(int n) {
@@ -3331,26 +2824,15 @@ private static class FilledBackspaceDrawable extends Drawable {
         setScaledTextSize(b, spSize, maxScale);
         b.setTypeface(bold ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
         b.setPadding(dp(2), dp(1), dp(2), dp(1));
-        GradientDrawable mask = roundedRect(Color.WHITE, cornerDp);
-        GradientDrawable content = roundedRect(bg, cornerDp);
-        RippleDrawable ripple = new RippleDrawable(
-                ColorStateList.valueOf(0x33FFFFFF), content, mask);
-        b.setBackground(ripple);
+        b.setBackground(materialRipple(bg, cornerDp));
         return b;
     }
 
-    private interface TextCallback {
-        void onText(String s);
+    private RippleDrawable materialRipple(int fill, int radius) {
+        return new RippleDrawable(ColorStateList.valueOf(0x33FFFFFF),
+                roundedRect(fill, radius), roundedRect(Color.WHITE, radius));
     }
 
-    private static class SimpleWatcher implements TextWatcher {
-        private final TextCallback cb;
-        SimpleWatcher(TextCallback cb) { this.cb = cb; }
-        @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
-        @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
-            cb.onText(s.toString());
-        }
-        @Override public void afterTextChanged(Editable s) {}
-    }
+
 }
 

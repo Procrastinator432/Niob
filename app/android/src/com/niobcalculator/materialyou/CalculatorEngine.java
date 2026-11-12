@@ -125,12 +125,12 @@ public final class CalculatorEngine {
         }
 
         // 2. Matrix Expressions
-        if (trimmed.startsWith("det(")
-                || trimmed.startsWith("inv(")
+        if (trimmed.startsWith("inv(")
                 || trimmed.startsWith("trans(")
                 || trimmed.startsWith("transpose(")
-                || trimmed.startsWith("[[")) {
-            return evaluateMatrix(trimmed, commit);
+                || trimmed.startsWith("[")) {
+            String matrix = formatMatrix(evalMatrixExpr(trimmed, null));
+            return new Result(0.0, matrix, matrix);
         }
 
         // 3. Symbolic calculus functions via AST
@@ -172,14 +172,99 @@ public final class CalculatorEngine {
         return new Result(numericVal, exact, decimal);
     }
 
+    public interface PlotFunction {
+        double evaluate(double x);
+    }
+
     public double evaluateForX(String expression, double x) {
-        Map<String, Value> overrides = new HashMap<>();
-        overrides.put("x", Value.fromFloat(x));
-        Value val = evalExpression(expression, overrides);
-        if (!val.c.isReal() || !Double.isFinite(val.c.re)) {
+        IntegrationReport savedReport = this.lastIntegrationReport;
+        try {
+            Map<String, Value> overrides = new HashMap<>();
+            overrides.put("x", Value.fromFloat(x));
+            Value val = evalExpression(expression, overrides);
+            if (!val.c.isReal() || !Double.isFinite(val.c.re)) {
+                return Double.NaN;
+            }
+            return val.c.re;
+        } catch (ArithmeticException e) {
             return Double.NaN;
+        } finally {
+            this.lastIntegrationReport = savedReport;
         }
-        return val.c.re;
+    }
+
+    public void validatePlotSyntax(String expression) {
+        Map<String, Value> overrides = new HashMap<>();
+        overrides.put("x", Value.fromFloat(1.0));
+        try {
+            evalExpression(expression, overrides);
+        } catch (ArithmeticException ignored) {
+            // Mathematical poles / domain gaps are syntactically valid
+        }
+    }
+
+    public PlotFunction compilePlotFunction(String expression) {
+        if (expression == null || expression.trim().isEmpty()) return null;
+        String normalized = normalizeEvaluation(expression.trim());
+        AstNode ast = AstParser.tryParse(normalized);
+        if (ast != null) {
+            return x -> {
+                IntegrationReport saved = this.lastIntegrationReport;
+                try {
+                    Map<String, Value> ov = new HashMap<>();
+                    ov.put("x", Value.fromFloat(x));
+                    Value v = evalAst(ast, ov);
+                    return (v != null && v.c.isReal() && Double.isFinite(v.c.re)) ? v.c.re : Double.NaN;
+                } catch (ArithmeticException e) {
+                    return Double.NaN;
+                } finally {
+                    this.lastIntegrationReport = saved;
+                }
+            };
+        }
+        return x -> evaluateForX(expression, x);
+    }
+
+    private Value evalAst(AstNode node, Map<String, Value> ov) {
+        if (node == null) return null;
+        if (node instanceof AstNum) return ((AstNum) node).val;
+        if (node instanceof AstVar) {
+            String vName = ((AstVar) node).name;
+            if (ov != null && ov.containsKey(vName)) return ov.get(vName);
+            if (variables.containsKey(vName)) return variables.get(vName);
+            if (vName.equals("pi") || vName.equals("π")) return Value.fromFloat(Math.PI);
+            if (vName.equals("e")) return Value.fromFloat(Math.E);
+            throw new RuntimeException("Unbekannte Variable " + vName);
+        }
+        if (node instanceof AstAdd) {
+            return evalAst(((AstAdd) node).left, ov).add(evalAst(((AstAdd) node).right, ov));
+        }
+        if (node instanceof AstSub) {
+            return evalAst(((AstSub) node).left, ov).sub(evalAst(((AstSub) node).right, ov));
+        }
+        if (node instanceof AstMul) {
+            return evalAst(((AstMul) node).left, ov).mul(evalAst(((AstMul) node).right, ov));
+        }
+        if (node instanceof AstDiv) {
+            return evalAst(((AstDiv) node).left, ov).div(evalAst(((AstDiv) node).right, ov));
+        }
+        if (node instanceof AstPow) {
+            return evalAst(((AstPow) node).base, ov).pow(evalAst(((AstPow) node).exp, ov));
+        }
+        if (node instanceof AstNeg) {
+            Value in = evalAst(((AstNeg) node).inner, ov);
+            return in != null ? in.negate() : null;
+        }
+        if (node instanceof AstFunc) {
+            AstFunc f = (AstFunc) node;
+            List<String> argExprs = new ArrayList<>();
+            for (AstNode a : f.args) {
+                Value v = evalAst(a, ov);
+                argExprs.add(v.c.im != 0.0 ? "(" + v.c.re + "+" + v.c.im + "i)" : String.valueOf(v.c.re));
+            }
+            return applyFunction(f.name, argExprs, ov);
+        }
+        return null;
     }
 
     public boolean isRadiansMode() { return radiansMode; }
@@ -534,6 +619,10 @@ public final class CalculatorEngine {
             return new Value(c.pow(exp.c), null);
         }
 
+        Value negate() {
+            return new Value(c.negate(), rat != null ? new ExactRat(rat.num.negate(), rat.den) : null);
+        }
+
         Value sqrt() {
             if (rat != null && rat.den.equals(BigInteger.ONE) && rat.num.signum() >= 0) {
                 try {
@@ -550,13 +639,48 @@ public final class CalculatorEngine {
 
     // --- Expression Evaluator ---
     private Value evalExpression(String expr, Map<String, Value> overrides) {
-        String s = expr.replace("×", "*").replace("·", "*").replace("÷", "/")
+        return new ExprEvaluator(normalizeEvaluation(expr), overrides).parse();
+    }
+
+    private static String normalizeSymbols(String expression) {
+        return expression.replace("×", "*").replace("·", "*").replace("÷", "/")
                 .replace("π", "pi").replace("−", "-")
                 .replace("²", "^2").replace("³", "^3").replace("⁻¹", "^(-1)");
+    }
+
+    private static String normalizeEvaluation(String expression) {
+        String s = normalizeSymbols(expression);
         // Normalize scientific notation with optional spaces, e.g. "1e - 3" -> "1e-3", "2.5e + 4" -> "2.5e+4", "1e 3" -> "1e3"
         s = s.replaceAll("(\\d+(?:\\.\\d+)?)[eE]\\s*([+\\-])\\s*(\\d+)", "$1e$2$3");
-        s = s.replaceAll("(\\d+(?:\\.\\d+)?)[eE]\\s+(\\d+)", "$1e$2");
-        return new ExprEvaluator(s, overrides).parse();
+        return s.replaceAll("(\\d+(?:\\.\\d+)?)[eE]\\s+(\\d+)", "$1e$2");
+    }
+
+    Value evalModulo(Value v0, Value v1) {
+        if ((v0.rat == null || !v0.rat.den.equals(BigInteger.ONE))
+                || (v1.rat == null || !v1.rat.den.equals(BigInteger.ONE))) {
+            if (!v0.c.isReal() || !v1.c.isReal()
+                    || !Double.isFinite(v0.c.re) || !Double.isFinite(v1.c.re)) {
+                throw new RuntimeException("Modulo erfordert endliche reelle Zahlen");
+            }
+            if (v1.c.re == 0.0) throw new RuntimeException("Modulo durch Null");
+            double remainder = v0.c.re % v1.c.re;
+            return Value.fromFloat(moduloAlwaysPositive && remainder < 0
+                    ? remainder + Math.abs(v1.c.re) : remainder);
+        }
+        BigInteger a = v0.rat.num;
+        BigInteger b = v1.rat.num;
+        if (b.equals(BigInteger.ZERO)) throw new RuntimeException("Modulo durch Null");
+        BigInteger rem = a.remainder(b);
+        if (moduloAlwaysPositive && rem.signum() < 0) {
+            rem = rem.add(b.abs());
+        }
+        return Value.fromInt(rem);
+    }
+
+    private static boolean isInfixModulo(String source, int position) {
+        if (!source.startsWith("mod", position) || position + 3 >= source.length()) return false;
+        char next = source.charAt(position + 3);
+        return next == ' ' || next == '(' || Character.isDigit(next) || next == '-' || next == '+';
     }
 
     private class ExprEvaluator {
@@ -605,20 +729,12 @@ public final class CalculatorEngine {
             Value x = parseUnary();
             for (;;) {
                 while (ch == ' ') nextChar();
-                // Check "mod"
-                if (pos + 2 < s.length() && s.startsWith("mod", pos)) {
-                    int next = pos + 3 < s.length() ? s.charAt(pos + 3) : -1;
-                    if (next == ' ' || next == '(' || Character.isDigit(next) || next == '-' || next == '+') {
-                        pos += 2;
-                        nextChar();
-                        Value right = parseUnary();
-                        double a = x.c.re;
-                        double b = right.c.re;
-                        double r = a % b;
-                        if (moduloAlwaysPositive && r < 0.0) r += Math.abs(b);
-                        x = Value.fromFloat(r);
-                        continue;
-                    }
+                if (isInfixModulo(s, pos)) {
+                    pos += 2;
+                    nextChar();
+                    Value right = parseUnary();
+                    x = evalModulo(x, right);
+                    continue;
                 }
 
                 if (eat('*')) {
@@ -729,7 +845,7 @@ public final class CalculatorEngine {
                         }
                     }
                 }
-                String numStr = s.substring(startPos, pos);
+                String numStr = s.substring(startPos, pos).replaceAll("\\s+", "");
                 if (!hasDot && !hasExp) {
                     try {
                         BigInteger bi = new BigInteger(numStr);
@@ -757,6 +873,12 @@ public final class CalculatorEngine {
                                 nextChar();
                                 break;
                             }
+                            depth--;
+                            sb.append((char) ch);
+                        } else if (ch == '[') {
+                            depth++;
+                            sb.append((char) ch);
+                        } else if (ch == ']') {
                             depth--;
                             sb.append((char) ch);
                         } else if (ch == ',' && depth == 0) {
@@ -918,37 +1040,43 @@ public final class CalculatorEngine {
         return new IntegrationReport(totalVal, totalErr, converged, intervals.size(), evals, message);
     }
 
+    private static String calculusVariable(String text) {
+        String name = text.trim();
+        if (!name.matches("[\\p{L}_][\\p{L}\\p{N}_]*")) {
+            throw new RuntimeException("Bitte eine Variable angeben");
+        }
+        return name;
+    }
+
     private Value applyFunction(String fn, List<String> args, Map<String, Value> ov) {
-        if (fn.equals("sum") && args.size() == 4) {
-            String v = args.get(1).trim();
-            long a = Math.round(evalExpression(args.get(2), ov).c.re);
-            long b = Math.round(evalExpression(args.get(3), ov).c.re);
-            if (b - a > 100000) throw new RuntimeException("Summationsbereich zu groß");
-            Value sum = Value.fromInt(0);
-            Map<String, Value> local = ov != null ? new HashMap<>(ov) : new HashMap<>();
-            for (long k = a; k <= b; k++) {
-                local.put(v, Value.fromInt(k));
-                sum = sum.add(evalExpression(args.get(0), local));
-            }
-            return sum;
+        if (fn.equals("det") && args.size() == 1) {
+            double determinant = matrixDet(evalMatrixExpr(args.get(0), ov));
+            long nearest = Math.round(determinant);
+            return Math.abs(determinant - nearest) < 1e-11
+                    ? Value.fromInt(nearest) : Value.fromFloat(determinant);
         }
 
-        if ((fn.equals("prod") || fn.equals("product")) && args.size() == 4) {
-            String v = args.get(1).trim();
+        boolean sum = fn.equals("sum");
+        if ((sum || fn.equals("prod") || fn.equals("product")) && args.size() == 4) {
+            String v = calculusVariable(args.get(1));
             long a = Math.round(evalExpression(args.get(2), ov).c.re);
             long b = Math.round(evalExpression(args.get(3), ov).c.re);
-            if (b - a > 100000) throw new RuntimeException("Produktbereich zu groß");
-            Value prod = Value.fromInt(1);
-            Map<String, Value> local = ov != null ? new HashMap<>(ov) : new HashMap<>();
-            for (long k = a; k <= b; k++) {
-                local.put(v, Value.fromInt(k));
-                prod = prod.mul(evalExpression(args.get(0), local));
+            if (a <= Long.MAX_VALUE - 100000 && b > a + 100000) {
+                throw new RuntimeException(sum ? "Summationsbereich zu groß" : "Produktbereich zu groß");
             }
-            return prod;
+            Value result = Value.fromInt(sum ? 0 : 1);
+            if (a > b) return result;
+            Map<String, Value> local = ov != null ? new HashMap<>(ov) : new HashMap<>();
+            for (long k = a; ; k++) {
+                local.put(v, Value.fromInt(k));
+                Value term = evalExpression(args.get(0), local);
+                result = sum ? result.add(term) : result.mul(term);
+                if (k == b) return result;
+            }
         }
 
         if ((fn.equals("int") || fn.equals("defint")) && args.size() == 4) {
-            String v = args.get(1).trim();
+            String v = calculusVariable(args.get(1));
             Value aVal = evalExpression(args.get(2), ov);
             Value bVal = evalExpression(args.get(3), ov);
             if (!aVal.c.isReal() || !bVal.c.isReal() || !Double.isFinite(aVal.c.re) || !Double.isFinite(bVal.c.re)) {
@@ -974,7 +1102,7 @@ public final class CalculatorEngine {
             if (args.size() == 2) {
                 throw new RuntimeException("Symbolische Ableitung erforderlich");
             }
-            String v = args.get(1).trim();
+            String v = calculusVariable(args.get(1));
             double x0 = evalExpression(args.get(2), ov).c.re;
             double h = (Math.abs(x0) > 1e10) ? (1e-3 * Math.abs(x0)) : ((Math.abs(x0) > 1e4) ? 1e-3 : 1e-4);
 
@@ -990,6 +1118,19 @@ public final class CalculatorEngine {
 
             double deriv = (-fp2 + 8.0 * fp1 - 8.0 * fm1 + fm2) / (12.0 * h);
             return Value.fromFloat(deriv);
+        }
+
+        if (args.isEmpty()) {
+            throw new RuntimeException("Funktion " + fn + " erfordert mindestens ein Argument");
+        }
+        if (args.size() != 1 && (fn.equals("sin") || fn.equals("cos") || fn.equals("tan")
+                || fn.equals("asin") || fn.equals("acos") || fn.equals("atan")
+                || fn.equals("sinh") || fn.equals("cosh") || fn.equals("tanh")
+                || fn.equals("asinh") || fn.equals("acosh") || fn.equals("atanh")
+                || fn.equals("exp") || fn.equals("ln") || fn.equals("lg") || fn.equals("log10")
+                || fn.equals("sqrt") || fn.equals("abs") || fn.equals("re") || fn.equals("im")
+                || fn.equals("arg") || fn.equals("floor") || fn.equals("ceil") || fn.equals("round"))) {
+            throw new RuntimeException("Funktion " + fn + " erfordert genau 1 Argument");
         }
 
         if (fn.equals("sqrt") && args.size() == 1) {
@@ -1117,25 +1258,19 @@ public final class CalculatorEngine {
             case "mod": {
                 if (args.size() != 2) throw new RuntimeException("mod erfordert 2 Argumente");
                 Value v1 = evalExpression(args.get(1), ov);
-                BigInteger a = (v0.rat != null && v0.rat.den.equals(BigInteger.ONE))
-                        ? v0.rat.num
-                        : BigInteger.valueOf(Math.round(v0.c.re));
-                BigInteger b = (v1.rat != null && v1.rat.den.equals(BigInteger.ONE))
-                        ? v1.rat.num
-                        : BigInteger.valueOf(Math.round(v1.c.re));
-                if (b.equals(BigInteger.ZERO)) throw new RuntimeException("Modulo durch Null");
-                BigInteger rem = a.remainder(b);
-                if (moduloAlwaysPositive && rem.signum() < 0) {
-                    rem = rem.add(b.abs());
-                }
-                return Value.fromInt(rem);
+                return evalModulo(v0, v1);
             }
             case "nthroot": {
-                if (args.size() == 1) {
-                    return v0.pow(Value.fromFloat(1.0 / 3.0));
+                Value index = args.size() == 1 ? Value.fromInt(3) : v0;
+                Value radicand = args.size() == 1 ? v0 : evalExpression(args.get(1), ov);
+                if (!index.c.isReal() || !Double.isFinite(index.c.re) || index.c.re == 0.0) {
+                    throw new RuntimeException("Wurzelindex muss eine reelle Zahl ungleich null sein");
                 }
-                Value v1 = evalExpression(args.get(1), ov);
-                return v1.pow(Value.fromFloat(1.0 / v0.c.re));
+                double n = index.c.re;
+                if (radicand.c.isReal() && radicand.c.re < 0.0 && Math.abs(n % 2.0) == 1.0) {
+                    return Value.fromFloat(-Math.pow(-radicand.c.re, 1.0 / n));
+                }
+                return radicand.pow(Value.fromFloat(1.0 / n));
             }
             case "log": {
                 if (args.size() == 2) {
@@ -1161,59 +1296,13 @@ public final class CalculatorEngine {
         ku = Math.min(ku, nu - ku);
         double res = 1.0;
         for (long i = 1; i <= ku; i++) {
-            res = res * (nu - ku + i) / (double) i;
+            res *= (nu - ku + i) / (double) i;
+            if (!Double.isFinite(res)) break;
         }
         return res;
     }
 
     // --- Matrix Support ---
-    private Result evaluateMatrix(String expr, boolean commit) {
-        String trimmed = expr.trim();
-        if (trimmed.startsWith("det(") && trimmed.endsWith(")")) {
-            String inner = trimmed.substring(4, trimmed.length() - 1).trim();
-            double[][] mat = evalMatrixExpr(inner);
-            double det = matrixDet(mat);
-            String dec = formatDecimal(det);
-            String ex = formatExact(det, dec);
-            if (commit) {
-                if (Math.abs(det - Math.round(det)) < 1e-11) {
-                    lastAns = Value.fromInt(Math.round(det));
-                } else {
-                    lastAns = Value.fromFloat(det);
-                }
-            }
-            return new Result(det, ex, dec);
-        }
-
-        if (trimmed.startsWith("inv(") && trimmed.endsWith(")")) {
-            String inner = trimmed.substring(4, trimmed.length() - 1).trim();
-            double[][] mat = evalMatrixExpr(inner);
-            double[][] inv = matrixInv(mat);
-            String formatted = formatMatrix(inv);
-            return new Result(0.0, formatted, formatted);
-        }
-
-        if ((trimmed.startsWith("trans(") || trimmed.startsWith("transpose(")) && trimmed.endsWith(")")) {
-            int prefixLen = trimmed.startsWith("transpose(") ? 10 : 6;
-            String inner = trimmed.substring(prefixLen, trimmed.length() - 1).trim();
-            double[][] mat = evalMatrixExpr(inner);
-            int rows = mat.length;
-            int cols = mat[0].length;
-            double[][] res = new double[cols][rows];
-            for (int r = 0; r < rows; r++) {
-                for (int c = 0; c < cols; c++) {
-                    res[c][r] = mat[r][c];
-                }
-            }
-            String formatted = formatMatrix(res);
-            return new Result(0.0, formatted, formatted);
-        }
-
-        double[][] mat = evalMatrixExpr(trimmed);
-        String formatted = formatMatrix(mat);
-        return new Result(0.0, formatted, formatted);
-    }
-
     private double[][] matrixInv(double[][] m) {
         int n = m.length;
         if (n == 0 || m[0].length != n) throw new RuntimeException("Inverse erfordert quadratische Matrix");
@@ -1257,85 +1346,87 @@ public final class CalculatorEngine {
         return inv;
     }
 
-    private double[][] evalMatrixExpr(String s) {
-        s = s.trim();
+    private double[][] evalMatrixExpr(String expression, Map<String, Value> overrides) {
+        String s = expression.trim();
         int depth = 0;
-        int splitPos = -1;
-        char op = '+';
+        int split = -1;
         for (int i = 0; i < s.length(); i++) {
             char ch = s.charAt(i);
             if (ch == '[' || ch == '(') depth++;
             else if (ch == ']' || ch == ')') depth--;
-            else if (depth == 0 && (ch == '+' || ch == '-')) {
-                splitPos = i;
-                op = ch;
-                break;
-            }
+            else if (depth == 0 && (ch == '+' || ch == '-' || ch == '−')) split = i;
         }
-        if (splitPos >= 0) {
-            double[][] left = evalMatrixExpr(s.substring(0, splitPos));
-            double[][] right = evalMatrixExpr(s.substring(splitPos + 1));
-            int rows = left.length;
-            int cols = left[0].length;
-            if (rows != right.length || cols != right[0].length) {
+        if (split >= 0) {
+            double[][] left = evalMatrixExpr(s.substring(0, split), overrides);
+            double[][] right = evalMatrixExpr(s.substring(split + 1), overrides);
+            if (left.length != right.length || left[0].length != right[0].length) {
                 throw new RuntimeException("Matrixdimensionen stimmen nicht überein");
             }
-            double[][] res = new double[rows][cols];
-            for (int r = 0; r < rows; r++) {
-                for (int c = 0; c < cols; c++) {
-                    res[r][c] = (op == '+') ? (left[r][c] + right[r][c]) : (left[r][c] - right[r][c]);
+            double sign = s.charAt(split) == '+' ? 1.0 : -1.0;
+            for (int r = 0; r < left.length; r++) {
+                for (int c = 0; c < left[r].length; c++) {
+                    left[r][c] += sign * right[r][c];
                 }
             }
-            return res;
+            return left;
         }
 
-        if (s.startsWith("[")) {
-            return parseMatrix(s);
+        if (s.startsWith("inv(") && s.endsWith(")")) {
+            return matrixInv(evalMatrixExpr(s.substring(4, s.length() - 1), overrides));
         }
-        throw new RuntimeException("Ungültiger Matrix-Ausdruck: " + s);
+        if ((s.startsWith("trans(") || s.startsWith("transpose(")) && s.endsWith(")")) {
+            double[][] matrix = evalMatrixExpr(s.substring(s.indexOf('(') + 1, s.length() - 1), overrides);
+            double[][] transpose = new double[matrix[0].length][matrix.length];
+            for (int r = 0; r < matrix.length; r++) {
+                for (int c = 0; c < matrix[r].length; c++) {
+                    transpose[c][r] = matrix[r][c];
+                }
+            }
+            return transpose;
+        }
+        return parseMatrix(s, overrides);
     }
 
-    private double[][] parseMatrix(String s) {
-        s = s.trim();
-        if (!s.startsWith("[") || !s.endsWith("]")) {
-            throw new RuntimeException("Matrix muss mit [[...]] umschlossen sein");
-        }
-        String inner = s.substring(1, s.length() - 1).trim();
-        List<double[]> rows = new ArrayList<>();
-        StringBuilder cur = new StringBuilder();
-        int depth = 0;
-        for (int i = 0; i < inner.length(); i++) {
-            char ch = inner.charAt(i);
-            if (ch == '[') {
-                depth++;
-                if (depth > 1) cur.append(ch);
-            } else if (ch == ']') {
-                depth--;
-                if (depth == 0) {
-                    String[] cells = cur.toString().split(",");
-                    double[] rowVals = new double[cells.length];
-                    for (int j = 0; j < cells.length; j++) {
-                        rowVals[j] = evalExpression(cells[j].trim(), null).c.re;
-                    }
-                    rows.add(rowVals);
-                    cur.setLength(0);
-                } else {
-                    cur.append(ch);
+    private double[][] parseMatrix(String expression, Map<String, Value> overrides) {
+        List<String> rows = splitMatrixItems(expression);
+        double[][] matrix = new double[rows.size()][];
+        for (int r = 0; r < rows.size(); r++) {
+            List<String> cells = splitMatrixItems(rows.get(r).trim());
+            if (r > 0 && cells.size() != matrix[0].length) {
+                throw new RuntimeException("Matrixzeilen ungleich lang");
+            }
+            matrix[r] = new double[cells.size()];
+            for (int c = 0; c < cells.size(); c++) {
+                Value value = evalExpression(cells.get(c).trim(), overrides);
+                if (!value.c.isReal() || !Double.isFinite(value.c.re)) {
+                    throw new RuntimeException("Matrixzellen müssen endliche reelle Zahlen sein");
                 }
-            } else if (ch == ',' && depth == 0) {
-                // Separator between rows
-            } else {
-                if (depth >= 1) cur.append(ch);
+                matrix[r][c] = value.c.re;
             }
         }
-        if (rows.isEmpty()) throw new RuntimeException("Leere Matrix");
-        int cols = rows.get(0).length;
-        double[][] res = new double[rows.size()][cols];
-        for (int i = 0; i < rows.size(); i++) {
-            if (rows.get(i).length != cols) throw new RuntimeException("Matrixzeilen ungleich lang");
-            res[i] = rows.get(i);
+        return matrix;
+    }
+
+    private static List<String> splitMatrixItems(String brackets) {
+        if (!brackets.startsWith("[") || !brackets.endsWith("]")) {
+            throw new RuntimeException("Matrix muss mit [[...]] umschlossen sein");
         }
-        return res;
+        List<String> parts = new ArrayList<>();
+        int start = 1;
+        int depth = 0;
+        for (int i = 1; i < brackets.length() - 1; i++) {
+            char ch = brackets.charAt(i);
+            if (ch == '[' || ch == '(') depth++;
+            else if (ch == ']' || ch == ')') depth--;
+            else if (ch == ',' && depth == 0) {
+                parts.add(brackets.substring(start, i));
+                start = i + 1;
+            }
+            if (depth < 0) throw new RuntimeException("Ungültige Matrixklammern");
+        }
+        if (depth != 0) throw new RuntimeException("Ungültige Matrixklammern");
+        parts.add(brackets.substring(start, brackets.length() - 1));
+        return parts;
     }
 
     private double matrixDet(double[][] m) {
@@ -1433,9 +1524,11 @@ public final class CalculatorEngine {
 
     static final class AstNum extends AstNode {
         final Value val;
-        AstNum(Value val) { this.val = val; }
-        AstNum(long n) { this.val = Value.fromInt(n); }
-        AstNum(BigInteger n) { this.val = Value.fromInt(n); }
+        final String literal;
+        AstNum(Value val, String literal) { this.val = val; this.literal = literal; }
+        AstNum(Value val) { this(val, null); }
+        AstNum(long n) { this(Value.fromInt(n)); }
+        AstNum(BigInteger n) { this(Value.fromInt(n)); }
         @Override Value constValue() { return val; }
         @Override boolean containsVar(String var) { return false; }
         @Override int prec() {
@@ -1940,17 +2033,25 @@ public final class CalculatorEngine {
     // --- AST Parser ---
     static final class AstParser {
         private final String s;
+        private final boolean notation;
         private int pos = -1, ch;
 
-        private AstParser(String s) {
-            this.s = s.replace("×", "*").replace("·", "*").replace("÷", "/")
-                    .replace("π", "pi").replace("−", "-")
-                    .replace("²", "^2").replace("³", "^3").replace("⁻¹", "^(-1)");
+        private AstParser(String expression, boolean notation) {
+            this.notation = notation;
+            this.s = normalizeEvaluation(expression);
         }
 
         static AstNode tryParse(String expr) {
+            return tryParse(expr, false);
+        }
+
+        static AstNode tryParseNotation(String expr) {
+            return tryParse(expr, true);
+        }
+
+        private static AstNode tryParse(String expr, boolean notation) {
             try {
-                AstParser p = new AstParser(expr);
+                AstParser p = new AstParser(expr, notation);
                 p.nextChar();
                 AstNode node = p.parseExpression();
                 while (p.ch == ' ') p.nextChar();
@@ -1987,7 +2088,11 @@ public final class CalculatorEngine {
             AstNode x = parseUnary();
             for (;;) {
                 while (ch == ' ') nextChar();
-                if (eat('*')) {
+                if (notation && isInfixModulo(s, pos)) {
+                    pos += 2;
+                    nextChar();
+                    x = new AstFunc(" mod ", java.util.Arrays.asList(x, parseUnary()));
+                } else if (eat('*')) {
                     x = new AstMul(x, parseUnary());
                 } else if (eat('/')) {
                     x = new AstDiv(x, parseUnary());
@@ -2020,9 +2125,10 @@ public final class CalculatorEngine {
             AstNode val = parsePrimary();
             for (;;) {
                 if (eat('!')) {
-                    val = new AstFunc("factorial", java.util.Collections.singletonList(val));
+                    val = new AstFunc(notation ? "!" : "factorial", java.util.Collections.singletonList(val));
                 } else if (eat('%')) {
-                    val = new AstMul(val, new AstNum(Value.fromRat(1, 100)));
+                    val = notation ? new AstFunc("%", java.util.Collections.singletonList(val))
+                            : new AstMul(val, new AstNum(Value.fromRat(1, 100)));
                 } else {
                     break;
                 }
@@ -2035,13 +2141,22 @@ public final class CalculatorEngine {
             int startPos = this.pos;
 
             if (eat('%')) {
-                return new AstNum(Value.fromRat(1, 100));
+                return new AstNum(Value.fromRat(1, 100), notation ? "%" : null);
             }
 
             if (eat('(')) {
                 AstNode x = parseExpression();
-                eat(')');
+                if (!eat(')') && notation) throw new RuntimeException("Expected ')'");
                 return x;
+            }
+
+            if (notation && eat('[')) {
+                List<AstNode> entries = new ArrayList<>();
+                do {
+                    entries.add(parseExpression());
+                } while (eat(','));
+                if (!eat(']')) throw new RuntimeException("Expected ']'");
+                return new AstFunc("[]", entries);
             }
 
             // Hex number 0x...
@@ -2052,7 +2167,7 @@ public final class CalculatorEngine {
                 while (Character.digit(ch, 16) != -1) nextChar();
                 String hexStr = s.substring(hexStart, pos);
                 BigInteger bi = new BigInteger(hexStr, 16);
-                return new AstNum(bi);
+                return new AstNum(Value.fromInt(bi), notation ? s.substring(startPos, pos) : null);
             }
 
             // Number
@@ -2077,15 +2192,15 @@ public final class CalculatorEngine {
                         }
                     }
                 }
-                String numStr = s.substring(startPos, pos);
+                String numStr = s.substring(startPos, pos).replaceAll("\\s+", "");
                 if (!hasDot && !hasExp) {
                     try {
                         BigInteger bi = new BigInteger(numStr);
-                        return new AstNum(bi);
+                        return new AstNum(Value.fromInt(bi), notation ? numStr : null);
                     } catch (Exception ignored) {}
                 }
                 double d = Double.parseDouble(numStr);
-                return new AstNum(Value.fromFloat(d));
+                return new AstNum(Value.fromFloat(d), notation ? numStr : null);
             }
 
             // Identifier or Function call
@@ -2121,7 +2236,9 @@ public final class CalculatorEngine {
                     AstNode resAst = f.args.get(0).integrate(var);
                     if (resAst != null) {
                         String res = resAst.simplify().toDisplayString();
-                        return new Result(0.0, res, res);
+                        double numVal = 0.0;
+                        try { numVal = Double.parseDouble(res); } catch (Exception ignored) {}
+                        return new Result(numVal, res, res);
                     }
                 }
             }
@@ -2131,7 +2248,9 @@ public final class CalculatorEngine {
                     AstNode diffAst = f.args.get(0).diff(var);
                     if (diffAst != null) {
                         String res = diffAst.simplify().toDisplayString();
-                        return new Result(0.0, res, res);
+                        double numVal = 0.0;
+                        try { numVal = Double.parseDouble(res); } catch (Exception ignored) {}
+                        return new Result(numVal, res, res);
                     }
                 }
             }
@@ -2204,9 +2323,7 @@ public final class CalculatorEngine {
             }
             return val.rat.num.toString() + " / " + val.rat.den.toString();
         }
-        if (!val.c.isReal()) {
-            if (Math.abs(val.c.re) < 1e-12 && Math.abs(val.c.im - 1.0) < 1e-12) return "i";
-        }
+        if (!val.c.isReal()) return decFallback;
         return formatExact(val.c.re, decFallback);
     }
 
@@ -2216,14 +2333,14 @@ public final class CalculatorEngine {
             return decFallback;
         }
 
-        // Surds check (√2, √3, √5, √6, √7, √8, etc.)
+        // Surds check (√2, √3, √5, √6, √7, √8, etc.) - strict tolerance so approximations like sqrt(2)+1e-10 are not falsely rounded
         for (int rad : new int[]{2, 3, 5, 6, 7, 8, 10}) {
             double root = Math.sqrt(rad);
             double ratio = v / root;
-            if (Math.abs(ratio - 0.5) < 1e-9) return "√" + rad + " / 2";
-            if (Math.abs(ratio - 1.0) < 1e-9) return "√" + rad;
-            if (Math.abs(ratio - 2.0) < 1e-9 && rad == 2) return "2√2";
-            if (rad == 8 && Math.abs(ratio - 1.0) < 1e-9) return "2√2";
+            if (Math.abs(ratio - 0.5) < 1e-14) return "√" + rad + " / 2";
+            if (Math.abs(ratio - 1.0) < 1e-14) return "√" + rad;
+            if (Math.abs(ratio - 2.0) < 1e-14 && rad == 2) return "2√2";
+            if (rad == 8 && Math.abs(ratio - 1.0) < 1e-14) return "2√2";
         }
 
         return decFallback;

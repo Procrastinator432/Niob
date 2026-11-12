@@ -26,10 +26,14 @@ Write-Host "2. Linking resources & AndroidManifest.xml (minSdk=31 Android 12, ta
 Write-Host "3. Compiling Java sources for Android 12+ ART..."
 $javaFiles = Get-ChildItem -Path "$androidDir\src", "$buildDir\gen" -Recurse -Filter "*.java" | Select-Object -ExpandProperty FullName
 & "$jdkBin\javac.exe" --release 8 -encoding UTF-8 -cp "$androidJar" -d "$buildDir\classes" $javaFiles
+if ($LASTEXITCODE -ne 0) { throw "Java compilation failed ($LASTEXITCODE)" }
 
 Write-Host "4. Converting classes to Dalvik Executable (classes.dex) with d8..."
-$classFiles = Get-ChildItem -Path "$buildDir\classes" -Recurse -Filter "*.class" | Select-Object -ExpandProperty FullName
-& "$buildTools\d8.bat" --min-api 31 --lib "$androidJar" --output "$buildDir\dex" $classFiles
+# Pass one archive to D8 to stay within the Windows command-line length limit.
+& "$jdkBin\jar.exe" -cf "$buildDir\classes.jar" -C "$buildDir\classes" .
+if ($LASTEXITCODE -ne 0) { throw "Packaging Java classes failed ($LASTEXITCODE)" }
+& "$buildTools\d8.bat" --min-api 31 --lib "$androidJar" --output "$buildDir\dex" "$buildDir\classes.jar"
+if ($LASTEXITCODE -ne 0) { throw "D8 failed ($LASTEXITCODE)" }
 
 Write-Host "5. Packaging classes.dex into APK..."
 Copy-Item "$buildDir\unsigned.apk" "$buildDir\unaligned.apk"

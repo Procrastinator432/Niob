@@ -2514,7 +2514,7 @@ impl<'a> ExprParser<'a> {
                 {
                     self.pos += 3;
                     let right = self.parse_unary()?;
-                    left = Value::from_f64(self.apply_modulo(left.c.re, right.c.re));
+                    left = self.apply_modulo_val(left, right)?;
                     continue;
                 }
             }
@@ -2967,6 +2967,13 @@ impl<'a> ExprParser<'a> {
                     .get(1)
                     .copied()
                     .ok_or_else(|| "nthroot(n, x) benötigt 2 Argumente".to_string())?;
+                if !v0.c.is_real() || !v0.c.re.is_finite() || v0.c.re == 0.0 {
+                    return Err("Wurzelindex muss eine reelle Zahl ungleich null sein".to_string());
+                }
+                let n = v0.c.re;
+                if v1.c.is_real() && v1.c.re < 0.0 && (n % 2.0).abs() == 1.0 {
+                    return Ok(Value::from_f64(-(-v1.c.re).powf(1.0 / n)));
+                }
                 Ok(v1.pow(Value::from_f64(1.0 / v0.c.re)))
             }
             "power" | "pow" => {
@@ -3002,7 +3009,7 @@ impl<'a> ExprParser<'a> {
                     .get(1)
                     .copied()
                     .ok_or_else(|| "mod(a, b) benötigt 2 Argumente".to_string())?;
-                Ok(Value::from_f64(self.apply_modulo(v0.c.re, v1.c.re)))
+                self.apply_modulo_val(v0, v1)
             }
             "gcd" => {
                 let v1 = vals
@@ -3049,13 +3056,30 @@ impl<'a> ExprParser<'a> {
         Err(format!("Unbekannte Variable oder Konstante '{}'", ident))
     }
 
-    fn apply_modulo(&self, a: f64, b: f64) -> f64 {
-        let r = a % b;
-        if self.engine.modulo_always_positive && r < 0.0 {
-            r + b.abs()
-        } else {
-            r
+    fn apply_modulo_val(&self, left: Value, right: Value) -> Result<Value, String> {
+        if !left.c.is_real() || !right.c.is_real() || !left.c.re.is_finite() || !right.c.re.is_finite() {
+            return Err("Modulo erfordert endliche reelle Zahlen".to_string());
         }
+        if let (Some(l_rat), Some(r_rat)) = (left.rat, right.rat) {
+            if l_rat.den == 1 && r_rat.den == 1 {
+                if r_rat.num == 0 {
+                    return Err("Modulo durch Null".to_string());
+                }
+                let mut rem = l_rat.num % r_rat.num;
+                if self.engine.modulo_always_positive && rem < 0 {
+                    rem += r_rat.num.abs();
+                }
+                return Ok(Value::from_int(rem));
+            }
+        }
+        if right.c.re == 0.0 {
+            return Err("Modulo durch Null".to_string());
+        }
+        let mut r = left.c.re % right.c.re;
+        if self.engine.modulo_always_positive && r < 0.0 {
+            r += right.c.re.abs();
+        }
+        Ok(Value::from_f64(r))
     }
 }
 

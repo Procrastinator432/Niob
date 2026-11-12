@@ -137,6 +137,34 @@ public final class CalculatorRegressionTest {
             close(engine.evaluateForX("x^2", 3), 9, 1e-12, 0);
             number(engine.evaluate("x"), 2, 0, 0);
         });
+        add("plot_logarithm_preserves_base_and_argument", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            close(engine.evaluateForX("log(2,8)", 1), 3, 1e-12, 0);
+            close(engine.evaluateForX("log(2,x)", 16), 4, 1e-12, 0);
+        });
+        add("plot_evaluation_follows_angle_mode", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            close(engine.evaluateForX("sin(x)", 30), Math.sin(30), 1e-12, 0);
+            engine.setRadiansMode(false);
+            close(engine.evaluateForX("sin(x)", 30), 0.5, 1e-12, 0);
+        });
+        add("plot_notation_preserves_power_and_fraction_precedence", () -> {
+            CalculatorEngine.AstNode expression = CalculatorEngine.AstParser.tryParseNotation("x^2 / 4 - 2");
+            require(expression instanceof CalculatorEngine.AstSub, "subtraction must be outside the fraction");
+            CalculatorEngine.AstNode left = ((CalculatorEngine.AstSub) expression).left;
+            require(left instanceof CalculatorEngine.AstDiv, "division must group the power and its denominator");
+            CalculatorEngine.AstDiv fraction = (CalculatorEngine.AstDiv) left;
+            require(fraction.left instanceof CalculatorEngine.AstPow, "the numerator must contain the power");
+            require(((CalculatorEngine.AstNum) fraction.right).literal.equals("4"), "the denominator must remain 4");
+        });
+        add("plot_notation_keeps_literals_and_waits_for_complete_input", () -> {
+            CalculatorEngine.AstNode expression = CalculatorEngine.AstParser.tryParseNotation("x^(1e - 3)");
+            require(expression instanceof CalculatorEngine.AstPow, "scientific exponent must remain in the power");
+            CalculatorEngine.AstNum exponent = (CalculatorEngine.AstNum) ((CalculatorEngine.AstPow) expression).exp;
+            require(exponent.literal.equals("1e-3"), "scientific literal must remain exact");
+            require(CalculatorEngine.AstParser.tryParseNotation("(x^2") == null,
+                    "an unfinished parenthesis must remain editable");
+        });
         add("degrees_forward_and_inverse", () -> {
             CalculatorEngine engine = new CalculatorEngine();
             engine.setRadiansMode(false);
@@ -216,6 +244,37 @@ public final class CalculatorRegressionTest {
             engine.evaluateAndCommit("det([[4,2],[1,3]])");
             number(engine.evaluate("ans"), 10, 0, 0);
         });
+        add("matrix_cell_accepts_multi_argument_function", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            number(engine.evaluate("1+det([[log(2,8),1],[1,2]])"), 6, 0, 0);
+        });
+        add("matrix_subtraction_is_left_associative", () -> {
+            CalculatorEngine.Result result = new CalculatorEngine().evaluate("[[7]]−[[3]]−[[1]]");
+            require(result.decimalText.equals("[[3]]"), result.decimalText);
+        });
+        add("matrix_inverse_composes_with_addition", () -> {
+            CalculatorEngine.Result result = new CalculatorEngine().evaluate("inv([[2]])+[[0.5]]");
+            require(result.decimalText.equals("[[1]]"), result.decimalText);
+        });
+        add("indexed_root_uses_real_odd_root", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            number(engine.evaluate("nthroot(3,-8)"), -2, 0, 0);
+            rejects(() -> engine.evaluate("nthroot(0,8)"));
+        });
+        add("discrete_bounds_at_long_limits", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            number(engine.evaluate("sum(1,x,9223372036854775807,9223372036854775807)"), 1, 0, 0);
+            rejects(() -> engine.evaluate("prod(1,x,-9223372036854775808,9223372036854775807)"));
+        });
+        add("modulo_keeps_decimal_operands", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            number(engine.evaluate("mod(5.5,2)"), 1.5, 0, 0);
+        });
+        add("complex_exact_display_keeps_imaginary_part", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            CalculatorEngine.Result result = engine.evaluate("1/2+i");
+            number(engine.evaluate("(" + result.exactText + ")-i"), 0.5, 0, 0);
+        });
         add("invalid_assignment_is_atomic", () -> {
             CalculatorEngine engine = new CalculatorEngine();
             engine.evaluateAndCommit("m:=7");
@@ -252,6 +311,47 @@ public final class CalculatorRegressionTest {
             number(engine.evaluate("-7 mod 3"), -1, 0, 0);
             engine.setModuloAlwaysPositive(true);
             number(engine.evaluate("-7 mod 3"), 2, 0, 0);
+        });
+        add("modulo_large_integer_both_notations", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            number(engine.evaluate("9007199254740993 mod 2"), 1, 0, 0);
+            number(engine.evaluate("mod(9007199254740993,2)"), 1, 0, 0);
+            rejects(() -> engine.evaluate("9007199254740993 mod 0"));
+            rejects(() -> engine.evaluate("mod(9007199254740993,0)"));
+        });
+        add("exact_mode_does_not_falsely_round_approximation", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            CalculatorEngine.Result result = engine.evaluate("sqrt(2)+1e-10");
+            require(!result.exactText.contains("√2"), "Approximation must not be formatted as √2: " + result.exactText);
+            require(result.exactText.contains("1.414213562") || result.exactText.contains("1,414213562"), "Must show decimal value: " + result.exactText);
+            CalculatorEngine.Result pureRoot = engine.evaluate("sqrt(2)");
+            require(pureRoot.exactText.equals("√2"), "Pure sqrt(2) should format as √2: " + pureRoot.exactText);
+            CalculatorEngine.Result frac = engine.evaluate("1/3");
+            require(frac.exactText.equals("1 / 3"), "1/3 should format as 1 / 3: " + frac.exactText);
+        });
+        add("symbolic_derivative_handles_scientific_notation_with_spaces", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            number(engine.evaluate("d(1e-3*x,x)"), 0.001, 1e-12, 1e-12);
+            number(engine.evaluate("d(1e - 3*x,x)"), 0.001, 1e-12, 1e-12);
+            number(engine.evaluate("d(1e 3*x,x)"), 1000, 1e-12, 1e-12);
+        });
+        add("plotter_syntax_validation_allows_domain_gaps", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            engine.validatePlotSyntax("sqrt(x-2)");
+            engine.validatePlotSyntax("1/(x-1)");
+            rejects(() -> engine.validatePlotSyntax("sqrt(x-"));
+            rejects(() -> engine.validatePlotSyntax("unknown_fn(x)"));
+            require(Double.isNaN(engine.evaluateForX("sqrt(x-2)", 1.0)), "Should be NaN at x=1");
+            require(Math.abs(engine.evaluateForX("sqrt(x-2)", 3.0) - 1.0) < 1e-9, "Should be 1.0 at x=3");
+            engine.evaluate("1");
+            engine.evaluateForX("defint(t,t,0,x)", 2.0);
+            require(engine.getLastIntegrationReport() == null, "Plot sampling must not overwrite lastIntegrationReport");
+        });
+        add("unary_function_rejects_empty_and_multiple_arguments", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            rejects(() -> engine.evaluate("sin()"));
+            rejects(() -> engine.evaluate("sin(0,1/0)"));
+            rejects(() -> engine.evaluate("cos(0,1)"));
         });
     }
 

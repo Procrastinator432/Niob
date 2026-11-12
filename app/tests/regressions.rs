@@ -343,6 +343,43 @@ fn modulo_setting_changes_negative_remainder() {
 }
 
 #[test]
+fn modulo_large_integer_both_notations() {
+    let mut engine = new_engine();
+    check_number(
+        engine.evaluate_preview("9007199254740993 mod 2", false).unwrap(),
+        1.0,
+        0.0,
+        0.0,
+    );
+    check_number(
+        engine.evaluate_preview("mod(9007199254740993,2)", false).unwrap(),
+        1.0,
+        0.0,
+        0.0,
+    );
+    assert!(engine.evaluate_preview("9007199254740993 mod 0", false).is_err());
+    assert!(engine.evaluate_preview("mod(9007199254740993,0)", false).is_err());
+}
+
+#[test]
+fn nthroot_real_odd_root_and_zero_rejection() {
+    let mut engine = new_engine();
+    check_number(
+        engine.evaluate_preview("nthroot(3,-8)", false).unwrap(),
+        -2.0,
+        0.0,
+        0.0,
+    );
+    check_number(
+        engine.evaluate_preview("nthroot(3,8)", false).unwrap(),
+        2.0,
+        0.0,
+        0.0,
+    );
+    assert!(engine.evaluate_preview("nthroot(0,8)", false).is_err());
+}
+
+#[test]
 fn assigned_variable_values_are_used() {
     // Renaming a bound variable must not change whether it is evaluated numerically.
     for (index, name) in constants::USER_VARIABLES.iter().enumerate() {
