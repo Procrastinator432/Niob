@@ -168,22 +168,22 @@ pub fn run_all_verification_checks() -> Vec<VerificationCheck> {
 
     // 7. Original App Bug #1: Swapped Proton/Neutron Masses & Wrong Unit Exponent (10^-24 g vs 10^-27 kg)
     {
-        // In Lc/a/a/e/h;-><clinit>()V:
-        // mass_proton is 1.6749e-24 and mass_neutron is 1.6726e-24 (swapped! Neutron is heavier than proton in reality: m_n=1.6749e-27 kg, m_p=1.6726e-27 kg).
-        // Furthermore, VariableMoreActivity.<init> line 554 shows mass_electron as 9.1094e-28 while h.<clinit> line 372 uses 9.1094e-31!
-        let orig_mp_gt_mn = MASS_PROTON > MASS_NEUTRON;
+        // Fixed SI masses: m_p = 1.6726e-27 kg < m_n = 1.6749e-27 kg (previously swapped and in grams in original APK).
+        let mp_lt_mn_kg = MASS_PROTON < MASS_NEUTRON
+            && (MASS_PROTON - 1.6726e-27).abs() < 1e-32
+            && (MASS_NEUTRON - 1.6749e-27).abs() < 1e-32;
         results.push(VerificationCheck {
             id: "ORIG-BUG-01",
             category: "Original-App Fehler #1 (Physikalische Konstanten)",
             expression: "m_p (mass_proton) vs. m_n (mass_neutron) & m_e",
             expected_behavior: "Physik (CODATA): m_p = 1.6726e-27 kg < m_n = 1.6749e-27 kg",
             actual_behavior: format!(
-                "Original-APK (h.<clinit>): m_p = {:.4e}, m_n = {:.4e} (vertauscht & in g statt kg!)",
+                "Korrigiert: m_p = {:.4e} kg < m_n = {:.4e} kg (Original-APK war vertauscht & in g)",
                 MASS_PROTON, MASS_NEUTRON
             ),
-            passed: orig_mp_gt_mn,
+            passed: mp_lt_mn_kg,
             kind: FindingKind::OriginalAppBugDiagnosed,
-            note: "FEHLER IN DER ORIGINAL-APP: In Lc/a/a/e/h;-><clinit>()V wurden die Zahlenwerte von Protonenmasse (1.6726) und Neutronenmasse (1.6749) vertauscht und mit 10^-24 (Gramm) statt 10^-27 (Kilogramm) gespeichert. Zudem zeigt VariableMoreActivity für m_e 10^-28 statt 10^-31 an.",
+            note: "FEHLER BEHOBEN: In Lc/a/a/e/h;-><clinit>()V waren Protonenmasse (1.6726e-27 kg) und Neutronenmasse (1.6749e-27 kg) vertauscht und in Gramm (10^-24) gespeichert. Jetzt auf korrekte SI-Werte in kg korrigiert.",
         });
     }
 

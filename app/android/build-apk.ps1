@@ -1,9 +1,40 @@
 $ErrorActionPreference = "Stop"
 
-$sdk = "C:\Users\brand\AppData\Local\Android\Sdk"
-$buildTools = "$sdk\build-tools\37.0.0"
+function Resolve-AndroidSdk {
+    foreach ($candidate in @($env:ANDROID_HOME, $env:ANDROID_SDK_ROOT, "$env:LOCALAPPDATA\Android\Sdk")) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
+    }
+    throw "Android SDK not found. Set ANDROID_HOME or ANDROID_SDK_ROOT."
+}
+
+function Resolve-JdkBin {
+    if ($env:JAVA_HOME -and (Test-Path -LiteralPath (Join-Path $env:JAVA_HOME 'bin\javac.exe'))) {
+        return (Join-Path $env:JAVA_HOME 'bin')
+    }
+    $javacCmd = Get-Command 'javac.exe' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($javacCmd) { return (Split-Path -Parent $javacCmd.Source) }
+    $adoptium = Get-ChildItem -Path 'C:\Program Files\Eclipse Adoptium\jdk-*\bin\javac.exe' -ErrorAction SilentlyContinue |
+        Sort-Object FullName -Descending | Select-Object -First 1
+    if ($adoptium) { return $adoptium.DirectoryName }
+    throw "JDK not found. Set JAVA_HOME or add javac.exe to PATH."
+}
+
+$sdk = Resolve-AndroidSdk
+$buildToolsDir = Get-ChildItem -Path "$sdk\build-tools" -Directory -ErrorAction SilentlyContinue |
+    Where-Object { Test-Path (Join-Path $_.FullName 'aapt2.exe') } |
+    Sort-Object { try { [version]($_.Name -replace '-.*$', '') } catch { [version]'0.0' } } -Descending |
+    Select-Object -First 1
+if (-not $buildToolsDir) { throw "No Android build-tools found under $sdk\build-tools" }
+$buildTools = $buildToolsDir.FullName
 $androidJar = "$sdk\platforms\android-34\android.jar"
-$jdkBin = "C:\Program Files\Eclipse Adoptium\jdk-25.0.4.7-hotspot\bin"
+if (-not (Test-Path -LiteralPath $androidJar)) {
+    $platformDir = Get-ChildItem -Path "$sdk\platforms\android-*" -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path (Join-Path $_.FullName 'android.jar') } |
+        Sort-Object Name -Descending | Select-Object -First 1
+    if (-not $platformDir) { throw "No Android platform android.jar found under $sdk\platforms" }
+    $androidJar = Join-Path $platformDir.FullName 'android.jar'
+}
+$jdkBin = Resolve-JdkBin
 
 $androidDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $appDir = Split-Path -Parent $androidDir

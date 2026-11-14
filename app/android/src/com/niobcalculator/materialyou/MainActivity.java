@@ -1357,7 +1357,7 @@ private static class FilledBackspaceDrawable extends Drawable {
         }
 
         try {
-            CalculatorEngine.Result result = engine.evaluate(cur);
+            CalculatorEngine.Result result = engine.evaluateWithTimeout(cur, 350);
             View matrix = formula.matrixResult(result.decimalText, 13f, null);
             if (matrix != null) {
                 previewDisplayView.setVisibility(View.GONE);
@@ -1379,6 +1379,9 @@ private static class FilledBackspaceDrawable extends Drawable {
             if (msg.contains("Division durch Null") || msg.contains("Division by zero")) {
                 previewDisplayView.setText("⚠ Division durch Null");
                 previewDisplayView.setTextColor(0xFFFFB4AB);
+            } else if (msg.contains("Zeitlimit") || msg.contains("Time limit")) {
+                previewDisplayView.setText("…");
+                previewDisplayView.setTextColor(colOnSurfaceVariant);
             } else {
                 boolean isIncomplete = cur.endsWith("+") || cur.endsWith("-") || cur.endsWith("*")
                         || cur.endsWith("/") || cur.endsWith("÷") || cur.endsWith("×") || cur.endsWith("−")
@@ -1879,7 +1882,7 @@ private static class FilledBackspaceDrawable extends Drawable {
                 try {
                     CalculatorEngine.Value previousAns = engine.getLastAns();
                     Map<String, CalculatorEngine.Value> previousVariables = engine.getUserVariables();
-                    CalculatorEngine.Result result = engine.evaluateAndCommit(expression);
+                    CalculatorEngine.Result result = engine.evaluateAndCommitWithTimeout(expression, 4000);
                     String rep = getIntegrationReportText(expression);
                     HistoryEntry entry = new HistoryEntry(expression, result.exactText, result.decimalText,
                             result.reusableText, rep, showExactFirst);
@@ -1887,7 +1890,17 @@ private static class FilledBackspaceDrawable extends Drawable {
                     persistResult(entry, previousAns, previousVariables);
                 } catch (Exception e) {
                     formula.performHapticFeedback(HapticFeedbackConstants.REJECT);
-                    updatePreviewOnly();
+                    String msg = e.getMessage() != null ? e.getMessage() : "";
+                    if (msg.contains("Zeitlimit") || msg.contains("Time limit")) {
+                        if (previewDisplayView != null) {
+                            previewDisplayView.setVisibility(View.VISIBLE);
+                            previewMatrix.setVisibility(View.GONE);
+                            previewDisplayView.setText("⚠ Zeitlimit überschritten");
+                            previewDisplayView.setTextColor(0xFFFFB4AB);
+                        }
+                    } else {
+                        updatePreviewOnly();
+                    }
                 }
             }
         } else if (key.equals("DEL")) {
@@ -2342,8 +2355,8 @@ private static class FilledBackspaceDrawable extends Drawable {
                         new ConstantDef("F", "F", "Faraday-Konstante", "96485,0"),
                         new ConstantDef("R", "R", "Universelle Gaskonstante", "8,314 5"),
                         new ConstantDef("m_e", "m_e", "Elektronenmasse", "9,109 4×10⁻³¹"),
-                        new ConstantDef("m_p", "m_p", "Protonenmasse", "1,674 9×10⁻²⁷"),
-                        new ConstantDef("m_n", "m_n", "Neutronenmasse", "1,672 6×10⁻²⁷")
+                        new ConstantDef("m_p", "m_p", "Protonenmasse", "1,672 6×10⁻²⁷"),
+                        new ConstantDef("m_n", "m_n", "Neutronenmasse", "1,674 9×10⁻²⁷")
                 }),
                 new CategoryDef("Planck- & Naturkonstanten", new ConstantDef[]{
                         new ConstantDef("m_P", "m_P", "Planck-Masse", "2,176 5×10⁻⁸"),
@@ -2850,14 +2863,17 @@ private static class FilledBackspaceDrawable extends Drawable {
         int dot = clean.indexOf('.');
         if (dot >= 0 && clean.matches("[+-]?\\d+\\.\\d+")) {
             String fracPart = clean.substring(dot + 1);
-            if (fracPart.length() > 6) {
+            if (fracPart.length() > 10) {
                 try {
                     double d = Double.parseDouble(clean);
                     if (d != 0 && Math.abs(d) < 1e-4) {
-                        return formatDisplayNumber(String.format(java.util.Locale.US, "%.6g", d));
+                        return formatDisplayNumber(String.format(java.util.Locale.US, "%.10g", d));
                     }
-                    clean = String.format(java.util.Locale.US, "%.6f", d);
+                    clean = String.format(java.util.Locale.US, "%.10f", d)
+                            .replaceAll("(\\.\\d*?[1-9])0+$", "$1")
+                            .replaceAll("\\.0+$", "");
                     dot = clean.indexOf('.');
+                    if (dot < 0) return clean;
                 } catch (Exception ignored) {
                 }
             }

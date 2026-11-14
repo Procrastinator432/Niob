@@ -216,7 +216,18 @@ cases!(
     symbolic_fractional_power_samples,
     symbolic_negative_power_samples,
     symbolic_chain_serialization_samples,
-    invalid_integrand_propagates_error
+    invalid_integrand_propagates_error,
+    sum_harmonic_1000,
+    nested_integral,
+    large_int_power_cancel,
+    matrix_multiply,
+    symbolic_sin_2x_integral,
+    symbolic_sqrt_integral,
+    binomial_fractional,
+    sum_non_integer_bound,
+    deriv_domain_boundary,
+    multivar_poly_expand,
+    proton_less_than_neutron
 );
 
 #[test]
@@ -599,4 +610,57 @@ fn symbolic_derivative_with_spaced_scientific_notation() {
     assert_eq!(output.exact_text, "0.001");
     let numeric = engine.evaluate_preview(&output.exact_text, false).unwrap();
     check_number(numeric, 0.001, 1e-12, 1e-12);
+}
+
+#[test]
+fn complex_principal_branch_and_asin() {
+    let mut engine = new_engine();
+    let ln_neg1 = engine.evaluate_preview("ln(-1)", false).unwrap().numeric_value.unwrap();
+    close(ln_neg1.re, 0.0, 1e-12, 0.0);
+    close(ln_neg1.im, std::f64::consts::PI, 1e-12, 1e-12);
+
+    let sqrt_neg1 = engine.evaluate_preview("(-1)^(1/2)", false).unwrap().numeric_value.unwrap();
+    close(sqrt_neg1.re, 0.0, 1e-12, 0.0);
+    close(sqrt_neg1.im, 1.0, 1e-12, 0.0);
+
+    let cube_neg8 = engine.evaluate_preview("(-8)^(1/3)", false).unwrap().numeric_value.unwrap();
+    close(cube_neg8.re, 1.0, 1e-12, 0.0);
+    close(cube_neg8.im, 3.0_f64.sqrt(), 1e-12, 1e-12);
+
+    let asin_i = engine.evaluate_preview("asin(i)", false).unwrap().numeric_value.unwrap();
+    close(asin_i.re, 0.0, 1e-12, 0.0);
+    close(asin_i.im, 1.0_f64.asinh(), 1e-10, 1e-10);
+}
+
+#[test]
+fn rounding_and_sign_functions() {
+    let mut engine = new_engine();
+    check_number(engine.evaluate_preview("floor(-2.3)", false).unwrap(), -3.0, 0.0, 0.0);
+    check_number(engine.evaluate_preview("ceil(-2.3)", false).unwrap(), -2.0, 0.0, 0.0);
+    check_number(engine.evaluate_preview("round(2.5)", false).unwrap(), 3.0, 0.0, 0.0);
+    check_number(engine.evaluate_preview("round(-2.5)", false).unwrap(), -3.0, 0.0, 0.0);
+    check_number(engine.evaluate_preview("sign(-5)", false).unwrap(), -1.0, 0.0, 0.0);
+    check_number(engine.evaluate_preview("sgn(0)", false).unwrap(), 0.0, 0.0, 0.0);
+    check_number(engine.evaluate_preview("sign(4)", false).unwrap(), 1.0, 0.0, 0.0);
+}
+
+#[test]
+fn float_display_trims_binary_noise() {
+    let mut engine = new_engine();
+    let out = engine.evaluate_preview("1234567.891", false).unwrap();
+    assert_eq!(out.decimal_text, "1234567.891");
+}
+
+#[test]
+fn degrees_symbolic_derivative_scales_by_pi_over_180() {
+    let mut engine = new_engine();
+    engine.angle_mode = AngleMode::Degrees;
+    let out = engine.evaluate_preview("d(sin(x),x)", false).unwrap();
+    assert!(
+        normalized(&out.exact_text).contains("pi/180"),
+        "expected DEG scaling factor pi/180 in {}",
+        out.exact_text
+    );
+    let val = engine.eval_for_x(&out.exact_text, 0.0).unwrap();
+    close(val, std::f64::consts::PI / 180.0, 1e-12, 1e-12);
 }

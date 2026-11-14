@@ -2,10 +2,14 @@
 //! Implements the mathematical capabilities of Niob Scientific Calculator
 //! (`Lc/a/a/e/d;`, `Lc/a/a/e/e;`, `Lc/a/a/e/f;`, `Lc/a/a/e/g;`, `Lc/a/a/e/h;`).
 
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::ops::Deref;
+
+thread_local! {
+    static INTEGRATION_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
 use crate::constants::{
     SCIENTIFIC_CONSTANTS, USER_VARIABLES,
 };
@@ -88,7 +92,13 @@ impl NumberFormatMode {
             return format!("{} × 10{}", m_formatted, to_superscript(exp));
         }
 
-        let raw = trim_float(val, 10);
+        let int_digits = if abs_v < 1.0 {
+            1
+        } else {
+            (abs_v.log10().floor() as usize) + 1
+        };
+        let max_decimals = 15usize.saturating_sub(int_digits).min(10);
+        let raw = trim_float(val, max_decimals);
         self.apply_separators(&raw)
     }
 
@@ -152,6 +162,8 @@ fn trim_float(val: f64, decimals: usize) -> String {
         } else {
             s.to_string()
         }
+    } else if s == "-0" {
+        "0".to_string()
     } else {
         s
     }
@@ -325,8 +337,15 @@ pub struct Complex {
 }
 
 impl Complex {
+    pub fn new(re: f64, im: f64) -> Self {
+        Self {
+            re: if re == 0.0 { 0.0 } else { re },
+            im: if im == 0.0 { 0.0 } else { im },
+        }
+    }
+
     pub fn real(re: f64) -> Self {
-        Self { re, im: 0.0 }
+        Self::new(re, 0.0)
     }
 
     pub fn i() -> Self {
@@ -342,59 +361,51 @@ impl Complex {
     }
 
     pub fn arg(self) -> f64 {
-        self.im.atan2(self.re)
+        let im = if self.im.abs() == 0.0 { 0.0 } else { self.im };
+        let re = if self.re == 0.0 { 0.0 } else { self.re };
+        im.atan2(re)
     }
 
     pub fn add(self, o: Self) -> Self {
-        Self {
-            re: self.re + o.re,
-            im: self.im + o.im,
-        }
+        Self::new(self.re + o.re, self.im + o.im)
     }
 
     pub fn sub(self, o: Self) -> Self {
-        Self {
-            re: self.re - o.re,
-            im: self.im - o.im,
-        }
+        Self::new(self.re - o.re, self.im - o.im)
     }
 
     pub fn mul(self, o: Self) -> Self {
-        Self {
-            re: self.re * o.re - self.im * o.im,
-            im: self.re * o.im + self.im * o.re,
-        }
+        Self::new(self.re * o.re - self.im * o.im, self.re * o.im + self.im * o.re)
     }
 
     pub fn div(self, o: Self) -> Self {
         let denom = o.re * o.re + o.im * o.im;
-        Self {
-            re: (self.re * o.re + self.im * o.im) / denom,
-            im: (self.im * o.re - self.re * o.im) / denom,
-        }
+        Self::new(
+            (self.re * o.re + self.im * o.im) / denom,
+            (self.im * o.re - self.re * o.im) / denom,
+        )
     }
 
     pub fn exp(self) -> Self {
         let r = self.re.exp();
-        Self {
-            re: r * self.im.cos(),
-            im: r * self.im.sin(),
-        }
+        Self::new(r * self.im.cos(), r * self.im.sin())
     }
 
     pub fn ln(self) -> Self {
-        Self {
-            re: self.abs().ln(),
-            im: self.arg(),
-        }
+        Self::new(self.abs().ln(), self.arg())
     }
 
     pub fn pow(self, exp: Self) -> Self {
-        if self.is_real() && exp.is_real() && self.re >= 0.0 {
-            return Self::real(self.re.powf(exp.re));
+        if self.is_real() && exp.is_real() {
+            if self.re >= 0.0 {
+                return Self::real(self.re.powf(exp.re));
+            }
+            if (exp.re - exp.re.round()).abs() == 0.0 {
+                return Self::real(self.re.powf(exp.re));
+            }
         }
         if self.abs() == 0.0 {
-            return Self::real(0.0);
+            return if exp.re < 0.0 { Self::real(f64::NAN) } else { Self::real(0.0) };
         }
         self.ln().mul(exp).exp()
     }
@@ -570,7 +581,10 @@ impl Value {
 
     pub fn pow(self, exp: Self) -> Self {
         if let (Some(r), Some(er)) = (self.rat, exp.rat) {
-            if er.den == 1 && er.num >= -20 && er.num <= 20 {
+            if er.den == 1 && er.num >= -126 && er.num <= 126 {
+                if er.num < 0 && r.num == 0 {
+                    return Self::from_f64(f64::NAN);
+                }
                 if let Some(res_r) = r.pow(er.num as i32) {
                     return Self {
                         c: Complex::real(res_r.to_f64()),
@@ -792,18 +806,19 @@ impl MathEngine {
             }
         }
 
-        // Check Matrix expressions: det([[...]]), inv([[...]]), trans([[...]]), transpose([[...]]), or [[...]]
+        // Parse expression into AST for structural symbolic evaluation and general matrix expressions
+        let parsed_ast = AstParser::parse(trimmed).ok();
+
+        // Check Matrix expressions: det([[...]]), inv([[...]]), trans([[...]]), transpose([[...]]), [[...]], or matrix products/sums
         if trimmed.starts_with("det(")
             || trimmed.starts_with("inv(")
             || trimmed.starts_with("trans(")
             || trimmed.starts_with("transpose(")
             || trimmed.starts_with("[[")
+            || parsed_ast.as_ref().is_some_and(contains_matrix_expression)
         {
             return self.evaluate_matrix_expression(trimmed);
         }
-
-        // Parse expression into AST for structural symbolic evaluation
-        let parsed_ast = AstParser::parse(trimmed).ok();
 
         // Check symbolic calculus first (indefinite integral, symbolic derivative) on AST
         if let Some(ref ast) = parsed_ast {
@@ -879,7 +894,7 @@ impl MathEngine {
 
     fn try_evaluate_symbolic_calculus(&self, ast: &AstNode) -> Option<EvalOutput> {
         match ast {
-            AstNode::Func(name, args) if name == "integral" && args.len() == 2 => {
+            AstNode::Func(name, args) if (name == "integral" || name == "int") && args.len() == 2 => {
                 if let AstNode::Var(var) = &args[1] {
                     if let Some(res_ast) = args[0].integrate(var) {
                         let res = res_ast.simplify().to_display_string();
@@ -897,7 +912,7 @@ impl MathEngine {
             }
             AstNode::Func(name, args) if (name == "d" || name == "deriv" || name == "diff") && args.len() == 2 => {
                 if let AstNode::Var(var) = &args[1] {
-                    if let Some(diff_ast) = args[0].diff(var) {
+                    if let Some(diff_ast) = args[0].diff_with_mode(var, self.angle_mode) {
                         let res_ast = diff_ast.simplify();
                         let res = res_ast.to_display_string();
                         return Some(EvalOutput {
@@ -1185,6 +1200,22 @@ impl MathEngine {
             });
         }
 
+        if let Ok(ast) = AstParser::parse(trimmed) {
+            if let MatrixOrScalar::Scalar(val) = self.eval_matrix_or_scalar_ast(&ast)? {
+                let dec = self.format_value_decimal(val);
+                let exact = Self::format_exact_real(val).unwrap_or_else(|| dec.clone());
+                return Ok(EvalOutput {
+                    has_distinct_exact: exact != dec,
+                    exact_text: exact,
+                    decimal_text: dec,
+                    numeric_value: Some(val.c),
+                    val: Some(val),
+                    integration_report: None,
+                    matrix_expression: None,
+                });
+            }
+        }
+
         let mat = self.eval_matrix_expr(trimmed)?;
         let decimal = Self::format_matrix(&mat, |value| self.format_value_decimal(value));
         let exact = Self::format_matrix(&mat, |value| {
@@ -1206,8 +1237,135 @@ impl MathEngine {
         Some(if rat.den == 1 { rat.num.to_string() } else { format!("{} / {}", rat.num, rat.den) })
     }
 
+    fn eval_ast_scalar(&self, node: &AstNode) -> Result<Value, String> {
+        match node {
+            AstNode::Num(v) => Ok(*v),
+            AstNode::Neg(a) => {
+                let v = self.eval_ast_scalar(a)?;
+                Ok(Value {
+                    c: Complex::new(-v.c.re, -v.c.im),
+                    rat: v.rat.map(|r| ExactRat { num: -r.num, den: r.den }),
+                })
+            }
+            AstNode::Add(a, b) => Ok(self.eval_ast_scalar(a)?.add(self.eval_ast_scalar(b)?)),
+            AstNode::Sub(a, b) => Ok(self.eval_ast_scalar(a)?.sub(self.eval_ast_scalar(b)?)),
+            AstNode::Mul(a, b) => Ok(self.eval_ast_scalar(a)?.mul(self.eval_ast_scalar(b)?)),
+            AstNode::Div(a, b) => self.eval_ast_scalar(a)?.div(self.eval_ast_scalar(b)?),
+            AstNode::Pow(a, b) => Ok(self.eval_ast_scalar(a)?.pow(self.eval_ast_scalar(b)?)),
+            AstNode::Func(name, args) if name == "det" && args.len() == 1 => {
+                let mat = self.eval_matrix_ast(&args[0])?;
+                matrix_det(&mat)
+            }
+            _ => {
+                let expr = node.to_display_string();
+                let mut p = ExprParser::new(&expr, self, None);
+                let v = p.parse_expr()?;
+                p.skip_ws();
+                if p.pos < p.chars.len() {
+                    return Err(format!("Unerwartetes Zeichen '{}'", p.chars[p.pos]));
+                }
+                Ok(v)
+            }
+        }
+    }
+
+    fn eval_matrix_ast(&self, node: &AstNode) -> Result<Vec<Vec<Value>>, String> {
+        match self.eval_matrix_or_scalar_ast(node)? {
+            MatrixOrScalar::Matrix(m) => Ok(m),
+            MatrixOrScalar::Scalar(_) => Err("Matrix erwartet".to_string()),
+        }
+    }
+
+    fn eval_matrix_or_scalar_ast(&self, node: &AstNode) -> Result<MatrixOrScalar, String> {
+        match node {
+            AstNode::Neg(inner) => match self.eval_matrix_or_scalar_ast(inner)? {
+                MatrixOrScalar::Matrix(m) => Ok(MatrixOrScalar::Matrix(scale_matrix(&m, Value::from_int(-1)))),
+                MatrixOrScalar::Scalar(s) => Ok(MatrixOrScalar::Scalar(Value {
+                    c: Complex::new(-s.c.re, -s.c.im),
+                    rat: s.rat.map(|r| ExactRat { num: -r.num, den: r.den }),
+                })),
+            },
+            AstNode::Add(l, r) => match (self.eval_matrix_or_scalar_ast(l)?, self.eval_matrix_or_scalar_ast(r)?) {
+                (MatrixOrScalar::Matrix(a), MatrixOrScalar::Matrix(b)) => Ok(MatrixOrScalar::Matrix(add_sub_matrices(&a, &b, true)?)),
+                (MatrixOrScalar::Scalar(a), MatrixOrScalar::Scalar(b)) => Ok(MatrixOrScalar::Scalar(a.add(b))),
+                _ => Err("Incompatible matrix dimensions".to_string()),
+            },
+            AstNode::Sub(l, r) => match (self.eval_matrix_or_scalar_ast(l)?, self.eval_matrix_or_scalar_ast(r)?) {
+                (MatrixOrScalar::Matrix(a), MatrixOrScalar::Matrix(b)) => Ok(MatrixOrScalar::Matrix(add_sub_matrices(&a, &b, false)?)),
+                (MatrixOrScalar::Scalar(a), MatrixOrScalar::Scalar(b)) => Ok(MatrixOrScalar::Scalar(a.sub(b))),
+                _ => Err("Incompatible matrix dimensions".to_string()),
+            },
+            AstNode::Mul(l, r) => match (self.eval_matrix_or_scalar_ast(l)?, self.eval_matrix_or_scalar_ast(r)?) {
+                (MatrixOrScalar::Matrix(a), MatrixOrScalar::Matrix(b)) => Ok(MatrixOrScalar::Matrix(multiply_matrices(&a, &b)?)),
+                (MatrixOrScalar::Matrix(m), MatrixOrScalar::Scalar(s))
+                | (MatrixOrScalar::Scalar(s), MatrixOrScalar::Matrix(m)) => Ok(MatrixOrScalar::Matrix(scale_matrix(&m, s))),
+                (MatrixOrScalar::Scalar(a), MatrixOrScalar::Scalar(b)) => Ok(MatrixOrScalar::Scalar(a.mul(b))),
+            },
+            AstNode::Div(l, r) => match (self.eval_matrix_or_scalar_ast(l)?, self.eval_matrix_or_scalar_ast(r)?) {
+                (MatrixOrScalar::Matrix(m), MatrixOrScalar::Scalar(s)) => {
+                    let scaled = m
+                        .into_iter()
+                        .map(|row| row.into_iter().map(|cell| cell.div(s)).collect::<Result<Vec<_>, _>>())
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(MatrixOrScalar::Matrix(scaled))
+                }
+                (MatrixOrScalar::Scalar(a), MatrixOrScalar::Scalar(b)) => Ok(MatrixOrScalar::Scalar(a.div(b)?)),
+                _ => Err("Ungültige Matrixdivision".to_string()),
+            },
+            AstNode::Func(name, args) if name == "inv" && args.len() == 1 => {
+                let mat = self.eval_matrix_ast(&args[0])?;
+                Ok(MatrixOrScalar::Matrix(matrix_inv(&mat)?))
+            }
+            AstNode::Func(name, args) if (name == "trans" || name == "transpose") && args.len() == 1 => {
+                let mat = self.eval_matrix_ast(&args[0])?;
+                Ok(MatrixOrScalar::Matrix(transpose_matrix(&mat)))
+            }
+            AstNode::Func(name, args) if name == "det" && args.len() == 1 => {
+                let mat = self.eval_matrix_ast(&args[0])?;
+                Ok(MatrixOrScalar::Scalar(matrix_det(&mat)?))
+            }
+            AstNode::Func(name, args) if name == "[]" => {
+                if args.is_empty() {
+                    return Err("Leere Matrix".to_string());
+                }
+                let mut rows = Vec::with_capacity(args.len());
+                let mut expected_cols: Option<usize> = None;
+                for row_node in args {
+                    let AstNode::Func(rname, cells) = row_node else {
+                        return Err("Matrix muss mit [[...]] umschlossen sein".to_string());
+                    };
+                    if rname != "[]" {
+                        return Err("Matrix muss mit [[...]] umschlossen sein".to_string());
+                    }
+                    if cells.is_empty() {
+                        return Err("Leere Matrix".to_string());
+                    }
+                    match expected_cols {
+                        None => expected_cols = Some(cells.len()),
+                        Some(ec) if ec != cells.len() => return Err("Incompatible matrix dimensions".to_string()),
+                        _ => {}
+                    }
+                    let mut row_vals = Vec::with_capacity(cells.len());
+                    for cell in cells {
+                        let v = self.eval_ast_scalar(cell)?;
+                        if !v.c.is_real() || !v.c.re.is_finite() {
+                            return Err("Matrixzellen müssen endliche reelle Zahlen sein".to_string());
+                        }
+                        row_vals.push(v);
+                    }
+                    rows.push(row_vals);
+                }
+                Ok(MatrixOrScalar::Matrix(rows))
+            }
+            _ => Ok(MatrixOrScalar::Scalar(self.eval_ast_scalar(node)?)),
+        }
+    }
+
     fn eval_matrix_expr(&self, s: &str) -> Result<Vec<Vec<Value>>, String> {
         let s = s.trim();
+        if let Ok(ast) = AstParser::parse(s) {
+            return self.eval_matrix_ast(&ast);
+        }
         let mut depth = 0;
         let mut split_pos = None;
         let mut op = '+';
@@ -1344,6 +1502,89 @@ impl MathEngine {
     }
 }
 
+enum MatrixOrScalar {
+    Matrix(Vec<Vec<Value>>),
+    Scalar(Value),
+}
+
+fn contains_matrix_expression(node: &AstNode) -> bool {
+    match node {
+        AstNode::Neg(a) => contains_matrix_expression(a),
+        AstNode::Add(a, b)
+        | AstNode::Sub(a, b)
+        | AstNode::Mul(a, b)
+        | AstNode::Div(a, b)
+        | AstNode::Pow(a, b) => contains_matrix_expression(a) || contains_matrix_expression(b),
+        AstNode::Func(name, args) => {
+            if name == "det" {
+                return false;
+            }
+            if name == "[]" || name == "inv" || name == "trans" || name == "transpose" {
+                return true;
+            }
+            args.iter().any(contains_matrix_expression)
+        }
+        _ => false,
+    }
+}
+
+fn add_sub_matrices(left: &[Vec<Value>], right: &[Vec<Value>], is_add: bool) -> Result<Vec<Vec<Value>>, String> {
+    if left.len() != right.len() || left[0].len() != right[0].len() {
+        return Err("Incompatible matrix dimensions".to_string());
+    }
+    let rows = left.len();
+    let cols = left[0].len();
+    let mut res = vec![vec![Value::from_int(0); cols]; rows];
+    for r in 0..rows {
+        for c in 0..cols {
+            res[r][c] = if is_add {
+                left[r][c].add(right[r][c])
+            } else {
+                left[r][c].sub(right[r][c])
+            };
+        }
+    }
+    Ok(res)
+}
+
+fn transpose_matrix(mat: &[Vec<Value>]) -> Vec<Vec<Value>> {
+    let rows = mat.len();
+    let cols = mat[0].len();
+    let mut t = vec![vec![Value::from_int(0); rows]; cols];
+    for r in 0..rows {
+        for c in 0..cols {
+            t[c][r] = mat[r][c];
+        }
+    }
+    t
+}
+
+fn scale_matrix(mat: &[Vec<Value>], scalar: Value) -> Vec<Vec<Value>> {
+    mat.iter()
+        .map(|row| row.iter().map(|cell| cell.mul(scalar)).collect())
+        .collect()
+}
+
+fn multiply_matrices(left: &[Vec<Value>], right: &[Vec<Value>]) -> Result<Vec<Vec<Value>>, String> {
+    let rows = left.len();
+    let inner = left[0].len();
+    if right.len() != inner {
+        return Err("Incompatible matrix dimensions".to_string());
+    }
+    let cols = right[0].len();
+    let mut res = vec![vec![Value::from_int(0); cols]; rows];
+    for r in 0..rows {
+        for c in 0..cols {
+            let mut sum = Value::from_int(0);
+            for k in 0..inner {
+                sum = sum.add(left[r][k].mul(right[k][c]));
+            }
+            res[r][c] = sum;
+        }
+    }
+    Ok(res)
+}
+
 fn matrix_minor(a: Value, b: Value, c: Value, d: Value) -> Value {
     a.mul(d).sub(b.mul(c))
 }
@@ -1399,32 +1640,58 @@ fn matrix_det(m: &[Vec<Value>]) -> Result<Value, String> {
 }
 
 fn matrix_inv(m: &[Vec<Value>]) -> Result<Vec<Vec<Value>>, String> {
+    let n = m.len();
+    if n == 0 || m[0].len() != n {
+        return Err("Matrix-Invertierung erfordert quadratische Matrix".to_string());
+    }
     let det = matrix_det(m)?;
     if det.rat.map_or(det.c.re.abs() < 1e-14, |rat| rat.num == 0) {
         return Err("Matrix ist singulär (det = 0)".to_string());
     }
-    let n = m.len();
     let zero = Value::from_int(0);
-    if n == 2 {
-        Ok(vec![
-            vec![m[1][1].div(det)?, zero.sub(m[0][1]).div(det)?],
-            vec![zero.sub(m[1][0]).div(det)?, m[0][0].div(det)?],
-        ])
-    } else if n == 3 {
-        let mut inv = vec![vec![zero; 3]; 3];
-        for r in 0..3 {
-            for c in 0..3 {
-                let r1 = (r + 1) % 3;
-                let r2 = (r + 2) % 3;
-                let c1 = (c + 1) % 3;
-                let c2 = (c + 2) % 3;
-                inv[c][r] = matrix_minor(m[r1][c1], m[r1][c2], m[r2][c1], m[r2][c2]).div(det)?;
+    let one = Value::from_int(1);
+    let mut aug = vec![vec![zero; 2 * n]; n];
+    for r in 0..n {
+        for c in 0..n {
+            aug[r][c] = m[r][c];
+        }
+        aug[r][n + r] = one;
+    }
+    for i in 0..n {
+        let mut pivot_row = i;
+        let mut max_val = aug[i][i].c.abs();
+        for k in (i + 1)..n {
+            let v = aug[k][i].c.abs();
+            if v > max_val {
+                max_val = v;
+                pivot_row = k;
             }
         }
-        Ok(inv)
-    } else {
-        Err("Matrix-Invertierung wird für 2×2 und 3×3 unterstützt".to_string())
+        if max_val < 1e-14 {
+            return Err("Matrix ist singulär (nicht invertierbar)".to_string());
+        }
+        if pivot_row != i {
+            aug.swap(i, pivot_row);
+        }
+        let pivot = aug[i][i];
+        for j in 0..(2 * n) {
+            aug[i][j] = aug[i][j].div(pivot)?;
+        }
+        for k in 0..n {
+            if k != i {
+                let factor = aug[k][i];
+                for j in 0..(2 * n) {
+                    let sub_term = factor.mul(aug[i][j]);
+                    aug[k][j] = aug[k][j].sub(sub_term);
+                }
+            }
+        }
     }
+    let mut inv = vec![vec![zero; n]; n];
+    for i in 0..n {
+        inv[i].copy_from_slice(&aug[i][n..(2 * n)]);
+    }
+    Ok(inv)
 }
 
 // --- Adaptive Gauss-Legendre Quadrature with Error Control & Convergence Assertion ---
@@ -1622,10 +1889,7 @@ impl AstNode {
             AstNode::Neg(inner) => {
                 let v = inner.const_value()?;
                 Some(Value {
-                    c: Complex {
-                        re: -v.c.re,
-                        im: -v.c.im,
-                    },
+                    c: Complex::new(-v.c.re, -v.c.im),
                     rat: v.rat.map(|r| ExactRat {
                         num: -r.num,
                         den: r.den,
@@ -1650,7 +1914,12 @@ impl AstNode {
         }
     }
 
+    #[allow(dead_code)]
     pub fn diff(&self, var: &str) -> Option<AstNode> {
+        self.diff_with_mode(var, AngleMode::Radians)
+    }
+
+    pub fn diff_with_mode(&self, var: &str, mode: AngleMode) -> Option<AstNode> {
         match self {
             AstNode::Num(_) => Some(AstNode::Num(Value::from_int(0))),
             AstNode::Var(v) => {
@@ -1660,12 +1929,18 @@ impl AstNode {
                     Some(AstNode::Num(Value::from_int(0)))
                 }
             }
-            AstNode::Add(a, b) => Some(AstNode::Add(Box::new(a.diff(var)?), Box::new(b.diff(var)?))),
-            AstNode::Sub(a, b) => Some(AstNode::Sub(Box::new(a.diff(var)?), Box::new(b.diff(var)?))),
+            AstNode::Add(a, b) => Some(AstNode::Add(
+                Box::new(a.diff_with_mode(var, mode)?),
+                Box::new(b.diff_with_mode(var, mode)?),
+            )),
+            AstNode::Sub(a, b) => Some(AstNode::Sub(
+                Box::new(a.diff_with_mode(var, mode)?),
+                Box::new(b.diff_with_mode(var, mode)?),
+            )),
             AstNode::Mul(a, b) => {
                 // Product rule: (a * b)' = a' * b + a * b'
-                let da = a.diff(var)?;
-                let db = b.diff(var)?;
+                let da = a.diff_with_mode(var, mode)?;
+                let db = b.diff_with_mode(var, mode)?;
                 Some(AstNode::Add(
                     Box::new(AstNode::Mul(Box::new(da), b.clone())),
                     Box::new(AstNode::Mul(a.clone(), Box::new(db))),
@@ -1676,8 +1951,8 @@ impl AstNode {
                     return None;
                 }
                 // Quotient rule: (a / b)' = (a' * b - a * b') / b^2
-                let da = a.diff(var)?;
-                let db = b.diff(var)?;
+                let da = a.diff_with_mode(var, mode)?;
+                let db = b.diff_with_mode(var, mode)?;
                 Some(AstNode::Div(
                     Box::new(AstNode::Sub(
                         Box::new(AstNode::Mul(Box::new(da), b.clone())),
@@ -1699,7 +1974,7 @@ impl AstNode {
 
                 if base_has_var && !exp_has_var {
                     // Power rule: (u^c)' = c * u^(c - 1) * u'
-                    let u_prime = base.diff(var)?;
+                    let u_prime = base.diff_with_mode(var, mode)?;
                     if let Some(c_val) = exp.const_value() {
                         if !c_val.c.is_real() {
                             return None;
@@ -1743,7 +2018,7 @@ impl AstNode {
                     if base.is_zero() {
                         return None;
                     }
-                    let v_prime = exp.diff(var)?;
+                    let v_prime = exp.diff_with_mode(var, mode)?;
                     return Some(AstNode::Mul(
                         Box::new(AstNode::Mul(
                             Box::new(self.clone()),
@@ -1754,8 +2029,8 @@ impl AstNode {
                 }
 
                 // General power rule (u > 0): (u^v)' = u^v * (v' * ln(u) + (v * u') / u)
-                let u_prime = base.diff(var)?;
-                let v_prime = exp.diff(var)?;
+                let u_prime = base.diff_with_mode(var, mode)?;
+                let v_prime = exp.diff_with_mode(var, mode)?;
                 let term1 = AstNode::Mul(
                     Box::new(v_prime),
                     Box::new(AstNode::Func("ln".to_string(), vec![(**base).clone()])),
@@ -1769,29 +2044,61 @@ impl AstNode {
                     Box::new(AstNode::Add(Box::new(term1), Box::new(term2))),
                 ))
             }
-            AstNode::Neg(a) => Some(AstNode::Neg(Box::new(a.diff(var)?))),
+            AstNode::Neg(a) => Some(AstNode::Neg(Box::new(a.diff_with_mode(var, mode)?))),
             AstNode::Func(name, args) if args.len() == 1 => {
                 let u = &args[0];
                 if !u.contains_var(var) {
                     return Some(AstNode::Num(Value::from_int(0)));
                 }
-                let u_prime = u.diff(var)?;
+                let u_prime = u.diff_with_mode(var, mode)?;
+                let deg_scale = || AstNode::Div(
+                    Box::new(AstNode::Var("pi".to_string())),
+                    Box::new(AstNode::Num(Value::from_int(180))),
+                );
+                let inv_deg_scale = || AstNode::Div(
+                    Box::new(AstNode::Num(Value::from_int(180))),
+                    Box::new(AstNode::Var("pi".to_string())),
+                );
                 match name.as_str() {
-                    "sin" => Some(AstNode::Mul(
-                        Box::new(u_prime),
-                        Box::new(AstNode::Func("cos".to_string(), vec![u.clone()])),
-                    )),
-                    "cos" => Some(AstNode::Neg(Box::new(AstNode::Mul(
-                        Box::new(u_prime),
-                        Box::new(AstNode::Func("sin".to_string(), vec![u.clone()])),
-                    )))),
-                    "tan" => Some(AstNode::Div(
-                        Box::new(u_prime),
-                        Box::new(AstNode::Pow(
+                    "sin" => {
+                        let base = AstNode::Mul(
+                            Box::new(u_prime),
+                            Box::new(AstNode::Func("cos".to_string(), vec![u.clone()])),
+                        );
+                        if mode == AngleMode::Degrees {
+                            Some(AstNode::Mul(Box::new(deg_scale()), Box::new(base.simplify())))
+                        } else {
+                            Some(base)
+                        }
+                    }
+                    "cos" => {
+                        let base = AstNode::Mul(
+                            Box::new(u_prime),
+                            Box::new(AstNode::Func("sin".to_string(), vec![u.clone()])),
+                        );
+                        if mode == AngleMode::Degrees {
+                            Some(AstNode::Neg(Box::new(AstNode::Mul(
+                                Box::new(deg_scale()),
+                                Box::new(base.simplify()),
+                            ))))
+                        } else {
+                            Some(AstNode::Neg(Box::new(base)))
+                        }
+                    }
+                    "tan" => {
+                        let denom = Box::new(AstNode::Pow(
                             Box::new(AstNode::Func("cos".to_string(), vec![u.clone()])),
                             Box::new(AstNode::Num(Value::from_int(2))),
-                        )),
-                    )),
+                        ));
+                        if mode == AngleMode::Degrees {
+                            Some(AstNode::Div(
+                                Box::new(AstNode::Mul(Box::new(deg_scale()), Box::new(u_prime))),
+                                denom,
+                            ))
+                        } else {
+                            Some(AstNode::Div(Box::new(u_prime), denom))
+                        }
+                    }
                     "sinh" => Some(AstNode::Mul(
                         Box::new(u_prime),
                         Box::new(AstNode::Func("cosh".to_string(), vec![u.clone()])),
@@ -1807,42 +2114,63 @@ impl AstNode {
                             Box::new(AstNode::Num(Value::from_int(2))),
                         )),
                     )),
-                    "asin" | "arcsin" => Some(AstNode::Div(
-                        Box::new(u_prime),
-                        Box::new(AstNode::Func(
-                            "sqrt".to_string(),
-                            vec![AstNode::Sub(
-                                Box::new(AstNode::Num(Value::from_int(1))),
-                                Box::new(AstNode::Pow(
-                                    Box::new(u.clone()),
-                                    Box::new(AstNode::Num(Value::from_int(2))),
-                                )),
-                            )],
-                        )),
-                    )),
-                    "acos" | "arccos" => Some(AstNode::Neg(Box::new(AstNode::Div(
-                        Box::new(u_prime),
-                        Box::new(AstNode::Func(
-                            "sqrt".to_string(),
-                            vec![AstNode::Sub(
-                                Box::new(AstNode::Num(Value::from_int(1))),
-                                Box::new(AstNode::Pow(
-                                    Box::new(u.clone()),
-                                    Box::new(AstNode::Num(Value::from_int(2))),
-                                )),
-                            )],
-                        )),
-                    )))),
-                    "atan" | "arctan" => Some(AstNode::Div(
-                        Box::new(u_prime),
-                        Box::new(AstNode::Add(
-                            Box::new(AstNode::Num(Value::from_int(1))),
-                            Box::new(AstNode::Pow(
-                                Box::new(u.clone()),
-                                Box::new(AstNode::Num(Value::from_int(2))),
+                    "asin" | "arcsin" => {
+                        let base = AstNode::Div(
+                            Box::new(u_prime),
+                            Box::new(AstNode::Func(
+                                "sqrt".to_string(),
+                                vec![AstNode::Sub(
+                                    Box::new(AstNode::Num(Value::from_int(1))),
+                                    Box::new(AstNode::Pow(
+                                        Box::new(u.clone()),
+                                        Box::new(AstNode::Num(Value::from_int(2))),
+                                    )),
+                                )],
                             )),
-                        )),
-                    )),
+                        );
+                        Some(if mode == AngleMode::Degrees {
+                            AstNode::Mul(Box::new(inv_deg_scale()), Box::new(base))
+                        } else {
+                            base
+                        })
+                    }
+                    "acos" | "arccos" => {
+                        let base = AstNode::Div(
+                            Box::new(u_prime),
+                            Box::new(AstNode::Func(
+                                "sqrt".to_string(),
+                                vec![AstNode::Sub(
+                                    Box::new(AstNode::Num(Value::from_int(1))),
+                                    Box::new(AstNode::Pow(
+                                        Box::new(u.clone()),
+                                        Box::new(AstNode::Num(Value::from_int(2))),
+                                    )),
+                                )],
+                            )),
+                        );
+                        Some(AstNode::Neg(Box::new(if mode == AngleMode::Degrees {
+                            AstNode::Mul(Box::new(inv_deg_scale()), Box::new(base))
+                        } else {
+                            base
+                        })))
+                    }
+                    "atan" | "arctan" => {
+                        let base = AstNode::Div(
+                            Box::new(u_prime),
+                            Box::new(AstNode::Add(
+                                Box::new(AstNode::Num(Value::from_int(1))),
+                                Box::new(AstNode::Pow(
+                                    Box::new(u.clone()),
+                                    Box::new(AstNode::Num(Value::from_int(2))),
+                                )),
+                            )),
+                        );
+                        Some(if mode == AngleMode::Degrees {
+                            AstNode::Mul(Box::new(inv_deg_scale()), Box::new(base))
+                        } else {
+                            base
+                        })
+                    }
                     "asinh" | "arcsinh" => Some(AstNode::Div(
                         Box::new(u_prime),
                         Box::new(AstNode::Func(
@@ -1903,27 +2231,27 @@ impl AstNode {
                         Box::new(args[0].clone()),
                         Box::new(args[1].clone()),
                     )
-                    .diff(var),
+                    .diff_with_mode(var, mode),
                     "addition" => AstNode::Add(
                         Box::new(args[0].clone()),
                         Box::new(args[1].clone()),
                     )
-                    .diff(var),
+                    .diff_with_mode(var, mode),
                     "subtraction" => AstNode::Sub(
                         Box::new(args[0].clone()),
                         Box::new(args[1].clone()),
                     )
-                    .diff(var),
+                    .diff_with_mode(var, mode),
                     "multiplication" => AstNode::Mul(
                         Box::new(args[0].clone()),
                         Box::new(args[1].clone()),
                     )
-                    .diff(var),
+                    .diff_with_mode(var, mode),
                     "division" | "fraction" => AstNode::Div(
                         Box::new(args[0].clone()),
                         Box::new(args[1].clone()),
                     )
-                    .diff(var),
+                    .diff_with_mode(var, mode),
                     _ => None,
                 }
             }
@@ -1934,6 +2262,68 @@ impl AstNode {
                     None
                 }
             }
+        }
+    }
+
+    fn match_linear(&self, var: &str) -> Option<(AstNode, AstNode)> {
+        if !self.contains_var(var) {
+            return None;
+        }
+        match self {
+            AstNode::Var(v) if v == var => {
+                Some((AstNode::Num(Value::from_int(1)), AstNode::Num(Value::from_int(0))))
+            }
+            AstNode::Neg(inner) => {
+                let (a, b) = inner.match_linear(var)?;
+                Some((AstNode::Neg(Box::new(a)).simplify(), AstNode::Neg(Box::new(b)).simplify()))
+            }
+            AstNode::Add(l, r) => {
+                if !r.contains_var(var) {
+                    let (a, b) = l.match_linear(var)?;
+                    Some((a, AstNode::Add(Box::new(b), r.clone()).simplify()))
+                } else if !l.contains_var(var) {
+                    let (a, b) = r.match_linear(var)?;
+                    Some((a, AstNode::Add(l.clone(), Box::new(b)).simplify()))
+                } else {
+                    None
+                }
+            }
+            AstNode::Sub(l, r) => {
+                if !r.contains_var(var) {
+                    let (a, b) = l.match_linear(var)?;
+                    Some((a, AstNode::Sub(Box::new(b), r.clone()).simplify()))
+                } else if !l.contains_var(var) {
+                    let (a, b) = r.match_linear(var)?;
+                    Some((AstNode::Neg(Box::new(a)).simplify(), AstNode::Sub(l.clone(), Box::new(b)).simplify()))
+                } else {
+                    None
+                }
+            }
+            AstNode::Mul(l, r) => {
+                if !l.contains_var(var) {
+                    let (a, b) = r.match_linear(var)?;
+                    Some((
+                        AstNode::Mul(l.clone(), Box::new(a)).simplify(),
+                        AstNode::Mul(l.clone(), Box::new(b)).simplify(),
+                    ))
+                } else if !r.contains_var(var) {
+                    let (a, b) = l.match_linear(var)?;
+                    Some((
+                        AstNode::Mul(r.clone(), Box::new(a)).simplify(),
+                        AstNode::Mul(r.clone(), Box::new(b)).simplify(),
+                    ))
+                } else {
+                    None
+                }
+            }
+            AstNode::Div(l, r) if !r.contains_var(var) => {
+                let (a, b) = l.match_linear(var)?;
+                Some((
+                    AstNode::Div(Box::new(a), r.clone()).simplify(),
+                    AstNode::Div(Box::new(b), r.clone()).simplify(),
+                ))
+            }
+            _ => None,
         }
     }
 
@@ -1949,6 +2339,10 @@ impl AstNode {
                     Box::new(AstNode::Num(Value::from_int(2))),
                 ))
             }
+            AstNode::Var(v) => Some(AstNode::Mul(
+                Box::new(AstNode::Var(v.clone())),
+                Box::new(AstNode::Var(var.to_string())),
+            )),
             AstNode::Num(v) if v.c.re == 1.0 && v.c.im == 0.0 => {
                 Some(AstNode::Var(var.to_string()))
             }
@@ -1958,31 +2352,61 @@ impl AstNode {
                     Box::new(AstNode::Var(var.to_string())),
                 ))
             }
-            AstNode::Div(a, b) if a.is_one() && **b == AstNode::Var(var.to_string()) => {
-                Some(AstNode::Func(
-                    "ln".to_string(),
-                    vec![AstNode::Var(var.to_string())],
-                ))
+            AstNode::Neg(inner) => Some(AstNode::Neg(Box::new(inner.integrate(var)?))),
+            AstNode::Div(a, b) => {
+                if !b.contains_var(var) {
+                    let ia = a.integrate(var)?;
+                    return Some(AstNode::Div(Box::new(ia), b.clone()).simplify());
+                }
+                if !a.contains_var(var) && **b == AstNode::Var(var.to_string()) {
+                    let ln = AstNode::Func("ln".to_string(), vec![AstNode::Var(var.to_string())]);
+                    return Some(if a.is_one() {
+                        ln
+                    } else {
+                        AstNode::Mul(a.clone(), Box::new(ln))
+                    });
+                }
+                None
             }
-            AstNode::Pow(base, exp) if **base == AstNode::Var(var.to_string()) => {
-                let n_opt = match **exp {
-                    AstNode::Num(n_val) => Some(n_val.c.re),
-                    AstNode::Neg(ref inner) => match inner.as_ref() {
-                        AstNode::Num(n_val) => Some(-n_val.c.re),
-                        _ => None,
-                    },
-                    _ => None,
-                };
-                if let Some(re) = n_opt {
-                    if (re - re.round()).abs() < 1e-11 {
-                        let n = re.round() as i128;
-                        if n == -1 {
+            AstNode::Pow(base, exp) if **base == AstNode::Var(var.to_string()) && !exp.contains_var(var) => {
+                if let Some(er) = try_exact_rat_ast(exp) {
+                    if er.den == 1 && er.num == -1 {
+                        return Some(AstNode::Func(
+                            "ln".to_string(),
+                            vec![AstNode::Var(var.to_string())],
+                        ));
+                    }
+                    let new_exp = er.add(ExactRat::from_int(1))?;
+                    let new_exp_val = Value { c: Complex::real(new_exp.to_f64()), rat: Some(new_exp) };
+                    if new_exp.den == 1 {
+                        return Some(AstNode::Div(
+                            Box::new(AstNode::Pow(
+                                Box::new(AstNode::Var(var.to_string())),
+                                Box::new(AstNode::Num(new_exp_val)),
+                            )),
+                            Box::new(AstNode::Num(new_exp_val)),
+                        ));
+                    }
+                    let coeff = ExactRat::from_int(1).div(new_exp)?;
+                    let coeff_val = Value { c: Complex::real(coeff.to_f64()), rat: Some(coeff) };
+                    return Some(AstNode::Mul(
+                        Box::new(AstNode::Num(coeff_val)),
+                        Box::new(AstNode::Pow(
+                            Box::new(AstNode::Var(var.to_string())),
+                            Box::new(AstNode::Num(new_exp_val)),
+                        )),
+                    ));
+                }
+                if let Some(c_val) = exp.const_value() {
+                    if c_val.c.is_real() {
+                        if (c_val.c.re + 1.0).abs() < 1e-11 {
                             return Some(AstNode::Func(
                                 "ln".to_string(),
                                 vec![AstNode::Var(var.to_string())],
                             ));
-                        } else {
-                            let new_p = n + 1;
+                        }
+                        if (c_val.c.re - c_val.c.re.round()).abs() < 1e-11 {
+                            let new_p = c_val.c.re.round() as i128 + 1;
                             return Some(AstNode::Div(
                                 Box::new(AstNode::Pow(
                                     Box::new(AstNode::Var(var.to_string())),
@@ -1991,22 +2415,87 @@ impl AstNode {
                                 Box::new(AstNode::Num(Value::from_int(new_p))),
                             ));
                         }
+                        let new_p = c_val.c.re + 1.0;
+                        return Some(AstNode::Div(
+                            Box::new(AstNode::Pow(
+                                Box::new(AstNode::Var(var.to_string())),
+                                Box::new(AstNode::Num(Value::from_f64(new_p))),
+                            )),
+                            Box::new(AstNode::Num(Value::from_f64(new_p))),
+                        ));
                     }
                 }
                 None
             }
             AstNode::Func(name, args) if args.len() == 1 => {
-                if args[0] == AstNode::Var(var.to_string()) {
-                    match name.as_str() {
-                        "exp" => Some(AstNode::Func("exp".to_string(), vec![AstNode::Var(var.to_string())])),
-                        "sin" => Some(AstNode::Neg(Box::new(AstNode::Func("cos".to_string(), vec![AstNode::Var(var.to_string())])))),
-                        "cos" => Some(AstNode::Func("sin".to_string(), vec![AstNode::Var(var.to_string())])),
-                        "sinh" => Some(AstNode::Func("cosh".to_string(), vec![AstNode::Var(var.to_string())])),
-                        "cosh" => Some(AstNode::Func("sinh".to_string(), vec![AstNode::Var(var.to_string())])),
-                        _ => None,
+                let u = &args[0];
+                if !u.contains_var(var) {
+                    return Some(AstNode::Mul(
+                        Box::new(self.clone()),
+                        Box::new(AstNode::Var(var.to_string())),
+                    ));
+                }
+                let (a, _b) = u.match_linear(var)?;
+                if a.is_zero() {
+                    return None;
+                }
+                let unit_a = a.is_one();
+                match name.as_str() {
+                    "sqrt" => {
+                        let three_halves = ExactRat::new(3, 2)?;
+                        let exp_val = Value { c: Complex::real(1.5), rat: Some(three_halves) };
+                        let exp_node = AstNode::Num(exp_val);
+                        if unit_a {
+                            let two_thirds = ExactRat::new(2, 3)?;
+                            let coeff_val = Value { c: Complex::real(2.0 / 3.0), rat: Some(two_thirds) };
+                            Some(AstNode::Mul(
+                                Box::new(AstNode::Num(coeff_val)),
+                                Box::new(AstNode::Pow(Box::new(u.clone()), Box::new(exp_node))),
+                            ))
+                        } else {
+                            let denom = AstNode::Mul(
+                                Box::new(AstNode::Num(Value::from_int(3))),
+                                Box::new(a),
+                            )
+                            .simplify();
+                            Some(AstNode::Div(
+                                Box::new(AstNode::Mul(
+                                    Box::new(AstNode::Num(Value::from_int(2))),
+                                    Box::new(AstNode::Pow(Box::new(u.clone()), Box::new(exp_node))),
+                                )),
+                                Box::new(denom),
+                            ))
+                        }
                     }
-                } else {
-                    None
+                    "exp" => {
+                        let base = AstNode::Func("exp".to_string(), vec![u.clone()]);
+                        Some(if unit_a { base } else { AstNode::Div(Box::new(base), Box::new(a)) })
+                    }
+                    "sin" => {
+                        let cos_u = AstNode::Func("cos".to_string(), vec![u.clone()]);
+                        if unit_a {
+                            Some(AstNode::Neg(Box::new(cos_u)))
+                        } else if let AstNode::Neg(inner_a) = a {
+                            Some(AstNode::Div(Box::new(cos_u), inner_a))
+                        } else if a.is_negative_display() {
+                            Some(AstNode::Div(Box::new(cos_u), Box::new(AstNode::Neg(Box::new(a)).simplify())))
+                        } else {
+                            Some(AstNode::Neg(Box::new(AstNode::Div(Box::new(cos_u), Box::new(a)))))
+                        }
+                    }
+                    "cos" => {
+                        let sin_u = AstNode::Func("sin".to_string(), vec![u.clone()]);
+                        Some(if unit_a { sin_u } else { AstNode::Div(Box::new(sin_u), Box::new(a)) })
+                    }
+                    "sinh" => {
+                        let cosh_u = AstNode::Func("cosh".to_string(), vec![u.clone()]);
+                        Some(if unit_a { cosh_u } else { AstNode::Div(Box::new(cosh_u), Box::new(a)) })
+                    }
+                    "cosh" => {
+                        let sinh_u = AstNode::Func("sinh".to_string(), vec![u.clone()]);
+                        Some(if unit_a { sinh_u } else { AstNode::Div(Box::new(sinh_u), Box::new(a)) })
+                    }
+                    _ => None,
                 }
             }
             AstNode::Add(a, b) => {
@@ -2020,9 +2509,12 @@ impl AstNode {
                 Some(AstNode::Sub(Box::new(ia), Box::new(ib)))
             }
             AstNode::Mul(a, b) => {
-                if let AstNode::Num(c) = **a {
+                if !a.contains_var(var) {
                     let ib = b.integrate(var)?;
-                    Some(AstNode::Mul(Box::new(AstNode::Num(c)), Box::new(ib)))
+                    Some(AstNode::Mul(a.clone(), Box::new(ib)).simplify())
+                } else if !b.contains_var(var) {
+                    let ia = a.integrate(var)?;
+                    Some(AstNode::Mul(Box::new(ia), b.clone()).simplify())
                 } else {
                     None
                 }
@@ -2042,10 +2534,7 @@ impl AstNode {
                     AstNode::Num(Value::from_int(0))
                 } else if let AstNode::Num(v) = sa {
                     AstNode::Num(Value {
-                        c: Complex {
-                            re: -v.c.re,
-                            im: -v.c.im,
-                        },
+                        c: Complex::new(-v.c.re, -v.c.im),
                         rat: v.rat.map(|r| ExactRat {
                             num: -r.num,
                             den: r.den,
@@ -2270,7 +2759,240 @@ fn flatten_ast_terms(node: &AstNode, sign: i128, terms: &mut Vec<(i128, AstNode)
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PolyMonomial {
+    vars: BTreeMap<String, i32>,
+}
+
+impl PolyMonomial {
+    fn empty() -> Self {
+        Self { vars: BTreeMap::new() }
+    }
+
+    fn total_degree(&self) -> i32 {
+        self.vars.values().sum()
+    }
+
+    fn mul(&self, other: &Self) -> Self {
+        let mut vars = self.vars.clone();
+        for (k, &v) in &other.vars {
+            *vars.entry(k.clone()).or_insert(0) += v;
+        }
+        Self { vars }
+    }
+}
+
+impl Ord for PolyMonomial {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other.total_degree().cmp(&self.total_degree()).then_with(|| {
+            let mut it1 = self.vars.iter();
+            let mut it2 = other.vars.iter();
+            loop {
+                match (it1.next(), it2.next()) {
+                    (Some((k1, v1)), Some((k2, v2))) => {
+                        let c = k1.cmp(k2).then_with(|| v2.cmp(v1));
+                        if c != std::cmp::Ordering::Equal {
+                            return c;
+                        }
+                    }
+                    (Some(_), None) => return std::cmp::Ordering::Less,
+                    (None, Some(_)) => return std::cmp::Ordering::Greater,
+                    (None, None) => return std::cmp::Ordering::Equal,
+                }
+            }
+        })
+    }
+}
+
+impl PartialOrd for PolyMonomial {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn add_poly(l: &BTreeMap<PolyMonomial, ExactRat>, r: &BTreeMap<PolyMonomial, ExactRat>, sign: i128) -> Option<BTreeMap<PolyMonomial, ExactRat>> {
+    let mut res = l.clone();
+    for (m, &c) in r {
+        let addend = ExactRat::new(c.num.checked_mul(sign)?, c.den)?;
+        let next = match res.get(m) {
+            Some(&cur) => cur.add(addend)?,
+            None => addend,
+        };
+        if next.num == 0 {
+            res.remove(m);
+        } else {
+            res.insert(m.clone(), next);
+        }
+    }
+    Some(res)
+}
+
+fn mul_poly(l: &BTreeMap<PolyMonomial, ExactRat>, r: &BTreeMap<PolyMonomial, ExactRat>) -> Option<BTreeMap<PolyMonomial, ExactRat>> {
+    if l.len().saturating_mul(r.len()) > 128 {
+        return None;
+    }
+    let mut res: BTreeMap<PolyMonomial, ExactRat> = BTreeMap::new();
+    for (ml, &cl) in l {
+        for (mr, &cr) in r {
+            let m = ml.mul(mr);
+            let prod = cl.mul(cr)?;
+            let next = match res.get(&m) {
+                Some(&cur) => cur.add(prod)?,
+                None => prod,
+            };
+            if next.num == 0 {
+                res.remove(&m);
+            } else {
+                res.insert(m, next);
+            }
+        }
+    }
+    Some(res)
+}
+
+fn ast_to_poly(node: &AstNode) -> Option<BTreeMap<PolyMonomial, ExactRat>> {
+    match node {
+        AstNode::Num(v) => {
+            let r = v.rat?;
+            let mut m = BTreeMap::new();
+            if r.num != 0 {
+                m.insert(PolyMonomial::empty(), r);
+            }
+            Some(m)
+        }
+        AstNode::Var(name) => {
+            if name == "i" {
+                return None;
+            }
+            let mut vars = BTreeMap::new();
+            vars.insert(name.clone(), 1);
+            let mut m = BTreeMap::new();
+            m.insert(PolyMonomial { vars }, ExactRat::from_int(1));
+            Some(m)
+        }
+        AstNode::Neg(inner) => {
+            let p = ast_to_poly(inner)?;
+            let mut res = BTreeMap::new();
+            for (k, v) in p {
+                res.insert(k, ExactRat::new(v.num.checked_neg()?, v.den)?);
+            }
+            Some(res)
+        }
+        AstNode::Add(l, r) => add_poly(&ast_to_poly(l)?, &ast_to_poly(r)?, 1),
+        AstNode::Sub(l, r) => add_poly(&ast_to_poly(l)?, &ast_to_poly(r)?, -1),
+        AstNode::Mul(l, r) => mul_poly(&ast_to_poly(l)?, &ast_to_poly(r)?),
+        AstNode::Div(l, r) => {
+            let pl = ast_to_poly(l)?;
+            let sr = try_exact_rat_ast(r)?;
+            if sr.num == 0 {
+                return None;
+            }
+            let mut res = BTreeMap::new();
+            for (k, v) in pl {
+                let c = v.div(sr)?;
+                if c.num != 0 {
+                    res.insert(k, c);
+                }
+            }
+            Some(res)
+        }
+        AstNode::Pow(base, exp) => {
+            let er = try_exact_rat_ast(exp)?;
+            if er.den != 1 || er.num < 0 || er.num > 8 {
+                return None;
+            }
+            let base_poly = ast_to_poly(base)?;
+            let mut res = BTreeMap::new();
+            res.insert(PolyMonomial::empty(), ExactRat::from_int(1));
+            for _ in 0..er.num {
+                res = mul_poly(&res, &base_poly)?;
+            }
+            Some(res)
+        }
+        _ => None,
+    }
+}
+
+fn poly_to_ast(poly: &BTreeMap<PolyMonomial, ExactRat>) -> AstNode {
+    if poly.is_empty() {
+        return AstNode::Num(Value::from_int(0));
+    }
+    let mut result: Option<AstNode> = None;
+    for (mon, &coeff) in poly {
+        let neg = coeff.num < 0;
+        let abs_c = ExactRat { num: coeff.num.abs(), den: coeff.den };
+        let c_val = Value { c: Complex::real(abs_c.to_f64()), rat: Some(abs_c) };
+
+        let mut mon_ast: Option<AstNode> = None;
+        for (var, &exp) in &mon.vars {
+            let factor = if exp == 1 {
+                AstNode::Var(var.clone())
+            } else {
+                AstNode::Pow(
+                    Box::new(AstNode::Var(var.clone())),
+                    Box::new(AstNode::Num(Value::from_int(i128::from(exp)))),
+                )
+            };
+            mon_ast = Some(match mon_ast {
+                None => factor,
+                Some(acc) => AstNode::Mul(Box::new(acc), Box::new(factor)),
+            });
+        }
+
+        let term_ast = match mon_ast {
+            None => AstNode::Num(c_val),
+            Some(m) => {
+                if abs_c.num == 1 && abs_c.den == 1 {
+                    m
+                } else {
+                    AstNode::Mul(Box::new(AstNode::Num(c_val)), Box::new(m))
+                }
+            }
+        };
+
+        result = Some(match result {
+            None => {
+                if neg {
+                    AstNode::Neg(Box::new(term_ast))
+                } else {
+                    term_ast
+                }
+            }
+            Some(acc) => {
+                if neg {
+                    AstNode::Sub(Box::new(acc), Box::new(term_ast))
+                } else {
+                    AstNode::Add(Box::new(acc), Box::new(term_ast))
+                }
+            }
+        });
+    }
+    result.unwrap_or(AstNode::Num(Value::from_int(0)))
+}
+
+fn contains_add_or_sub(node: &AstNode) -> bool {
+    match node {
+        AstNode::Add(_, _) | AstNode::Sub(_, _) => true,
+        AstNode::Mul(l, r) | AstNode::Div(l, r) | AstNode::Pow(l, r) => {
+            contains_add_or_sub(l) || contains_add_or_sub(r)
+        }
+        AstNode::Neg(inner) => contains_add_or_sub(inner),
+        AstNode::Func(_, args) => args.iter().any(contains_add_or_sub),
+        AstNode::Num(_) | AstNode::Var(_) => false,
+    }
+}
+
 pub fn simplify_polynomial_ast(node: &AstNode) -> Option<AstNode> {
+    if contains_add_or_sub(node) {
+        if let Some(poly) = ast_to_poly(node) {
+            let expanded = poly_to_ast(&poly);
+            if poly.len() > 1 || &expanded != node {
+                return Some(expanded);
+            }
+            return None;
+        }
+    }
+
     let mut terms = Vec::new();
     flatten_ast_terms(node, 1, &mut terms);
     if terms.len() < 2 {
@@ -2486,6 +3208,25 @@ impl AstParser {
                 return Err("Fehlende schließende Klammer ')'".to_string());
             }
             return Ok(inner);
+        }
+
+        if self.eat('[') {
+            let mut entries = Vec::new();
+            self.skip_ws();
+            if !self.eat(']') {
+                loop {
+                    entries.push(self.parse_expr()?);
+                    self.skip_ws();
+                    if self.eat(',') {
+                        continue;
+                    } else if self.eat(']') {
+                        break;
+                    } else {
+                        return Err("Erwarte ',' oder ']' in Matrix".to_string());
+                    }
+                }
+            }
+            return Ok(AstNode::Func("[]".to_string(), entries));
         }
 
         if self.eat('%') {
@@ -2712,10 +3453,7 @@ impl<'a> ExprParser<'a> {
                 self.pos += 1;
                 let v = self.parse_unary()?;
                 Ok(Value {
-                    c: Complex {
-                        re: -v.c.re,
-                        im: -v.c.im,
-                    },
+                    c: Complex::new(-v.c.re, -v.c.im),
                     rat: v.rat.map(|r| ExactRat { num: -r.num, den: r.den }),
                 })
             }
@@ -2916,8 +3654,8 @@ impl<'a> ExprParser<'a> {
                     return Err("sum(Ausdruck, Variable, Start, Ende) erwartet 4 Argumente".to_string());
                 }
                 let var = raw_args[1].trim();
-                let a = self.eval_arg(&raw_args[2], None)?.c.re.round() as i64;
-                let b = self.eval_arg(&raw_args[3], None)?.c.re.round() as i64;
+                let a = require_integer_bound(self.eval_arg(&raw_args[2], None)?, "sum")?;
+                let b = require_integer_bound(self.eval_arg(&raw_args[3], None)?, "sum")?;
                 if b - a > 100_000 {
                     return Err("Summationsbereich zu groß (max. 100 000 Schritte)".to_string());
                 }
@@ -2934,8 +3672,8 @@ impl<'a> ExprParser<'a> {
                     return Err("prod(Ausdruck, Variable, Start, Ende) erwartet 4 Argumente".to_string());
                 }
                 let var = raw_args[1].trim();
-                let a = self.eval_arg(&raw_args[2], None)?.c.re.round() as i64;
-                let b = self.eval_arg(&raw_args[3], None)?.c.re.round() as i64;
+                let a = require_integer_bound(self.eval_arg(&raw_args[2], None)?, "prod")?;
+                let b = require_integer_bound(self.eval_arg(&raw_args[3], None)?, "prod")?;
                 if b - a > 100_000 {
                     return Err("Produktbereich zu groß".to_string());
                 }
@@ -2966,6 +3704,26 @@ impl<'a> ExprParser<'a> {
                 let expr_str = raw_args[0].clone();
                 let engine_ref = self.engine;
 
+                let prev_depth = INTEGRATION_DEPTH.with(|d| {
+                    let prev = d.get();
+                    d.set(prev + 1);
+                    prev
+                });
+                struct IntegrationDepthGuard(usize);
+                impl Drop for IntegrationDepthGuard {
+                    fn drop(&mut self) {
+                        INTEGRATION_DEPTH.with(|d| d.set(self.0));
+                    }
+                }
+                let _guard = IntegrationDepthGuard(prev_depth);
+                let has_inner_int = expr_str.contains("int(") || expr_str.contains("defint(");
+                let has_trig = expr_str.contains("sin") || expr_str.contains("cos") || expr_str.contains("tan");
+                let initial_subintervals = if prev_depth > 0 || has_inner_int || !has_trig {
+                    16
+                } else {
+                    500
+                };
+
                 let report = adaptive_gauss_integrate(
                     |x| {
                         let mut local = base_ov.clone();
@@ -2983,7 +3741,7 @@ impl<'a> ExprParser<'a> {
                     },
                     a,
                     b,
-                    2500,
+                    initial_subintervals,
                     1e-10,
                     1e-8,
                 )?;
@@ -2998,7 +3756,11 @@ impl<'a> ExprParser<'a> {
                     return Err("Symbolic derivative handled in preview".to_string());
                 }
                 let var = raw_args[1].trim();
-                let x0 = self.eval_arg(&raw_args[2], None)?.c.re;
+                let x0_val = self.eval_arg(&raw_args[2], None)?;
+                if !x0_val.c.is_real() || !x0_val.c.re.is_finite() {
+                    return Err("Ableitungsstelle muss eine endliche reelle Zahl sein".to_string());
+                }
+                let x0 = x0_val.c.re;
                 let h = if x0.abs() > 1e10 {
                     1e-3 * x0.abs()
                 } else if x0.abs() > 1e4 {
@@ -3007,16 +3769,24 @@ impl<'a> ExprParser<'a> {
                     1e-4
                 };
                 let mut ov = self.overrides.cloned().unwrap_or_default();
-                ov.insert(var.to_string(), Value::from_f64(x0 + 2.0 * h));
-                let f_p2 = self.eval_arg(&raw_args[0], Some(&ov))?.c.re;
-                ov.insert(var.to_string(), Value::from_f64(x0 + h));
-                let f_p1 = self.eval_arg(&raw_args[0], Some(&ov))?.c.re;
-                ov.insert(var.to_string(), Value::from_f64(x0 - h));
-                let f_m1 = self.eval_arg(&raw_args[0], Some(&ov))?.c.re;
-                ov.insert(var.to_string(), Value::from_f64(x0 - 2.0 * h));
-                let f_m2 = self.eval_arg(&raw_args[0], Some(&ov))?.c.re;
+                let mut eval_real_at = |x: f64| -> Result<f64, String> {
+                    ov.insert(var.to_string(), Value::from_f64(x));
+                    let val = self.eval_arg(&raw_args[0], Some(&ov))?;
+                    if !val.c.is_real() || !val.c.re.is_finite() {
+                        return Err("Funktion an der Stelle nicht reell differenzierbar".to_string());
+                    }
+                    Ok(val.c.re)
+                };
+                eval_real_at(x0)?;
+                let f_p2 = eval_real_at(x0 + 2.0 * h)?;
+                let f_p1 = eval_real_at(x0 + h)?;
+                let f_m1 = eval_real_at(x0 - h)?;
+                let f_m2 = eval_real_at(x0 - 2.0 * h)?;
                 let deriv_val = (-f_p2 + 8.0 * f_p1 - 8.0 * f_m1 + f_m2) / (12.0 * h);
                 return Ok(Value::from_f64(deriv_val));
+            }
+            "integral" => {
+                return Err("Symbolische Integration nicht möglich".to_string());
             }
             _ => {}
         }
@@ -3058,9 +3828,40 @@ impl<'a> ExprParser<'a> {
                     Ok(Value::from_complex(v0.c.tan()))
                 }
             }
-            "asin" | "arcsin" => Ok(Value::from_f64(mode.from_radians(v0.c.re.asin()))),
-            "acos" | "arccos" => Ok(Value::from_f64(mode.from_radians(v0.c.re.acos()))),
-            "atan" | "arctan" => Ok(Value::from_f64(mode.from_radians(v0.c.re.atan()))),
+            "asin" | "arcsin" => {
+                if v0.c.is_real() && v0.c.re.abs() <= 1.0 {
+                    Ok(Value::from_f64(mode.from_radians(v0.c.re.asin())))
+                } else {
+                    let z = v0.c;
+                    let one = Complex::real(1.0);
+                    let inside = Complex::i().mul(z).add(one.sub(z.mul(z)).sqrt());
+                    let res = Complex::new(0.0, -1.0).mul(inside.ln());
+                    Ok(Value::from_complex(res))
+                }
+            }
+            "acos" | "arccos" => {
+                if v0.c.is_real() && v0.c.re.abs() <= 1.0 {
+                    Ok(Value::from_f64(mode.from_radians(v0.c.re.acos())))
+                } else {
+                    let z = v0.c;
+                    let one = Complex::real(1.0);
+                    let inside = Complex::i().mul(z).add(one.sub(z.mul(z)).sqrt());
+                    let asin_z = Complex::new(0.0, -1.0).mul(inside.ln());
+                    let res = Complex::real(std::f64::consts::FRAC_PI_2).sub(asin_z);
+                    Ok(Value::from_complex(res))
+                }
+            }
+            "atan" | "arctan" => {
+                if v0.c.is_real() {
+                    Ok(Value::from_f64(mode.from_radians(v0.c.re.atan())))
+                } else {
+                    let iz = Complex::i().mul(v0.c);
+                    let one = Complex::real(1.0);
+                    let quot = one.sub(iz).div(one.add(iz));
+                    let res = Complex::new(0.0, 0.5).mul(quot.ln());
+                    Ok(Value::from_complex(res))
+                }
+            }
             "sinh" => {
                 if v0.c.is_real() {
                     Ok(Value::from_f64(v0.c.re.sinh()))
@@ -3082,9 +3883,25 @@ impl<'a> ExprParser<'a> {
                     Ok(Value::from_complex(v0.c.tanh()))
                 }
             }
-            "asinh" | "arcsinh" => Ok(Value::from_f64(v0.c.re.asinh())),
-            "acosh" | "arccosh" => Ok(Value::from_f64(v0.c.re.acosh())),
-            "atanh" | "arctanh" => Ok(Value::from_f64(v0.c.re.atanh())),
+            "asinh" | "arcsinh" => {
+                let z = v0.c;
+                Ok(Value::from_complex(
+                    z.add(z.mul(z).add(Complex::real(1.0)).sqrt()).ln(),
+                ))
+            }
+            "acosh" | "arccosh" => {
+                let z = v0.c;
+                Ok(Value::from_complex(
+                    z.add(z.mul(z).sub(Complex::real(1.0)).sqrt()).ln(),
+                ))
+            }
+            "atanh" | "arctanh" => {
+                let z = v0.c;
+                let one = Complex::real(1.0);
+                Ok(Value::from_complex(
+                    Complex::real(0.5).mul(one.add(z).div(one.sub(z)).ln()),
+                ))
+            }
             "sqrt" => Ok(v0.sqrt()),
             "fraction" | "division" => {
                 let v1 = vals
@@ -3149,12 +3966,54 @@ impl<'a> ExprParser<'a> {
             "arg" => Ok(Value::from_f64(mode.from_radians(v0.c.arg()))),
             "re" => Ok(Value::from_f64(v0.c.re)),
             "im" => Ok(Value::from_f64(v0.c.im)),
+            "floor" => {
+                if !v0.c.is_real() || !v0.c.re.is_finite() {
+                    return Err("floor erfordert endliche reelle Zahl".to_string());
+                }
+                if let Some(r) = v0.rat {
+                    return Ok(Value::from_int(r.num.div_euclid(r.den)));
+                }
+                Ok(Value::from_int(v0.c.re.floor() as i128))
+            }
+            "ceil" => {
+                if !v0.c.is_real() || !v0.c.re.is_finite() {
+                    return Err("ceil erfordert endliche reelle Zahl".to_string());
+                }
+                if let Some(r) = v0.rat {
+                    let q = r.num.div_euclid(r.den);
+                    let rem = r.num.rem_euclid(r.den);
+                    return Ok(Value::from_int(if rem > 0 { q + 1 } else { q }));
+                }
+                Ok(Value::from_int(v0.c.re.ceil() as i128))
+            }
+            "round" => {
+                if !v0.c.is_real() || !v0.c.re.is_finite() {
+                    return Err("round erfordert endliche reelle Zahl".to_string());
+                }
+                Ok(Value::from_int(v0.c.re.round() as i128))
+            }
+            "sign" | "sgn" => {
+                if !v0.c.is_real() || !v0.c.re.is_finite() {
+                    return Err("sign erfordert endliche reelle Zahl".to_string());
+                }
+                let s = if v0.c.re > 0.0 {
+                    1
+                } else if v0.c.re < 0.0 {
+                    -1
+                } else {
+                    0
+                };
+                Ok(Value::from_int(s))
+            }
             "binomial" | "nCr" => {
                 let v1 = vals
                     .get(1)
                     .copied()
                     .ok_or_else(|| "binomial(n, k) benötigt 2 Argumente".to_string())?;
-                Ok(Value::from_f64(binomial_coeff(v0.c.re, v1.c.re)))
+                if !v0.c.is_real() || !v1.c.is_real() {
+                    return Err("binomial erfordert endliche reelle Argumente".to_string());
+                }
+                Ok(Value::from_f64(binomial_coeff(v0.c.re, v1.c.re)?))
             }
             "mod" => {
                 let v1 = vals
@@ -3271,18 +4130,59 @@ fn lanczos_gamma(z: f64) -> f64 {
     (2.0 * std::f64::consts::PI).sqrt() * t.powf(z + 0.5) * (-t).exp() * x
 }
 
-fn binomial_coeff(n: f64, k: f64) -> f64 {
-    if k < 0.0 || k > n {
-        return 0.0;
+fn require_integer_bound(v: Value, name: &str) -> Result<i64, String> {
+    if !v.c.is_real() || !v.c.re.is_finite() {
+        return Err(format!("{}-Grenze muss eine endliche ganze Zahl sein", name));
     }
-    let n_u = n.round() as u64;
-    let k_u = k.round() as u64;
-    let k_u = k_u.min(n_u - k_u);
+    if let Some(r) = v.rat {
+        if r.den != 1 {
+            return Err(format!("{}-Grenze muss ganzzahlig sein", name));
+        }
+        return i64::try_from(r.num).map_err(|_| format!("{}-Grenze außerhalb des Bereichs", name));
+    }
+    let rounded = v.c.re.round();
+    if (v.c.re - rounded).abs() > 1e-9 || rounded.abs() > 9e15 {
+        return Err(format!("{}-Grenze muss ganzzahlig sein", name));
+    }
+    Ok(rounded as i64)
+}
+
+fn binomial_coeff(n: f64, k: f64) -> Result<f64, String> {
+    let k_rounded = k.round();
+    if !n.is_finite() || !k.is_finite() || (k - k_rounded).abs() > 1e-9 || k_rounded < 0.0 {
+        return Err("binomial erfordert nicht-negatives ganzzahliges k".to_string());
+    }
+    let ku = k_rounded as u64;
+    if ku == 0 {
+        return Ok(1.0);
+    }
+    if ku > 100_000 {
+        return Err("binomial: k zu groß".to_string());
+    }
+    let n_rounded = n.round();
+    if (n - n_rounded).abs() <= 1e-9 && n_rounded >= 0.0 {
+        let nu = n_rounded as u64;
+        if ku > nu {
+            return Ok(0.0);
+        }
+        let ku = ku.min(nu - ku);
+        let mut res = 1.0_f64;
+        for i in 1..=ku {
+            res = res * ((nu - ku + i) as f64) / (i as f64);
+            if !res.is_finite() {
+                break;
+            }
+        }
+        return Ok(res);
+    }
     let mut res = 1.0_f64;
-    for i in 1..=k_u {
-        res = res * ((n_u - k_u + i) as f64) / (i as f64);
+    for i in 1..=ku {
+        res = res * (n - (ku as f64) + (i as f64)) / (i as f64);
+        if !res.is_finite() {
+            break;
+        }
     }
-    res
+    Ok(res)
 }
 
 fn try_exact_rat_ast(node: &AstNode) -> Option<ExactRat> {

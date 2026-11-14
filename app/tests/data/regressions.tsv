@@ -60,3 +60,14 @@ symbolic_fractional_power_samples	deriv(x^0.5,x)	d(x^0.5,x)	symbolic_samples	0.2
 symbolic_negative_power_samples	deriv(x^-1,x)	d(x^-1,x)	symbolic_samples	1:-1;2:-0.25;4:-0.0625	1e-8	1e-8
 symbolic_chain_serialization_samples	deriv(sin(x^2+x),x)	d(sin(x^2+x),x)	symbolic_samples	0:1;1:-1.2484405096414273;2:4.80085143325183	1e-8	1e-8
 invalid_integrand_propagates_error	int(1/0,x,0,1)	defint(1/0,x,0,1)	error	Division by zero inside the integrand must not become a converged zero integral	0	0
+sum_harmonic_1000	sum(1/k,k,1,1000)	sum(1/k,k,1,1000)	number	7.485470860550345	1e-9	1e-9
+nested_integral	int(int(x*y,y,0,1),x,0,1)	defint(defint(x*y,y,0,1),x,0,1)	number	0.25	1e-8	1e-8
+large_int_power_cancel	2^64+1-2^64	2^64+1-2^64	number	1	0	0
+matrix_multiply	[[1,2],[3,4]]*[[5,6],[7,8]]	[[1,2],[3,4]]*[[5,6],[7,8]]	exact	[[19,22],[43,50]]	0	0
+symbolic_sin_2x_integral	integral(sin(2*x),x)	integral(sin(2*x),x)	exact	-cos(2*x)/2|-1/2*cos(2*x)|(-cos(2*x))/2|-(cos(2*x))/2|-0.5*cos(2*x)	0	0
+symbolic_sqrt_integral	integral(sqrt(x),x)	integral(sqrt(x),x)	exact	2/3*x^(3/2)|2*x^(3/2)/3|(2*x^(3/2))/3|(2/3)*x^(3/2)	0	0
+binomial_fractional	binomial(5.5,2)	binomial(5.5,2)	number	12.375	1e-12	1e-12
+sum_non_integer_bound	sum(k,k,1,2.5)	sum(k,k,1,2.5)	error	Non-integer sum bounds must be rejected	0	0
+deriv_domain_boundary	deriv(sqrt(x),x,0)	d(sqrt(x),x,0)	error	Derivative at domain boundary must be rejected	0	0
+multivar_poly_expand	(y+1)^2	(y+1)^2	exact	y^2+2*y+1|1+2*y+y^2|y^2+2y+1	0	0
+proton_less_than_neutron	m_n-m_p	m_n-m_p	number	2.3e-30	1e-35	1e-6

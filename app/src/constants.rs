@@ -32,8 +32,8 @@ pub const ATOMIC_MASS_CONST: f64 = 1.6605e-27;
 pub const FARADAY_CONST: f64 = 96485.0;
 pub const MOLAR_GAS_CONSTANT: f64 = 8.3145;
 pub const MASS_ELECTRON: f64 = 9.1094e-31;
-pub const MASS_PROTON: f64 = 1.6749e-24;
-pub const MASS_NEUTRON: f64 = 1.6726e-24;
+pub const MASS_PROTON: f64 = 1.6726e-27;
+pub const MASS_NEUTRON: f64 = 1.6749e-27;
 
 pub const PERCENT_VAR: f64 = 0.01;
 pub const SYMBOLIC_WATCHDOG_TIMEOUT_MS: u64 = 4000;
@@ -409,9 +409,9 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "m_p",
         name_de: "Protonenmasse",
         name_en: "Mass of a Proton",
-        display_value: "1.6749 × 10⁻²⁴",
+        display_value: "1.6726 × 10⁻²⁷",
         value: MASS_PROTON,
-        unit: "g",
+        unit: "kg",
         category: ConstantCategory::Chemical,
     },
     ScientificConstant {
@@ -420,9 +420,9 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "m_n",
         name_de: "Neutronenmasse",
         name_en: "Mass of a Neutron",
-        display_value: "1.6726 × 10⁻²⁴",
+        display_value: "1.6749 × 10⁻²⁷",
         value: MASS_NEUTRON,
-        unit: "g",
+        unit: "kg",
         category: ConstantCategory::Chemical,
     },
 

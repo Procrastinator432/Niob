@@ -8,7 +8,7 @@ Das Repository enthält sowohl die plattformübergreifende Rust-Desktop-Anwendun
 - **Geteilte Tastatur & Ergonomie**:
   - Großes, haptisches Ziffernfeld (separat abgerundete Numpad-Karte)
   - 5 Schnelloperatoren rechts (`⌫`, `÷`, `×`, `+`, `-`)
-  - Funktionstastatur mit Tabs für Trigonometrie (`sin`, `cos`, `tan`), Analysis (`Σ`, `∫`, `d/dx`, `lim`), Algebra & Matrizen, Konstanten und Sonderfunktionen
+  - Funktionstastatur mit Tabs für Trigonometrie (`sin`, `cos`, `tan`), Analysis (`Σ`, `∫`, `d/dx`), Algebra & Matrizen, Konstanten und Sonderfunktionen
 - **Mathematische Darstellung**:
   - Echte vertikale Bruchdarstellung (Zähler über Nenner mit zentriertem Bruchstrich)
   - Korrekte mathematische Formelzeichen und Formatierung

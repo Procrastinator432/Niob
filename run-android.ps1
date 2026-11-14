@@ -19,8 +19,16 @@ function Test-TcpPortOpen ([string]$hostIp, [int]$port, [int]$timeoutMs = 500) {
     return $false
 }
 
+function Resolve-AndroidSdk {
+    foreach ($candidate in @($env:ANDROID_HOME, $env:ANDROID_SDK_ROOT, "$env:LOCALAPPDATA\Android\Sdk")) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
+    }
+    throw "Android SDK nicht gefunden. Setze ANDROID_HOME oder ANDROID_SDK_ROOT."
+}
+
 Write-Host "`n=== [1/4] Android SDK & ADB Initialisierung ===" -ForegroundColor Cyan
-$adb = "C:\Users\brand\AppData\Local\Android\Sdk\platform-tools\adb.exe"
+$sdk = Resolve-AndroidSdk
+$adb = "$sdk\platform-tools\adb.exe"
 if (-not (Test-Path $adb)) {
     Write-Error "ADB nicht gefunden unter: $adb"
 }
@@ -41,12 +49,18 @@ if ($Device -ne "") {
     $firstDevice = ($activeDevices[0].Trim() -split "\s+")[0]
     Write-Host "Verbunden mit Geraet: $firstDevice" -ForegroundColor Green
 } else {
-    $emulatorExe = "C:\Users\brand\AppData\Local\Android\Sdk\emulator\emulator.exe"
+    $emulatorExe = "$sdk\emulator\emulator.exe"
     if (Test-Path $emulatorExe) {
         Write-Host "Starte Android Emulator (Medium_Phone_API_37.0)..." -ForegroundColor Yellow
         Start-Process $emulatorExe -ArgumentList "-avd Medium_Phone_API_37.0 -netdelay none -netspeed full"
         & $adb wait-for-device
         $firstDevice = "emulator-5554"
+        Write-Host "Warte auf Abschluss des Android-Bootvorgangs..." -ForegroundColor Yellow
+        for ($i = 0; $i -lt 60; $i++) {
+            $booted = (& $adb -s $firstDevice shell getprop sys.boot_completed 2>$null | Out-String).Trim()
+            if ($booted -eq "1") { break }
+            Start-Sleep -Seconds 2
+        }
     } else {
         Write-Host "Kein Geraet direkt aktiv. Ermittle Wireless Debugging per mDNS..." -ForegroundColor Yellow
         Start-Sleep -Milliseconds 600

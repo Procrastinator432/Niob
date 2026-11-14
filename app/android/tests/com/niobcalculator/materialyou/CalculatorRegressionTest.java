@@ -476,6 +476,44 @@ public final class CalculatorRegressionTest {
             require(engine.evaluate("det(" + matrix.reusableText + ")").value == 1.000000000001,
                     "matrix reuse and determinant must keep the difference from 1");
         });
+        add("complex_principal_branch", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            CalculatorEngine.Result lnNeg1 = engine.evaluate("ln(-1)");
+            require(!normalized(lnNeg1.decimalText).startsWith("-"),
+                    "ln(-1) must have positive imaginary part: " + lnNeg1.decimalText);
+            number(engine.evaluate("ln(-1)/i"), Math.PI, 1e-10, 1e-10);
+            number(engine.evaluate("(-1)^(1/2)/i"), 1.0, 1e-10, 1e-10);
+            number(engine.evaluate("((-8)^(1/3)-1)/i"), Math.sqrt(3.0), 1e-10, 1e-10);
+        });
+        add("degrees_symbolic_derivative", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            engine.setRadiansMode(false);
+            CalculatorEngine.Result res = engine.evaluate("deriv(sin(x),x)");
+            require(normalized(res.exactText).contains("pi/180"),
+                    "DEG derivative must contain pi/180: " + res.exactText);
+            close(engine.evaluateForX(res.exactText, 0), Math.PI / 180.0, 1e-12, 1e-12);
+        });
+        add("float_display_trims_noise_and_fast_harmonic", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            CalculatorEngine.Result num = engine.evaluate("1234567.891");
+            require(num.decimalText.equals("1234567.891"),
+                    "expected 1234567.891, got " + num.decimalText);
+            long t0 = System.nanoTime();
+            CalculatorEngine.Result sum20k = engine.evaluate("sum(1/k,k,1,20000)");
+            long elapsedMs = (System.nanoTime() - t0) / 1_000_000L;
+            close(sum20k.value, 10.4807282173, 1e-8, 1e-8);
+            require(elapsedMs < 3000, "20k harmonic sum took too long: " + elapsedMs + " ms");
+        });
+        add("matrix_3x3_multiply_and_inverse", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            CalculatorEngine.Result prod = engine.evaluate("[[1,2,3],[0,1,4],[5,6,0]]*[[1,0,2],[0,1,0],[1,1,1]]");
+            require(normalized(prod.exactText).equals("[[4,5,5],[4,5,4],[5,6,10]]"),
+                    "3x3 product mismatch: " + prod.exactText);
+            CalculatorEngine.Result exactInvProd = engine.evaluate("[[2,0,0],[0,4,0],[0,0,8]]*inv([[2,0,0],[0,4,0],[0,0,8]])");
+            require(normalized(exactInvProd.exactText).equals("[[1,0,0],[0,1,0],[0,0,1]]"),
+                    "diagonal 3x3 A*inv(A) must be identity: " + exactInvProd.exactText);
+            number(engine.evaluate("det([[1,2,3],[0,1,4],[5,6,0]]*inv([[1,2,3],[0,1,4],[5,6,0]]))"), 1.0, 1e-10, 1e-10);
+        });
     }
 
     public static void main(String[] args) throws Exception {

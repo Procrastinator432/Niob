@@ -43,13 +43,26 @@ public final class CalculatorEngine {
     public static final double FARADAY_CONST = 96485.0;
     public static final double MOLAR_GAS_CONSTANT = 8.3145;
     public static final double MASS_ELECTRON = 9.1094e-31;
-    public static final double MASS_PROTON = 1.6749e-24;
-    public static final double MASS_NEUTRON = 1.6726e-24;
+    public static final double MASS_PROTON = 1.6726e-27;
+    public static final double MASS_NEUTRON = 1.6749e-27;
     public static final double PERCENT_VAR = 0.01;
 
     public static final String[] USER_VARIABLES = {
             "a", "b", "c", "d", "k", "l", "m", "n", "x", "y", "z"
     };
+
+    private static final ThreadLocal<Long> EVAL_DEADLINE_NS = new ThreadLocal<>();
+    private static final ThreadLocal<Integer> INTEGRATION_DEPTH = ThreadLocal.withInitial(() -> 0);
+
+    private static void checkInterrupted() {
+        if (Thread.currentThread().isInterrupted()) {
+            throw new CancellationException();
+        }
+        Long deadline = EVAL_DEADLINE_NS.get();
+        if (deadline != null && System.nanoTime() > deadline) {
+            throw new RuntimeException("Zeitüberschreitung bei der Berechnung");
+        }
+    }
 
     private final Map<String, Value> variables = new HashMap<>();
     private Value lastAns = Value.fromInt(0);
@@ -116,12 +129,36 @@ public final class CalculatorEngine {
         return evaluateInternal(expression, true);
     }
 
+    public Result evaluateWithTimeout(String expression, long timeoutMs) {
+        return evaluateWithTimeoutInternal(expression, false, timeoutMs);
+    }
+
+    public Result evaluateAndCommitWithTimeout(String expression, long timeoutMs) {
+        return evaluateWithTimeoutInternal(expression, true, timeoutMs);
+    }
+
+    private Result evaluateWithTimeoutInternal(String expression, boolean commit, long timeoutMs) {
+        Long prev = EVAL_DEADLINE_NS.get();
+        long deadline = System.nanoTime() + Math.max(1L, timeoutMs) * 1_000_000L;
+        EVAL_DEADLINE_NS.set(prev != null ? Math.min(prev, deadline) : deadline);
+        try {
+            return evaluateInternal(expression, commit);
+        } finally {
+            if (prev == null) {
+                EVAL_DEADLINE_NS.remove();
+            } else {
+                EVAL_DEADLINE_NS.set(prev);
+            }
+        }
+    }
+
     private Result evaluateInternal(String rawExpr, boolean commit) {
         lastIntegrationReport = null;
         if (rawExpr == null || rawExpr.trim().isEmpty()) {
             throw new RuntimeException("Leerer Ausdruck");
         }
         String trimmed = rawExpr.trim();
+        AstNode parsedAst = AstParser.tryParse(trimmed);
 
         // 1. Variable Assignment `var := expr`
         int assignIdx = trimmed.indexOf(":=");
@@ -151,14 +188,14 @@ public final class CalculatorEngine {
         if (trimmed.startsWith("inv(")
                 || trimmed.startsWith("trans(")
                 || trimmed.startsWith("transpose(")
-                || trimmed.startsWith("[")) {
+                || trimmed.startsWith("[")
+                || (parsedAst != null && containsMatrixExpression(parsedAst))) {
             double[][] matrix = evalMatrixExpr(trimmed, null);
             String display = formatMatrix(matrix, false);
             return new Result(0.0, display, display, formatMatrix(matrix, true));
         }
 
         // 3. Symbolic calculus functions via AST
-        AstNode parsedAst = AstParser.tryParse(trimmed);
         if (parsedAst != null) {
             Result symCalc = tryEvaluateSymbolicCalculus(parsedAst);
             if (symCalc != null) {
@@ -313,6 +350,15 @@ public final class CalculatorEngine {
                 validatePlotAst(f.args.get(0), innerScope);
                 return;
             }
+            if (fn.equals("integral") && argc == 2) {
+                if (!(f.args.get(1) instanceof AstVar)) {
+                    throw new RuntimeException("Ungültige Argumente für " + fn);
+                }
+                Set<String> innerScope = new HashSet<>(scope);
+                innerScope.add(((AstVar) f.args.get(1)).name);
+                validatePlotAst(f.args.get(0), innerScope);
+                return;
+            }
             for (AstNode a : f.args) {
                 validatePlotAst(a, scope);
             }
@@ -327,6 +373,9 @@ public final class CalculatorEngine {
         switch (name) {
             case "sum": case "prod": case "product": case "int": case "defint":
                 minimum = maximum = 4;
+                break;
+            case "integral":
+                minimum = maximum = 2;
                 break;
             case "deriv": case "diff": case "d":
                 minimum = 2;
@@ -379,8 +428,68 @@ public final class CalculatorEngine {
         }
     }
 
+    private static long requireIntegerBound(Value v, String fnName) {
+        if (!v.c.isReal() || !Double.isFinite(v.c.re)) {
+            throw new RuntimeException(fnName + "-Grenze muss eine endliche ganze Zahl sein");
+        }
+        if (v.rat != null) {
+            if (!v.rat.den.equals(BigInteger.ONE)) {
+                throw new RuntimeException(fnName + "-Grenze muss ganzzahlig sein");
+            }
+            return v.rat.num.longValueExact();
+        }
+        double rounded = Math.rint(v.c.re);
+        if (Math.abs(v.c.re - rounded) > 1e-9 || Math.abs(rounded) > 9e15) {
+            throw new RuntimeException(fnName + "-Grenze muss ganzzahlig sein");
+        }
+        return Math.round(rounded);
+    }
+
+    private double evalRealDerivativeSample(AstNode expr, Map<String, Value> local, String var, double x) {
+        local.put(var, Value.fromFloat(x));
+        Value val = evalAst(expr, local);
+        if (!val.c.isReal() || !Double.isFinite(val.c.re)) {
+            throw new RuntimeException("Funktion an der Stelle nicht reell differenzierbar");
+        }
+        return val.c.re;
+    }
+
+    private static boolean hasTrigFunction(AstNode node) {
+        if (node instanceof AstNeg) return hasTrigFunction(((AstNeg) node).inner);
+        if (node instanceof AstAdd) return hasTrigFunction(((AstAdd) node).left) || hasTrigFunction(((AstAdd) node).right);
+        if (node instanceof AstSub) return hasTrigFunction(((AstSub) node).left) || hasTrigFunction(((AstSub) node).right);
+        if (node instanceof AstMul) return hasTrigFunction(((AstMul) node).left) || hasTrigFunction(((AstMul) node).right);
+        if (node instanceof AstDiv) return hasTrigFunction(((AstDiv) node).left) || hasTrigFunction(((AstDiv) node).right);
+        if (node instanceof AstPow) return hasTrigFunction(((AstPow) node).base) || hasTrigFunction(((AstPow) node).exp);
+        if (node instanceof AstFunc) {
+            AstFunc f = (AstFunc) node;
+            if (f.name.equals("sin") || f.name.equals("cos") || f.name.equals("tan")) return true;
+            for (AstNode a : f.args) {
+                if (hasTrigFunction(a)) return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean containsIntegralNode(AstNode node) {
+        if (node instanceof AstNeg) return containsIntegralNode(((AstNeg) node).inner);
+        if (node instanceof AstAdd) return containsIntegralNode(((AstAdd) node).left) || containsIntegralNode(((AstAdd) node).right);
+        if (node instanceof AstSub) return containsIntegralNode(((AstSub) node).left) || containsIntegralNode(((AstSub) node).right);
+        if (node instanceof AstMul) return containsIntegralNode(((AstMul) node).left) || containsIntegralNode(((AstMul) node).right);
+        if (node instanceof AstDiv) return containsIntegralNode(((AstDiv) node).left) || containsIntegralNode(((AstDiv) node).right);
+        if (node instanceof AstPow) return containsIntegralNode(((AstPow) node).base) || containsIntegralNode(((AstPow) node).exp);
+        if (node instanceof AstFunc) {
+            AstFunc f = (AstFunc) node;
+            if (f.name.equals("int") || f.name.equals("defint")) return true;
+            for (AstNode a : f.args) {
+                if (containsIntegralNode(a)) return true;
+            }
+        }
+        return false;
+    }
+
     private Value evalAst(AstNode node, Map<String, Value> ov) {
-        if (Thread.currentThread().isInterrupted()) throw new CancellationException();
+        checkInterrupted();
         if (node instanceof AstNum) return ((AstNum) node).val;
         if (node instanceof AstVar) {
             return resolveVar(((AstVar) node).name, ov);
@@ -410,15 +519,17 @@ public final class CalculatorEngine {
             boolean sum = fn.equals("sum");
             if ((sum || fn.equals("prod") || fn.equals("product")) && f.args.size() == 4) {
                 String v = calculusVariable(f.args.get(1).toDisplayString());
-                long a = Math.round(evalAst(f.args.get(2), ov).c.re);
-                long b = Math.round(evalAst(f.args.get(3), ov).c.re);
+                long a = requireIntegerBound(evalAst(f.args.get(2), ov), fn);
+                long b = requireIntegerBound(evalAst(f.args.get(3), ov), fn);
                 if (a <= Long.MAX_VALUE - 100000 && b > a + 100000) {
                     throw new RuntimeException(sum ? "Summationsbereich zu groß" : "Produktbereich zu groß");
                 }
                 Value result = Value.fromInt(sum ? 0 : 1);
                 if (a > b) return result;
                 Map<String, Value> local = ov != null ? new HashMap<>(ov) : new HashMap<>();
+                int iter = 0;
                 for (long k = a; ; k++) {
+                    if ((++iter & 255) == 0) checkInterrupted();
                     local.put(v, Value.fromInt(k));
                     Value term = evalAst(f.args.get(0), local);
                     result = sum ? result.add(term) : result.mul(term);
@@ -433,35 +544,51 @@ public final class CalculatorEngine {
                     throw new RuntimeException("Integrationsgrenzen müssen endliche reelle Zahlen sein");
                 }
                 Map<String, Value> local = ov != null ? new HashMap<>(ov) : new HashMap<>();
-                IntegrationReport report = adaptiveGaussIntegrate(x -> {
-                    local.put(v, Value.fromFloat(x));
-                    Value val = evalAst(f.args.get(0), local);
-                    if (!val.c.isReal() || !Double.isFinite(val.c.re)) {
-                        throw new RuntimeException("Integrand liefert nicht-reellen oder unendlichen Wert");
-                    }
-                    return val.c.re;
-                }, aVal.c.re, bVal.c.re, 2500, 1e-10, 1e-8);
-                lastIntegrationReport = report;
-                return Value.fromFloat(report.value);
+                int prevDepth = INTEGRATION_DEPTH.get();
+                boolean hasInnerInt = containsIntegralNode(f.args.get(0));
+                boolean hasTrig = hasTrigFunction(f.args.get(0));
+                int initialSubintervals = (prevDepth > 0 || hasInnerInt || !hasTrig) ? 16 : 500;
+                INTEGRATION_DEPTH.set(prevDepth + 1);
+                try {
+                    IntegrationReport report = adaptiveGaussIntegrate(x -> {
+                        local.put(v, Value.fromFloat(x));
+                        Value val = evalAst(f.args.get(0), local);
+                        if (!val.c.isReal() || !Double.isFinite(val.c.re)) {
+                            throw new RuntimeException("Integrand liefert nicht-reellen oder unendlichen Wert");
+                        }
+                        return val.c.re;
+                    }, aVal.c.re, bVal.c.re, initialSubintervals, 1e-10, 1e-8);
+                    lastIntegrationReport = report;
+                    return Value.fromFloat(report.value);
+                } finally {
+                    INTEGRATION_DEPTH.set(prevDepth);
+                }
+            }
+            if (fn.equals("integral") && f.args.size() == 2) {
+                String v = calculusVariable(f.args.get(1).toDisplayString());
+                AstNode iNode = f.args.get(0).integrate(v);
+                if (iNode == null) throw new RuntimeException("Symbolische Integration nicht möglich");
+                return evalAst(iNode, ov);
             }
             if ((fn.equals("deriv") || fn.equals("diff") || fn.equals("d")) && f.args.size() >= 2) {
                 String v = calculusVariable(f.args.get(1).toDisplayString());
                 if (f.args.size() == 2) {
-                    AstNode dNode = f.args.get(0).diff(v);
+                    AstNode dNode = f.args.get(0).diff(v, radiansMode);
                     if (dNode == null) throw new RuntimeException("Symbolische Ableitung nicht möglich");
                     return evalAst(dNode, ov);
                 }
-                double x0 = evalAst(f.args.get(2), ov).c.re;
+                Value x0Val = evalAst(f.args.get(2), ov);
+                if (!x0Val.c.isReal() || !Double.isFinite(x0Val.c.re)) {
+                    throw new RuntimeException("Ableitungsstelle muss eine endliche reelle Zahl sein");
+                }
+                double x0 = x0Val.c.re;
                 double h = (Math.abs(x0) > 1e10) ? (1e-3 * Math.abs(x0)) : ((Math.abs(x0) > 1e4) ? 1e-3 : 1e-4);
                 Map<String, Value> local = ov != null ? new HashMap<>(ov) : new HashMap<>();
-                local.put(v, Value.fromFloat(x0 + 2.0 * h));
-                double fp2 = evalAst(f.args.get(0), local).c.re;
-                local.put(v, Value.fromFloat(x0 + h));
-                double fp1 = evalAst(f.args.get(0), local).c.re;
-                local.put(v, Value.fromFloat(x0 - h));
-                double fm1 = evalAst(f.args.get(0), local).c.re;
-                local.put(v, Value.fromFloat(x0 - 2.0 * h));
-                double fm2 = evalAst(f.args.get(0), local).c.re;
+                evalRealDerivativeSample(f.args.get(0), local, v, x0);
+                double fp2 = evalRealDerivativeSample(f.args.get(0), local, v, x0 + 2.0 * h);
+                double fp1 = evalRealDerivativeSample(f.args.get(0), local, v, x0 + h);
+                double fm1 = evalRealDerivativeSample(f.args.get(0), local, v, x0 - h);
+                double fm2 = evalRealDerivativeSample(f.args.get(0), local, v, x0 - 2.0 * h);
                 return Value.fromFloat((-fp2 + 8.0 * fp1 - 8.0 * fm1 + fm2) / (12.0 * h));
             }
             if (fn.equals("det") && f.args.size() == 1) {
@@ -671,7 +798,19 @@ public final class CalculatorEngine {
         }
 
         double toDouble() {
-            return num.doubleValue() / den.doubleValue();
+            double n = num.doubleValue();
+            double d = den.doubleValue();
+            if (Double.isFinite(n) && Double.isFinite(d) && d != 0.0
+                    && (n != 0.0 || num.signum() == 0)) {
+                return n / d;
+            }
+            try {
+                return new java.math.BigDecimal(num)
+                        .divide(new java.math.BigDecimal(den), java.math.MathContext.DECIMAL128)
+                        .doubleValue();
+            } catch (ArithmeticException e) {
+                return n / d;
+            }
         }
     }
 
@@ -681,15 +820,19 @@ public final class CalculatorEngine {
         final double im;
 
         Complex(double re, double im) {
-            this.re = re;
-            this.im = im;
+            this.re = (re == 0.0) ? 0.0 : re;
+            this.im = (im == 0.0) ? 0.0 : im;
         }
 
         static Complex real(double r) { return new Complex(r, 0.0); }
         static Complex i() { return new Complex(0.0, 1.0); }
         boolean isReal() { return Math.abs(im) < 1e-12; }
         double abs() { return Math.hypot(re, im); }
-        double arg() { return Math.atan2(im, re); }
+        double arg() {
+            double cleanIm = Math.abs(im) == 0.0 ? 0.0 : im;
+            double cleanRe = re == 0.0 ? 0.0 : re;
+            return Math.atan2(cleanIm, cleanRe);
+        }
 
         Complex negate() { return new Complex(-re, -im); }
         Complex add(Complex o) { return new Complex(re + o.re, im + o.im); }
@@ -775,25 +918,36 @@ public final class CalculatorEngine {
             return new Value(c, null);
         }
 
+        private static Value fromExactRat(ExactRat r) {
+            double d = r.toDouble();
+            if (!r.den.equals(BigInteger.ONE) && (r.den.bitLength() > 256 || r.num.bitLength() > 1024)) {
+                return new Value(Complex.real(d), null);
+            }
+            return new Value(Complex.real(d), r);
+        }
+
         Value add(Value o) {
             ExactRat r = (rat != null && o.rat != null) ? rat.add(o.rat) : null;
-            Complex res = c.add(o.c);
-            if (r != null && res.isReal()) res = Complex.real(r.toDouble());
-            return new Value(res, r);
+            if (r != null && c.isReal() && o.c.isReal()) {
+                return fromExactRat(r);
+            }
+            return new Value(c.add(o.c), null);
         }
 
         Value sub(Value o) {
             ExactRat r = (rat != null && o.rat != null) ? rat.sub(o.rat) : null;
-            Complex res = c.sub(o.c);
-            if (r != null && res.isReal()) res = Complex.real(r.toDouble());
-            return new Value(res, r);
+            if (r != null && c.isReal() && o.c.isReal()) {
+                return fromExactRat(r);
+            }
+            return new Value(c.sub(o.c), null);
         }
 
         Value mul(Value o) {
             ExactRat r = (rat != null && o.rat != null) ? rat.mul(o.rat) : null;
-            Complex res = c.mul(o.c);
-            if (r != null && res.isReal()) res = Complex.real(r.toDouble());
-            return new Value(res, r);
+            if (r != null && c.isReal() && o.c.isReal()) {
+                return fromExactRat(r);
+            }
+            return new Value(c.mul(o.c), null);
         }
 
         Value div(Value o) {
@@ -801,29 +955,43 @@ public final class CalculatorEngine {
                 throw new ArithmeticException("Division by zero");
             }
             ExactRat r = (rat != null && o.rat != null) ? rat.div(o.rat) : null;
+            if (r != null && c.isReal() && o.c.isReal()) {
+                return fromExactRat(r);
+            }
             Complex res = c.div(o.c);
             if (!Double.isFinite(res.re) || !Double.isFinite(res.im)) {
                 throw new ArithmeticException("Division by zero");
             }
-            if (r != null && res.isReal()) res = Complex.real(r.toDouble());
-            return new Value(res, r);
+            return new Value(res, null);
         }
 
         Value pow(Value exp) {
             if (rat != null && exp.rat != null && exp.rat.den.equals(BigInteger.ONE)) {
+                Integer pObj = null;
                 try {
-                    int p = exp.rat.num.intValueExact();
-                    if (p >= -20 && p <= 20) {
+                    pObj = exp.rat.num.intValueExact();
+                } catch (ArithmeticException ignored) {}
+                if (pObj != null) {
+                    int p = pObj;
+                    int ap = Math.abs(p);
+                    if (p < 0 && rat.num.signum() == 0) {
+                        throw new ArithmeticException("Division by zero");
+                    }
+                    int maxBits = rat.den.equals(BigInteger.ONE) ? 16384 : 4096;
+                    long estBits = (long) Math.max(rat.num.bitLength(), rat.den.bitLength()) * (long) ap;
+                    if (ap <= 1000 && estBits <= maxBits) {
                         if (p >= 0) {
                             ExactRat r = new ExactRat(rat.num.pow(p), rat.den.pow(p));
-                            return new Value(Complex.real(r.toDouble()), r);
+                            return fromExactRat(r);
                         } else {
-                            int ap = -p;
                             ExactRat r = new ExactRat(rat.den.pow(ap), rat.num.pow(ap));
-                            return new Value(Complex.real(r.toDouble()), r);
+                            return fromExactRat(r);
                         }
                     }
-                } catch (ArithmeticException ignored) {}
+                }
+            }
+            if (c.abs() == 0.0 && exp.c.re < 0.0) {
+                throw new ArithmeticException("Division by zero");
             }
             return new Value(c.pow(exp.c), null);
         }
@@ -1166,6 +1334,7 @@ public final class CalculatorEngine {
     }
 
     private static Subinterval evalSubinterval(IntegrandFunc f, double ia, double ib) {
+        checkInterrupted();
         double h = ib - ia;
         double halfH = h * 0.5;
         double mid = ia + halfH;
@@ -1216,6 +1385,7 @@ public final class CalculatorEngine {
         double targetTol = Math.max(epsAbs, epsRel * Math.abs(totalVal));
 
         while (totalErr > targetTol && evals < maxEvals) {
+            checkInterrupted();
             int worstIdx = 0;
             double worstErr = intervals.get(0).err;
             for (int i = 1; i < intervals.size(); i++) {
@@ -1265,24 +1435,39 @@ public final class CalculatorEngine {
         return name;
     }
 
+    private double evalRealDerivativeSampleExpr(String expr, Map<String, Value> local, String var, double x) {
+        local.put(var, Value.fromFloat(x));
+        Value val = evalExpression(expr, local);
+        if (!val.c.isReal() || !Double.isFinite(val.c.re)) {
+            throw new RuntimeException("Funktion an der Stelle nicht reell differenzierbar");
+        }
+        return val.c.re;
+    }
+
     private Value applyFunction(String fn, List<String> args, Map<String, Value> ov) {
+        checkInterrupted();
         validateFunctionArity(fn, args.size());
         if (fn.equals("det") && args.size() == 1) {
             return Value.fromFloat(matrixDet(evalMatrixExpr(args.get(0), ov)));
+        }
+        if (fn.equals("integral") && args.size() == 2) {
+            throw new RuntimeException("Symbolische Integration nicht möglich");
         }
 
         boolean sum = fn.equals("sum");
         if ((sum || fn.equals("prod") || fn.equals("product")) && args.size() == 4) {
             String v = calculusVariable(args.get(1));
-            long a = Math.round(evalExpression(args.get(2), ov).c.re);
-            long b = Math.round(evalExpression(args.get(3), ov).c.re);
+            long a = requireIntegerBound(evalExpression(args.get(2), ov), fn);
+            long b = requireIntegerBound(evalExpression(args.get(3), ov), fn);
             if (a <= Long.MAX_VALUE - 100000 && b > a + 100000) {
                 throw new RuntimeException(sum ? "Summationsbereich zu groß" : "Produktbereich zu groß");
             }
             Value result = Value.fromInt(sum ? 0 : 1);
             if (a > b) return result;
             Map<String, Value> local = ov != null ? new HashMap<>(ov) : new HashMap<>();
+            int iter = 0;
             for (long k = a; ; k++) {
+                if ((++iter & 255) == 0) checkInterrupted();
                 local.put(v, Value.fromInt(k));
                 Value term = evalExpression(args.get(0), local);
                 result = sum ? result.add(term) : result.mul(term);
@@ -1301,16 +1486,25 @@ public final class CalculatorEngine {
             double b = bVal.c.re;
             String exprStr = args.get(0);
             Map<String, Value> local = ov != null ? new HashMap<>(ov) : new HashMap<>();
-            IntegrationReport report = adaptiveGaussIntegrate(x -> {
-                local.put(v, Value.fromFloat(x));
-                Value val = evalExpression(exprStr, local);
-                if (!val.c.isReal() || !Double.isFinite(val.c.re)) {
-                    throw new RuntimeException("Integrand liefert nicht-reellen oder unendlichen Wert");
-                }
-                return val.c.re;
-            }, a, b, 2500, 1e-10, 1e-8);
-            lastIntegrationReport = report;
-            return Value.fromFloat(report.value);
+            int prevDepth = INTEGRATION_DEPTH.get();
+            boolean hasInnerInt = exprStr.contains("int(") || exprStr.contains("defint(");
+            boolean hasTrig = exprStr.contains("sin") || exprStr.contains("cos") || exprStr.contains("tan");
+            int initialSubintervals = (prevDepth > 0 || hasInnerInt || !hasTrig) ? 16 : 500;
+            INTEGRATION_DEPTH.set(prevDepth + 1);
+            try {
+                IntegrationReport report = adaptiveGaussIntegrate(x -> {
+                    local.put(v, Value.fromFloat(x));
+                    Value val = evalExpression(exprStr, local);
+                    if (!val.c.isReal() || !Double.isFinite(val.c.re)) {
+                        throw new RuntimeException("Integrand liefert nicht-reellen oder unendlichen Wert");
+                    }
+                    return val.c.re;
+                }, a, b, initialSubintervals, 1e-10, 1e-8);
+                lastIntegrationReport = report;
+                return Value.fromFloat(report.value);
+            } finally {
+                INTEGRATION_DEPTH.set(prevDepth);
+            }
         }
 
         if ((fn.equals("deriv") || fn.equals("diff") || fn.equals("d")) && args.size() >= 2) {
@@ -1318,18 +1512,19 @@ public final class CalculatorEngine {
                 throw new RuntimeException("Symbolische Ableitung erforderlich");
             }
             String v = calculusVariable(args.get(1));
-            double x0 = evalExpression(args.get(2), ov).c.re;
+            Value x0Val = evalExpression(args.get(2), ov);
+            if (!x0Val.c.isReal() || !Double.isFinite(x0Val.c.re)) {
+                throw new RuntimeException("Ableitungsstelle muss eine endliche reelle Zahl sein");
+            }
+            double x0 = x0Val.c.re;
             double h = (Math.abs(x0) > 1e10) ? (1e-3 * Math.abs(x0)) : ((Math.abs(x0) > 1e4) ? 1e-3 : 1e-4);
 
             Map<String, Value> local = ov != null ? new HashMap<>(ov) : new HashMap<>();
-            local.put(v, Value.fromFloat(x0 + 2.0 * h));
-            double fp2 = evalExpression(args.get(0), local).c.re;
-            local.put(v, Value.fromFloat(x0 + h));
-            double fp1 = evalExpression(args.get(0), local).c.re;
-            local.put(v, Value.fromFloat(x0 - h));
-            double fm1 = evalExpression(args.get(0), local).c.re;
-            local.put(v, Value.fromFloat(x0 - 2.0 * h));
-            double fm2 = evalExpression(args.get(0), local).c.re;
+            evalRealDerivativeSampleExpr(args.get(0), local, v, x0);
+            double fp2 = evalRealDerivativeSampleExpr(args.get(0), local, v, x0 + 2.0 * h);
+            double fp1 = evalRealDerivativeSampleExpr(args.get(0), local, v, x0 + h);
+            double fm1 = evalRealDerivativeSampleExpr(args.get(0), local, v, x0 - h);
+            double fm2 = evalRealDerivativeSampleExpr(args.get(0), local, v, x0 - 2.0 * h);
 
             double deriv = (-fp2 + 8.0 * fp1 - 8.0 * fm1 + fm2) / (12.0 * h);
             return Value.fromFloat(deriv);
@@ -1500,6 +1695,10 @@ public final class CalculatorEngine {
             case "binomial":
             case "nCr": {
                 Value v1 = argVals.get(1);
+                if (!v0.c.isReal() || !v1.c.isReal()
+                        || !Double.isFinite(v0.c.re) || !Double.isFinite(v1.c.re)) {
+                    throw new RuntimeException("binomial erfordert endliche reelle Zahlen");
+                }
                 return Value.fromFloat(binomialCoeff(v0.c.re, v1.c.re));
             }
             default:
@@ -1508,13 +1707,29 @@ public final class CalculatorEngine {
     }
 
     private double binomialCoeff(double n, double k) {
-        if (k < 0.0 || k > n) return 0.0;
-        long nu = Math.round(n);
-        long ku = Math.round(k);
-        ku = Math.min(ku, nu - ku);
+        double kRounded = Math.rint(k);
+        if (!Double.isFinite(n) || !Double.isFinite(k)
+                || Math.abs(k - kRounded) > 1e-9 || kRounded < 0.0) {
+            throw new RuntimeException("binomial erfordert nicht-negatives ganzzahliges k");
+        }
+        long ku = Math.round(kRounded);
+        if (ku == 0) return 1.0;
+        if (ku > 100000) throw new RuntimeException("binomial: k zu groß");
+        double nRounded = Math.rint(n);
+        if (Math.abs(n - nRounded) <= 1e-9 && nRounded >= 0.0) {
+            long nu = Math.round(nRounded);
+            if (ku > nu) return 0.0;
+            ku = Math.min(ku, nu - ku);
+            double res = 1.0;
+            for (long i = 1; i <= ku; i++) {
+                res = res * (double) (nu - ku + i) / (double) i;
+                if (!Double.isFinite(res)) break;
+            }
+            return res;
+        }
         double res = 1.0;
         for (long i = 1; i <= ku; i++) {
-            res *= (nu - ku + i) / (double) i;
+            res = res * (n - (double) ku + (double) i) / (double) i;
             if (!Double.isFinite(res)) break;
         }
         return res;
@@ -1564,8 +1779,68 @@ public final class CalculatorEngine {
         return inv;
     }
 
+    private static boolean containsMatrixExpression(AstNode node) {
+        if (node instanceof AstNeg) return containsMatrixExpression(((AstNeg) node).inner);
+        if (node instanceof AstAdd) return containsMatrixExpression(((AstAdd) node).left) || containsMatrixExpression(((AstAdd) node).right);
+        if (node instanceof AstSub) return containsMatrixExpression(((AstSub) node).left) || containsMatrixExpression(((AstSub) node).right);
+        if (node instanceof AstMul) return containsMatrixExpression(((AstMul) node).left) || containsMatrixExpression(((AstMul) node).right);
+        if (node instanceof AstDiv) return containsMatrixExpression(((AstDiv) node).left) || containsMatrixExpression(((AstDiv) node).right);
+        if (node instanceof AstPow) return containsMatrixExpression(((AstPow) node).base) || containsMatrixExpression(((AstPow) node).exp);
+        if (node instanceof AstFunc) {
+            AstFunc f = (AstFunc) node;
+            if (f.name.equals("det")) return false;
+            if (f.name.equals("[]") || isMatrixTransform(f)) return true;
+            for (AstNode a : f.args) {
+                if (containsMatrixExpression(a)) return true;
+            }
+        }
+        return false;
+    }
+
+    private static double[][] multiplyMatrices(double[][] left, double[][] right) {
+        int rows = left.length;
+        int inner = left[0].length;
+        if (right.length != inner) {
+            throw new RuntimeException("Matrixdimensionen inkompatibel");
+        }
+        int cols = right[0].length;
+        double[][] result = new double[rows][cols];
+        for (int r = 0; r < rows; r++) {
+            for (int c = 0; c < cols; c++) {
+                double sum = 0.0;
+                for (int k = 0; k < inner; k++) {
+                    sum += left[r][k] * right[k][c];
+                }
+                result[r][c] = sum;
+            }
+        }
+        return result;
+    }
+
+    private static double[][] scaleMatrix(double[][] m, double s) {
+        double[][] res = new double[m.length][m[0].length];
+        for (int r = 0; r < m.length; r++) {
+            for (int c = 0; c < m[r].length; c++) {
+                res[r][c] = m[r][c] * s;
+            }
+        }
+        return res;
+    }
+
+    private static final class MatrixOrScalar {
+        final double[][] matrix;
+        final double scalar;
+        final boolean isMatrix;
+        MatrixOrScalar(double[][] matrix) { this.matrix = matrix; this.scalar = 0.0; this.isMatrix = true; }
+        MatrixOrScalar(double scalar) { this.matrix = null; this.scalar = scalar; this.isMatrix = false; }
+    }
+
     private double[][] evalMatrixExpr(String expression, Map<String, Value> overrides) {
         String s = expression.trim();
+        AstNode ast = AstParser.tryParse(s);
+        if (ast != null) {
+            return evalMatrixAst(ast, overrides);
+        }
         int depth = 0;
         int split = -1;
         for (int i = 0; i < s.length(); i++) {
@@ -1621,6 +1896,24 @@ public final class CalculatorEngine {
         } else if (node instanceof AstSub) {
             validatePlotMatrix(((AstSub) node).left, scope);
             validatePlotMatrix(((AstSub) node).right, scope);
+        } else if (node instanceof AstMul) {
+            AstMul m = (AstMul) node;
+            boolean leftMat = containsMatrixExpression(m.left);
+            boolean rightMat = containsMatrixExpression(m.right);
+            if (leftMat && rightMat) {
+                validatePlotMatrix(m.left, scope);
+                validatePlotMatrix(m.right, scope);
+            } else if (leftMat) {
+                validatePlotMatrix(m.left, scope);
+                validatePlotAst(m.right, scope);
+            } else if (rightMat) {
+                validatePlotAst(m.left, scope);
+                validatePlotMatrix(m.right, scope);
+            } else {
+                throw new RuntimeException("Matrix erwartet");
+            }
+        } else if (node instanceof AstNeg) {
+            validatePlotMatrix(((AstNeg) node).inner, scope);
         } else if (isMatrixTransform(node)) {
             validatePlotMatrix(((AstFunc) node).args.get(0), scope);
         } else {
@@ -1642,33 +1935,84 @@ public final class CalculatorEngine {
     }
 
     private double[][] evalMatrixAst(AstNode node, Map<String, Value> overrides) {
+        MatrixOrScalar res = evalMatrixOrScalarAst(node, overrides);
+        if (!res.isMatrix) {
+            throw new RuntimeException("Matrix erwartet");
+        }
+        return res.matrix;
+    }
+
+    private MatrixOrScalar evalMatrixOrScalarAst(AstNode node, Map<String, Value> overrides) {
+        if (node instanceof AstNeg) {
+            MatrixOrScalar inner = evalMatrixOrScalarAst(((AstNeg) node).inner, overrides);
+            return inner.isMatrix
+                    ? new MatrixOrScalar(scaleMatrix(inner.matrix, -1.0))
+                    : new MatrixOrScalar(-inner.scalar);
+        }
         if (node instanceof AstAdd) {
-            AstAdd sum = (AstAdd) node;
-            return combineMatrices(evalMatrixAst(sum.left, overrides), evalMatrixAst(sum.right, overrides), 1);
+            MatrixOrScalar l = evalMatrixOrScalarAst(((AstAdd) node).left, overrides);
+            MatrixOrScalar r = evalMatrixOrScalarAst(((AstAdd) node).right, overrides);
+            if (!l.isMatrix || !r.isMatrix) throw new RuntimeException("Matrixdimensionen stimmen nicht überein");
+            return new MatrixOrScalar(combineMatrices(l.matrix, r.matrix, 1));
         }
         if (node instanceof AstSub) {
-            AstSub diff = (AstSub) node;
-            return combineMatrices(evalMatrixAst(diff.left, overrides), evalMatrixAst(diff.right, overrides), -1);
+            MatrixOrScalar l = evalMatrixOrScalarAst(((AstSub) node).left, overrides);
+            MatrixOrScalar r = evalMatrixOrScalarAst(((AstSub) node).right, overrides);
+            if (!l.isMatrix || !r.isMatrix) throw new RuntimeException("Matrixdimensionen stimmen nicht überein");
+            return new MatrixOrScalar(combineMatrices(l.matrix, r.matrix, -1));
+        }
+        if (node instanceof AstMul) {
+            MatrixOrScalar l = evalMatrixOrScalarAst(((AstMul) node).left, overrides);
+            MatrixOrScalar r = evalMatrixOrScalarAst(((AstMul) node).right, overrides);
+            if (l.isMatrix && r.isMatrix) {
+                return new MatrixOrScalar(multiplyMatrices(l.matrix, r.matrix));
+            } else if (l.isMatrix) {
+                return new MatrixOrScalar(scaleMatrix(l.matrix, r.scalar));
+            } else if (r.isMatrix) {
+                return new MatrixOrScalar(scaleMatrix(r.matrix, l.scalar));
+            } else {
+                return new MatrixOrScalar(l.scalar * r.scalar);
+            }
+        }
+        if (node instanceof AstDiv) {
+            MatrixOrScalar l = evalMatrixOrScalarAst(((AstDiv) node).left, overrides);
+            MatrixOrScalar r = evalMatrixOrScalarAst(((AstDiv) node).right, overrides);
+            if (!r.isMatrix && l.isMatrix) {
+                if (r.scalar == 0.0 || !Double.isFinite(r.scalar)) throw new ArithmeticException("Division by zero");
+                return new MatrixOrScalar(scaleMatrix(l.matrix, 1.0 / r.scalar));
+            }
+            if (l.isMatrix || r.isMatrix) throw new RuntimeException("Ungültige Matrixdivision");
         }
         if (isMatrixTransform(node)) {
             AstFunc call = (AstFunc) node;
             double[][] matrix = evalMatrixAst(call.args.get(0), overrides);
-            return call.name.equals("inv") ? matrixInv(matrix) : transposeMatrix(matrix);
+            return new MatrixOrScalar(call.name.equals("inv") ? matrixInv(matrix) : transposeMatrix(matrix));
         }
-        List<AstNode> rows = matrixItems(node);
-        double[][] matrix = new double[rows.size()][];
-        for (int r = 0; r < rows.size(); r++) {
-            List<AstNode> cells = matrixItems(rows.get(r));
-            matrix[r] = new double[cells.size()];
-            for (int c = 0; c < cells.size(); c++) {
-                Value value = evalAst(cells.get(c), overrides);
-                if (!value.c.isReal() || !Double.isFinite(value.c.re)) {
-                    throw new RuntimeException("Matrixzellen müssen endliche reelle Zahlen sein");
+        if (node instanceof AstFunc && ((AstFunc) node).name.equals("[]")) {
+            List<AstNode> rows = matrixItems(node);
+            if (rows.isEmpty()) throw new RuntimeException("Matrix darf nicht leer sein");
+            int expectedCols = -1;
+            double[][] matrix = new double[rows.size()][];
+            for (int r = 0; r < rows.size(); r++) {
+                List<AstNode> cells = matrixItems(rows.get(r));
+                if (expectedCols < 0) expectedCols = cells.size();
+                else if (cells.size() != expectedCols) throw new RuntimeException("Matrixzeilen ungleich lang");
+                matrix[r] = new double[cells.size()];
+                for (int c = 0; c < cells.size(); c++) {
+                    Value value = evalAst(cells.get(c), overrides);
+                    if (!value.c.isReal() || !Double.isFinite(value.c.re)) {
+                        throw new RuntimeException("Matrixzellen müssen endliche reelle Zahlen sein");
+                    }
+                    matrix[r][c] = value.c.re;
                 }
-                matrix[r][c] = value.c.re;
             }
+            return new MatrixOrScalar(matrix);
         }
-        return matrix;
+        Value v = evalAst(node, overrides);
+        if (!v.c.isReal() || !Double.isFinite(v.c.re)) {
+            throw new RuntimeException("Skalar muss eine endliche reelle Zahl sein");
+        }
+        return new MatrixOrScalar(v.c.re);
     }
 
     private double[][] parseMatrix(String expression, Map<String, Value> overrides) {
@@ -1774,7 +2118,8 @@ public final class CalculatorEngine {
 
     // --- Abstract Syntax Tree (AST) for Symbolic & Exact Calculations ---
     abstract static class AstNode {
-        abstract AstNode diff(String var);
+        AstNode diff(String var) { return diff(var, true); }
+        abstract AstNode diff(String var, boolean radiansMode);
         abstract AstNode integrate(String var);
         abstract AstNode simplify();
         abstract String toDisplayString();
@@ -1804,6 +2149,91 @@ public final class CalculatorEngine {
             String s = node.toDisplayString();
             return cond ? "(" + s + ")" : s;
         }
+
+        static ExactRat evalConstantRat(AstNode node) {
+            if (node instanceof AstNum) return ((AstNum) node).val.rat;
+            if (node instanceof AstNeg) {
+                ExactRat r = evalConstantRat(((AstNeg) node).inner);
+                return r != null ? new ExactRat(r.num.negate(), r.den) : null;
+            }
+            if (node instanceof AstAdd) {
+                ExactRat l = evalConstantRat(((AstAdd) node).left);
+                ExactRat r = evalConstantRat(((AstAdd) node).right);
+                return (l != null && r != null) ? l.add(r) : null;
+            }
+            if (node instanceof AstSub) {
+                ExactRat l = evalConstantRat(((AstSub) node).left);
+                ExactRat r = evalConstantRat(((AstSub) node).right);
+                return (l != null && r != null) ? l.sub(r) : null;
+            }
+            if (node instanceof AstMul) {
+                ExactRat l = evalConstantRat(((AstMul) node).left);
+                ExactRat r = evalConstantRat(((AstMul) node).right);
+                return (l != null && r != null) ? l.mul(r) : null;
+            }
+            if (node instanceof AstDiv) {
+                ExactRat l = evalConstantRat(((AstDiv) node).left);
+                ExactRat r = evalConstantRat(((AstDiv) node).right);
+                return (l != null && r != null && r.num.signum() != 0) ? l.div(r) : null;
+            }
+            return null;
+        }
+
+        static final class LinearMatch {
+            final AstNode a;
+            final AstNode b;
+            LinearMatch(AstNode a, AstNode b) { this.a = a; this.b = b; }
+        }
+
+        static LinearMatch matchLinear(AstNode expr, String var) {
+            if (!expr.containsVar(var)) return null;
+            if (expr instanceof AstVar && ((AstVar) expr).name.equals(var)) {
+                return new LinearMatch(new AstNum(1), new AstNum(0));
+            }
+            if (expr instanceof AstNeg) {
+                LinearMatch inner = matchLinear(((AstNeg) expr).inner, var);
+                if (inner == null) return null;
+                return new LinearMatch(new AstNeg(inner.a).simplify(), new AstNeg(inner.b).simplify());
+            }
+            if (expr instanceof AstAdd) {
+                AstAdd add = (AstAdd) expr;
+                if (!add.right.containsVar(var)) {
+                    LinearMatch l = matchLinear(add.left, var);
+                    if (l != null) return new LinearMatch(l.a, new AstAdd(l.b, add.right).simplify());
+                } else if (!add.left.containsVar(var)) {
+                    LinearMatch r = matchLinear(add.right, var);
+                    if (r != null) return new LinearMatch(r.a, new AstAdd(add.left, r.b).simplify());
+                }
+            }
+            if (expr instanceof AstSub) {
+                AstSub sub = (AstSub) expr;
+                if (!sub.right.containsVar(var)) {
+                    LinearMatch l = matchLinear(sub.left, var);
+                    if (l != null) return new LinearMatch(l.a, new AstSub(l.b, sub.right).simplify());
+                } else if (!sub.left.containsVar(var)) {
+                    LinearMatch r = matchLinear(sub.right, var);
+                    if (r != null) return new LinearMatch(new AstNeg(r.a).simplify(), new AstSub(sub.left, r.b).simplify());
+                }
+            }
+            if (expr instanceof AstMul) {
+                AstMul mul = (AstMul) expr;
+                if (!mul.left.containsVar(var)) {
+                    LinearMatch r = matchLinear(mul.right, var);
+                    if (r != null) return new LinearMatch(new AstMul(mul.left, r.a).simplify(), new AstMul(mul.left, r.b).simplify());
+                } else if (!mul.right.containsVar(var)) {
+                    LinearMatch l = matchLinear(mul.left, var);
+                    if (l != null) return new LinearMatch(new AstMul(mul.right, l.a).simplify(), new AstMul(mul.right, l.b).simplify());
+                }
+            }
+            if (expr instanceof AstDiv) {
+                AstDiv div = (AstDiv) expr;
+                if (!div.right.containsVar(var)) {
+                    LinearMatch l = matchLinear(div.left, var);
+                    if (l != null) return new LinearMatch(new AstDiv(l.a, div.right).simplify(), new AstDiv(l.b, div.right).simplify());
+                }
+            }
+            return null;
+        }
     }
 
     static final class AstNum extends AstNode {
@@ -1827,7 +2257,7 @@ public final class CalculatorEngine {
             if (val.rat != null) return val.rat.num.signum() < 0;
             return val.c.re < 0.0;
         }
-        @Override AstNode diff(String var) { return new AstNum(0); }
+        @Override AstNode diff(String var, boolean radiansMode) { return new AstNum(0); }
         @Override AstNode integrate(String var) {
             if (isOne()) return new AstVar(var);
             return new AstMul(this, new AstVar(var));
@@ -1857,7 +2287,7 @@ public final class CalculatorEngine {
         AstVar(String name) { this.name = name; }
         @Override boolean containsVar(String var) { return name.equals(var); }
         @Override int prec() { return 4; }
-        @Override AstNode diff(String var) { return name.equals(var) ? new AstNum(1) : new AstNum(0); }
+        @Override AstNode diff(String var, boolean radiansMode) { return name.equals(var) ? new AstNum(1) : new AstNum(0); }
         @Override AstNode integrate(String var) {
             if (name.equals(var)) {
                 return new AstDiv(new AstPow(new AstVar(var), new AstNum(2)), new AstNum(2));
@@ -1879,9 +2309,9 @@ public final class CalculatorEngine {
         AstAdd(AstNode left, AstNode right) { this.left = left; this.right = right; }
         @Override boolean containsVar(String var) { return left.containsVar(var) || right.containsVar(var); }
         @Override int prec() { return 1; }
-        @Override AstNode diff(String var) {
-            AstNode dl = left.diff(var);
-            AstNode dr = right.diff(var);
+        @Override AstNode diff(String var, boolean radiansMode) {
+            AstNode dl = left.diff(var, radiansMode);
+            AstNode dr = right.diff(var, radiansMode);
             return (dl != null && dr != null) ? new AstAdd(dl, dr) : null;
         }
         @Override AstNode integrate(String var) {
@@ -1913,9 +2343,9 @@ public final class CalculatorEngine {
         AstSub(AstNode left, AstNode right) { this.left = left; this.right = right; }
         @Override boolean containsVar(String var) { return left.containsVar(var) || right.containsVar(var); }
         @Override int prec() { return 1; }
-        @Override AstNode diff(String var) {
-            AstNode dl = left.diff(var);
-            AstNode dr = right.diff(var);
+        @Override AstNode diff(String var, boolean radiansMode) {
+            AstNode dl = left.diff(var, radiansMode);
+            AstNode dr = right.diff(var, radiansMode);
             return (dl != null && dr != null) ? new AstSub(dl, dr) : null;
         }
         @Override AstNode integrate(String var) {
@@ -1947,17 +2377,21 @@ public final class CalculatorEngine {
         AstMul(AstNode left, AstNode right) { this.left = left; this.right = right; }
         @Override boolean containsVar(String var) { return left.containsVar(var) || right.containsVar(var); }
         @Override int prec() { return 2; }
-        @Override AstNode diff(String var) {
+        @Override AstNode diff(String var, boolean radiansMode) {
             // (a * b)' = a' * b + a * b'
-            AstNode dl = left.diff(var);
-            AstNode dr = right.diff(var);
+            AstNode dl = left.diff(var, radiansMode);
+            AstNode dr = right.diff(var, radiansMode);
             if (dl == null || dr == null) return null;
             return new AstAdd(new AstMul(dl, right), new AstMul(left, dr));
         }
         @Override AstNode integrate(String var) {
-            if (left instanceof AstNum) {
+            if (!left.containsVar(var)) {
                 AstNode ir = right.integrate(var);
-                return ir != null ? new AstMul(left, ir) : null;
+                return ir != null ? new AstMul(left, ir).simplify() : null;
+            }
+            if (!right.containsVar(var)) {
+                AstNode il = left.integrate(var);
+                return il != null ? new AstMul(il, right).simplify() : null;
             }
             return null;
         }
@@ -1990,11 +2424,11 @@ public final class CalculatorEngine {
         AstDiv(AstNode left, AstNode right) { this.left = left; this.right = right; }
         @Override boolean containsVar(String var) { return left.containsVar(var) || right.containsVar(var); }
         @Override int prec() { return 2; }
-        @Override AstNode diff(String var) {
+        @Override AstNode diff(String var, boolean radiansMode) {
             if (right.isZero()) return null;
             // (a / b)' = (a' * b - a * b') / b^2
-            AstNode dl = left.diff(var);
-            AstNode dr = right.diff(var);
+            AstNode dl = left.diff(var, radiansMode);
+            AstNode dr = right.diff(var, radiansMode);
             if (dl == null || dr == null) return null;
             return new AstDiv(
                 new AstSub(new AstMul(dl, right), new AstMul(left, dr)),
@@ -2002,8 +2436,13 @@ public final class CalculatorEngine {
             );
         }
         @Override AstNode integrate(String var) {
-            if (left.isOne() && right instanceof AstVar && ((AstVar) right).name.equals(var)) {
-                return new AstFunc("ln", java.util.Collections.singletonList(new AstVar(var)));
+            if (!right.containsVar(var)) {
+                AstNode il = left.integrate(var);
+                return il != null ? new AstDiv(il, right).simplify() : null;
+            }
+            if (!left.containsVar(var) && right instanceof AstVar && ((AstVar) right).name.equals(var)) {
+                AstNode ln = new AstFunc("ln", java.util.Collections.singletonList(new AstVar(var)));
+                return left.isOne() ? ln : new AstMul(left, ln);
             }
             return null;
         }
@@ -2032,7 +2471,7 @@ public final class CalculatorEngine {
         AstPow(AstNode base, AstNode exp) { this.base = base; this.exp = exp; }
         @Override boolean containsVar(String var) { return base.containsVar(var) || exp.containsVar(var); }
         @Override int prec() { return 3; }
-        @Override AstNode diff(String var) {
+        @Override AstNode diff(String var, boolean radiansMode) {
             boolean baseHasVar = base.containsVar(var);
             boolean expHasVar = exp.containsVar(var);
 
@@ -2041,7 +2480,7 @@ public final class CalculatorEngine {
             }
 
             if (baseHasVar && !expHasVar) {
-                AstNode uPrime = base.diff(var);
+                AstNode uPrime = base.diff(var, radiansMode);
                 if (uPrime == null) return null;
                 Value cVal = exp.constValue();
                 if (cVal != null) {
@@ -2061,7 +2500,7 @@ public final class CalculatorEngine {
 
             if (!baseHasVar && expHasVar) {
                 if (base.isZero()) return null;
-                AstNode vPrime = exp.diff(var);
+                AstNode vPrime = exp.diff(var, radiansMode);
                 if (vPrime == null) return null;
                 return new AstMul(
                         new AstMul(this, new AstFunc("ln", java.util.Collections.singletonList(base))),
@@ -2070,24 +2509,44 @@ public final class CalculatorEngine {
             }
 
             // General power rule (u > 0): (u^v)' = u^v * (v' * ln(u) + (v * u') / u)
-            AstNode uPrime = base.diff(var);
-            AstNode vPrime = exp.diff(var);
+            AstNode uPrime = base.diff(var, radiansMode);
+            AstNode vPrime = exp.diff(var, radiansMode);
             if (uPrime == null || vPrime == null) return null;
             AstNode term1 = new AstMul(vPrime, new AstFunc("ln", java.util.Collections.singletonList(base)));
             AstNode term2 = new AstDiv(new AstMul(exp, uPrime), base);
             return new AstMul(this, new AstAdd(term1, term2));
         }
         @Override AstNode integrate(String var) {
-            if (base instanceof AstVar && ((AstVar) base).name.equals(var)) {
-                Value cVal = exp.constValue();
-                if (cVal != null && cVal.c.isReal() && Math.abs(cVal.c.re - Math.round(cVal.c.re)) < 1e-11) {
-                    long n = Math.round(cVal.c.re);
-                    if (n == -1) {
+            if (base instanceof AstVar && ((AstVar) base).name.equals(var) && !exp.containsVar(var)) {
+                ExactRat expRat = evalConstantRat(exp);
+                if (expRat != null) {
+                    if (expRat.den.equals(BigInteger.ONE) && expRat.num.equals(BigInteger.valueOf(-1))) {
                         return new AstFunc("ln", java.util.Collections.singletonList(new AstVar(var)));
-                    } else {
-                        long newP = n + 1;
+                    }
+                    ExactRat newExp = expRat.add(ExactRat.of(1));
+                    if (newExp.den.equals(BigInteger.ONE)) {
+                        return new AstDiv(
+                                new AstPow(new AstVar(var), new AstNum(new Value(Complex.real(newExp.toDouble()), newExp))),
+                                new AstNum(new Value(Complex.real(newExp.toDouble()), newExp))
+                        );
+                    }
+                    ExactRat coeff = ExactRat.of(1).div(newExp);
+                    return new AstMul(
+                            new AstNum(new Value(Complex.real(coeff.toDouble()), coeff)),
+                            new AstPow(new AstVar(var), new AstNum(new Value(Complex.real(newExp.toDouble()), newExp)))
+                    );
+                }
+                Value cVal = exp.constValue();
+                if (cVal != null && cVal.c.isReal()) {
+                    if (Math.abs(cVal.c.re + 1.0) < 1e-11) {
+                        return new AstFunc("ln", java.util.Collections.singletonList(new AstVar(var)));
+                    }
+                    if (Math.abs(cVal.c.re - Math.round(cVal.c.re)) < 1e-11) {
+                        long newP = Math.round(cVal.c.re) + 1;
                         return new AstDiv(new AstPow(new AstVar(var), new AstNum(newP)), new AstNum(newP));
                     }
+                    double newP = cVal.c.re + 1.0;
+                    return new AstDiv(new AstPow(new AstVar(var), new AstNum(Value.fromFloat(newP))), new AstNum(Value.fromFloat(newP)));
                 }
             }
             return null;
@@ -2125,8 +2584,8 @@ public final class CalculatorEngine {
         @Override boolean containsVar(String var) { return inner.containsVar(var); }
         @Override int prec() { return 3; }
         @Override boolean isNegativeDisplay() { return true; }
-        @Override AstNode diff(String var) {
-            AstNode d = inner.diff(var);
+        @Override AstNode diff(String var, boolean radiansMode) {
+            AstNode d = inner.diff(var, radiansMode);
             return d != null ? new AstNeg(d) : null;
         }
         @Override AstNode integrate(String var) {
@@ -2166,25 +2625,45 @@ public final class CalculatorEngine {
             return false;
         }
         @Override int prec() { return 4; }
-        @Override AstNode diff(String var) {
+        @Override AstNode diff(String var, boolean radiansMode) {
             if (!containsVar(var)) return new AstNum(0);
             if (args.size() == 1) {
                 AstNode u = args.get(0);
-                AstNode uPrime = u.diff(var);
+                AstNode uPrime = u.diff(var, radiansMode);
                 if (uPrime == null) return null;
+                AstNode degScale = radiansMode ? null : new AstDiv(new AstVar("pi"), new AstNum(180));
+                AstNode invDegScale = radiansMode ? null : new AstDiv(new AstNum(180), new AstVar("pi"));
                 switch (name) {
-                    case "sin": return new AstMul(uPrime, new AstFunc("cos", java.util.Collections.singletonList(u)));
-                    case "cos": return new AstNeg(new AstMul(uPrime, new AstFunc("sin", java.util.Collections.singletonList(u))));
-                    case "tan": return new AstDiv(uPrime, new AstPow(new AstFunc("cos", java.util.Collections.singletonList(u)), new AstNum(2)));
+                    case "sin": {
+                        AstNode base = new AstMul(uPrime, new AstFunc("cos", java.util.Collections.singletonList(u)));
+                        return degScale != null ? new AstMul(degScale, base.simplify()) : base;
+                    }
+                    case "cos": {
+                        AstNode base = new AstMul(uPrime, new AstFunc("sin", java.util.Collections.singletonList(u)));
+                        return new AstNeg(degScale != null ? new AstMul(degScale, base.simplify()) : base);
+                    }
+                    case "tan": {
+                        AstNode denom = new AstPow(new AstFunc("cos", java.util.Collections.singletonList(u)), new AstNum(2));
+                        return degScale != null ? new AstDiv(new AstMul(degScale, uPrime), denom) : new AstDiv(uPrime, denom);
+                    }
                     case "sinh": return new AstMul(uPrime, new AstFunc("cosh", java.util.Collections.singletonList(u)));
                     case "cosh": return new AstMul(uPrime, new AstFunc("sinh", java.util.Collections.singletonList(u)));
                     case "tanh": return new AstDiv(uPrime, new AstPow(new AstFunc("cosh", java.util.Collections.singletonList(u)), new AstNum(2)));
                     case "asin":
-                    case "arcsin": return new AstDiv(uPrime, new AstFunc("sqrt", java.util.Collections.singletonList(new AstSub(new AstNum(1), new AstPow(u, new AstNum(2))))));
+                    case "arcsin": {
+                        AstNode base = new AstDiv(uPrime, new AstFunc("sqrt", java.util.Collections.singletonList(new AstSub(new AstNum(1), new AstPow(u, new AstNum(2))))));
+                        return invDegScale != null ? new AstMul(invDegScale, base) : base;
+                    }
                     case "acos":
-                    case "arccos": return new AstNeg(new AstDiv(uPrime, new AstFunc("sqrt", java.util.Collections.singletonList(new AstSub(new AstNum(1), new AstPow(u, new AstNum(2)))))));
+                    case "arccos": {
+                        AstNode base = new AstDiv(uPrime, new AstFunc("sqrt", java.util.Collections.singletonList(new AstSub(new AstNum(1), new AstPow(u, new AstNum(2))))));
+                        return new AstNeg(invDegScale != null ? new AstMul(invDegScale, base) : base);
+                    }
                     case "atan":
-                    case "arctan": return new AstDiv(uPrime, new AstAdd(new AstNum(1), new AstPow(u, new AstNum(2))));
+                    case "arctan": {
+                        AstNode base = new AstDiv(uPrime, new AstAdd(new AstNum(1), new AstPow(u, new AstNum(2))));
+                        return invDegScale != null ? new AstMul(invDegScale, base) : base;
+                    }
                     case "asinh":
                     case "arcsinh": return new AstDiv(uPrime, new AstFunc("sqrt", java.util.Collections.singletonList(new AstAdd(new AstPow(u, new AstNum(2)), new AstNum(1)))));
                     case "acosh":
@@ -2200,28 +2679,71 @@ public final class CalculatorEngine {
             if (args.size() == 2) {
                 switch (name) {
                     case "power":
-                    case "pow": return new AstPow(args.get(0), args.get(1)).diff(var);
-                    case "addition": return new AstAdd(args.get(0), args.get(1)).diff(var);
-                    case "subtraction": return new AstSub(args.get(0), args.get(1)).diff(var);
-                    case "multiplication": return new AstMul(args.get(0), args.get(1)).diff(var);
+                    case "pow": return new AstPow(args.get(0), args.get(1)).diff(var, radiansMode);
+                    case "addition": return new AstAdd(args.get(0), args.get(1)).diff(var, radiansMode);
+                    case "subtraction": return new AstSub(args.get(0), args.get(1)).diff(var, radiansMode);
+                    case "multiplication": return new AstMul(args.get(0), args.get(1)).diff(var, radiansMode);
                     case "division":
-                    case "fraction": return new AstDiv(args.get(0), args.get(1)).diff(var);
+                    case "fraction": return new AstDiv(args.get(0), args.get(1)).diff(var, radiansMode);
                     default: return null;
                 }
             }
             return null;
         }
         @Override AstNode integrate(String var) {
-            if (args.size() == 1 && args.get(0) instanceof AstVar && ((AstVar) args.get(0)).name.equals(var)) {
-                switch (name) {
-                    case "exp": return new AstFunc("exp", java.util.Collections.singletonList(new AstVar(var)));
-                    case "sin": return new AstNeg(new AstFunc("cos", java.util.Collections.singletonList(new AstVar(var))));
-                    case "cos": return new AstFunc("sin", java.util.Collections.singletonList(new AstVar(var)));
-                    case "sinh": return new AstFunc("cosh", java.util.Collections.singletonList(new AstVar(var)));
-                    case "cosh": return new AstFunc("sinh", java.util.Collections.singletonList(new AstVar(var)));
-                }
+            if (args.size() != 1) return null;
+            AstNode u = args.get(0);
+            if (!u.containsVar(var)) {
+                return new AstMul(this, new AstVar(var));
             }
-            return null;
+            LinearMatch lin = matchLinear(u, var);
+            if (lin == null) return null;
+            AstNode a = lin.a;
+            if (a.isZero()) return null;
+            boolean unitA = a.isOne();
+            AstNode uNode = u;
+            switch (name) {
+                case "sqrt": {
+                    ExactRat threeHalves = new ExactRat(BigInteger.valueOf(3), BigInteger.valueOf(2));
+                    AstNode expNode = new AstNum(new Value(Complex.real(1.5), threeHalves));
+                    if (unitA) {
+                        ExactRat twoThirds = new ExactRat(BigInteger.valueOf(2), BigInteger.valueOf(3));
+                        return new AstMul(
+                                new AstNum(new Value(Complex.real(2.0 / 3.0), twoThirds)),
+                                new AstPow(uNode, expNode)
+                        );
+                    }
+                    AstNode denom = new AstMul(new AstNum(3), a).simplify();
+                    return new AstDiv(new AstMul(new AstNum(2), new AstPow(uNode, expNode)), denom);
+                }
+                case "exp": {
+                    AstNode base = new AstFunc("exp", java.util.Collections.singletonList(uNode));
+                    return unitA ? base : new AstDiv(base, a);
+                }
+                case "sin": {
+                    AstNode cosU = new AstFunc("cos", java.util.Collections.singletonList(uNode));
+                    if (unitA) return new AstNeg(cosU);
+                    if (a instanceof AstNeg) return new AstDiv(cosU, ((AstNeg) a).inner);
+                    if (a instanceof AstNum && ((AstNum) a).isNegativeDisplay()) {
+                        return new AstDiv(cosU, new AstNeg(a).simplify());
+                    }
+                    return new AstNeg(new AstDiv(cosU, a));
+                }
+                case "cos": {
+                    AstNode sinU = new AstFunc("sin", java.util.Collections.singletonList(uNode));
+                    return unitA ? sinU : new AstDiv(sinU, a);
+                }
+                case "sinh": {
+                    AstNode coshU = new AstFunc("cosh", java.util.Collections.singletonList(uNode));
+                    return unitA ? coshU : new AstDiv(coshU, a);
+                }
+                case "cosh": {
+                    AstNode sinhU = new AstFunc("sinh", java.util.Collections.singletonList(uNode));
+                    return unitA ? sinhU : new AstDiv(sinhU, a);
+                }
+                default:
+                    return null;
+            }
         }
         @Override AstNode simplify() {
             List<AstNode> sargs = new ArrayList<>();
@@ -2258,7 +2780,236 @@ public final class CalculatorEngine {
         }
     }
 
+    private static final class Monomial implements Comparable<Monomial> {
+        final java.util.TreeMap<String, Integer> vars;
+
+        Monomial() { this.vars = new java.util.TreeMap<>(); }
+        Monomial(java.util.TreeMap<String, Integer> vars) { this.vars = vars; }
+
+        int totalDegree() {
+            int d = 0;
+            for (int e : vars.values()) d += e;
+            return d;
+        }
+
+        Monomial multiply(Monomial o) {
+            java.util.TreeMap<String, Integer> m = new java.util.TreeMap<>(this.vars);
+            for (Map.Entry<String, Integer> entry : o.vars.entrySet()) {
+                m.merge(entry.getKey(), entry.getValue(), Integer::sum);
+            }
+            return new Monomial(m);
+        }
+
+        @Override
+        public int compareTo(Monomial o) {
+            int cmp = Integer.compare(o.totalDegree(), this.totalDegree());
+            if (cmp != 0) return cmp;
+            java.util.Iterator<Map.Entry<String, Integer>> it1 = this.vars.entrySet().iterator();
+            java.util.Iterator<Map.Entry<String, Integer>> it2 = o.vars.entrySet().iterator();
+            while (it1.hasNext() && it2.hasNext()) {
+                Map.Entry<String, Integer> e1 = it1.next();
+                Map.Entry<String, Integer> e2 = it2.next();
+                cmp = e1.getKey().compareTo(e2.getKey());
+                if (cmp != 0) return cmp;
+                cmp = Integer.compare(e2.getValue(), e1.getValue());
+                if (cmp != 0) return cmp;
+            }
+            return Integer.compare(o.vars.size(), this.vars.size());
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof Monomial && vars.equals(((Monomial) o).vars);
+        }
+
+        @Override
+        public int hashCode() { return vars.hashCode(); }
+    }
+
+    private static java.util.TreeMap<Monomial, ExactRat> astToPoly(AstNode node) {
+        if (node instanceof AstNum) {
+            Value v = ((AstNum) node).val;
+            ExactRat r = v.rat;
+            if (r == null) return null;
+            java.util.TreeMap<Monomial, ExactRat> map = new java.util.TreeMap<>();
+            if (r.num.signum() != 0) map.put(new Monomial(), r);
+            return map;
+        }
+        if (node instanceof AstVar) {
+            String name = ((AstVar) node).name;
+            if (name.equals("i")) return null;
+            java.util.TreeMap<String, Integer> vars = new java.util.TreeMap<>();
+            vars.put(name, 1);
+            java.util.TreeMap<Monomial, ExactRat> map = new java.util.TreeMap<>();
+            map.put(new Monomial(vars), ExactRat.of(1));
+            return map;
+        }
+        if (node instanceof AstNeg) {
+            java.util.TreeMap<Monomial, ExactRat> inner = astToPoly(((AstNeg) node).inner);
+            if (inner == null) return null;
+            java.util.TreeMap<Monomial, ExactRat> res = new java.util.TreeMap<>();
+            for (Map.Entry<Monomial, ExactRat> e : inner.entrySet()) {
+                res.put(e.getKey(), new ExactRat(e.getValue().num.negate(), e.getValue().den));
+            }
+            return res;
+        }
+        if (node instanceof AstAdd) {
+            java.util.TreeMap<Monomial, ExactRat> l = astToPoly(((AstAdd) node).left);
+            java.util.TreeMap<Monomial, ExactRat> r = astToPoly(((AstAdd) node).right);
+            if (l == null || r == null) return null;
+            return addPoly(l, r, 1);
+        }
+        if (node instanceof AstSub) {
+            java.util.TreeMap<Monomial, ExactRat> l = astToPoly(((AstSub) node).left);
+            java.util.TreeMap<Monomial, ExactRat> r = astToPoly(((AstSub) node).right);
+            if (l == null || r == null) return null;
+            return addPoly(l, r, -1);
+        }
+        if (node instanceof AstMul) {
+            java.util.TreeMap<Monomial, ExactRat> l = astToPoly(((AstMul) node).left);
+            java.util.TreeMap<Monomial, ExactRat> r = astToPoly(((AstMul) node).right);
+            if (l == null || r == null) return null;
+            return mulPoly(l, r);
+        }
+        if (node instanceof AstDiv) {
+            java.util.TreeMap<Monomial, ExactRat> l = astToPoly(((AstDiv) node).left);
+            ExactRat scalar = AstNode.evalConstantRat(((AstDiv) node).right);
+            if (l == null || scalar == null || scalar.num.signum() == 0) return null;
+            java.util.TreeMap<Monomial, ExactRat> res = new java.util.TreeMap<>();
+            for (Map.Entry<Monomial, ExactRat> e : l.entrySet()) {
+                ExactRat c = e.getValue().div(scalar);
+                if (c.num.signum() != 0) res.put(e.getKey(), c);
+            }
+            return res;
+        }
+        if (node instanceof AstPow) {
+            AstPow p = (AstPow) node;
+            ExactRat expRat = AstNode.evalConstantRat(p.exp);
+            if (expRat == null || !expRat.den.equals(BigInteger.ONE) || expRat.num.signum() < 0) return null;
+            int expVal;
+            try {
+                expVal = expRat.num.intValueExact();
+            } catch (ArithmeticException e) {
+                return null;
+            }
+            if (expVal > 8) return null;
+            java.util.TreeMap<Monomial, ExactRat> base = astToPoly(p.base);
+            if (base == null) return null;
+            java.util.TreeMap<Monomial, ExactRat> res = new java.util.TreeMap<>();
+            res.put(new Monomial(), ExactRat.of(1));
+            for (int i = 0; i < expVal; i++) {
+                res = mulPoly(res, base);
+                if (res == null) return null;
+            }
+            return res;
+        }
+        return null;
+    }
+
+    private static java.util.TreeMap<Monomial, ExactRat> addPoly(
+            java.util.TreeMap<Monomial, ExactRat> l,
+            java.util.TreeMap<Monomial, ExactRat> r,
+            int sign) {
+        java.util.TreeMap<Monomial, ExactRat> res = new java.util.TreeMap<>(l);
+        for (Map.Entry<Monomial, ExactRat> e : r.entrySet()) {
+            ExactRat addend = sign >= 0 ? e.getValue() : new ExactRat(e.getValue().num.negate(), e.getValue().den);
+            ExactRat cur = res.get(e.getKey());
+            ExactRat next = cur == null ? addend : cur.add(addend);
+            if (next.num.signum() == 0) res.remove(e.getKey());
+            else res.put(e.getKey(), next);
+        }
+        return res;
+    }
+
+    private static java.util.TreeMap<Monomial, ExactRat> mulPoly(
+            java.util.TreeMap<Monomial, ExactRat> l,
+            java.util.TreeMap<Monomial, ExactRat> r) {
+        if ((long) l.size() * (long) r.size() > 128) return null;
+        java.util.TreeMap<Monomial, ExactRat> res = new java.util.TreeMap<>();
+        for (Map.Entry<Monomial, ExactRat> el : l.entrySet()) {
+            for (Map.Entry<Monomial, ExactRat> er : r.entrySet()) {
+                Monomial m = el.getKey().multiply(er.getKey());
+                ExactRat c = el.getValue().mul(er.getValue());
+                ExactRat cur = res.get(m);
+                ExactRat next = cur == null ? c : cur.add(c);
+                if (next.num.signum() == 0) res.remove(m);
+                else res.put(m, next);
+            }
+        }
+        return res;
+    }
+
+    private static AstNode monomialToAst(Monomial m) {
+        AstNode node = null;
+        for (Map.Entry<String, Integer> e : m.vars.entrySet()) {
+            AstNode factor = e.getValue() == 1
+                    ? new AstVar(e.getKey())
+                    : new AstPow(new AstVar(e.getKey()), new AstNum(e.getValue()));
+            node = (node == null) ? factor : new AstMul(node, factor);
+        }
+        return node;
+    }
+
+    private static AstNode polyToAst(java.util.TreeMap<Monomial, ExactRat> poly) {
+        if (poly.isEmpty()) return new AstNum(0);
+        AstNode result = null;
+        for (Map.Entry<Monomial, ExactRat> entry : poly.entrySet()) {
+            ExactRat c = entry.getValue();
+            boolean neg = c.num.signum() < 0;
+            ExactRat absC = new ExactRat(c.num.abs(), c.den);
+            AstNode mon = monomialToAst(entry.getKey());
+            AstNode termNode;
+            if (mon == null) {
+                termNode = new AstNum(new Value(Complex.real(absC.toDouble()), absC));
+            } else if (absC.num.equals(BigInteger.ONE) && absC.den.equals(BigInteger.ONE)) {
+                termNode = mon;
+            } else {
+                termNode = new AstMul(new AstNum(new Value(Complex.real(absC.toDouble()), absC)), mon);
+            }
+            if (result == null) {
+                result = neg ? new AstNeg(termNode) : termNode;
+            } else {
+                result = neg ? new AstSub(result, termNode) : new AstAdd(result, termNode);
+            }
+        }
+        return result;
+    }
+
+    private static boolean containsAddOrSub(AstNode node) {
+        if (node instanceof AstAdd || node instanceof AstSub) return true;
+        if (node instanceof AstMul) {
+            AstMul m = (AstMul) node;
+            return containsAddOrSub(m.left) || containsAddOrSub(m.right);
+        }
+        if (node instanceof AstDiv) {
+            AstDiv d = (AstDiv) node;
+            return containsAddOrSub(d.left) || containsAddOrSub(d.right);
+        }
+        if (node instanceof AstPow) {
+            AstPow p = (AstPow) node;
+            return containsAddOrSub(p.base) || containsAddOrSub(p.exp);
+        }
+        if (node instanceof AstNeg) return containsAddOrSub(((AstNeg) node).inner);
+        if (node instanceof AstFunc) {
+            for (AstNode arg : ((AstFunc) node).args) {
+                if (containsAddOrSub(arg)) return true;
+            }
+        }
+        return false;
+    }
+
     public static AstNode simplifyPolynomialAst(AstNode node) {
+        if (containsAddOrSub(node)) {
+            java.util.TreeMap<Monomial, ExactRat> poly = astToPoly(node);
+            if (poly != null) {
+                AstNode expanded = polyToAst(poly);
+                if (poly.size() > 1 || !expanded.equals(node)) {
+                    return expanded;
+                }
+                return null;
+            }
+        }
+
         List<Map.Entry<Long, AstNode>> terms = new ArrayList<>();
         flattenAstTerms(node, 1L, terms);
         if (terms.size() < 2) return null;
@@ -2529,7 +3280,7 @@ public final class CalculatorEngine {
             if ((f.name.equals("d") || f.name.equals("deriv") || f.name.equals("diff")) && f.args.size() == 2) {
                 if (f.args.get(1) instanceof AstVar) {
                     String var = ((AstVar) f.args.get(1)).name;
-                    AstNode diffAst = f.args.get(0).diff(var);
+                    AstNode diffAst = f.args.get(0).diff(var, radiansMode);
                     if (diffAst != null) {
                         String res = diffAst.simplify().toDisplayString();
                         double numVal = 0.0;
@@ -2575,7 +3326,9 @@ public final class CalculatorEngine {
             return String.valueOf(Math.round(v));
         }
 
-        return trimTrailingZeros(String.format(Locale.US, "%.10f", v));
+        int intDigits = (absV < 1.0) ? 1 : ((int) Math.floor(Math.log10(absV)) + 1);
+        int maxDecimals = Math.max(0, Math.min(10, 15 - intDigits));
+        return trimTrailingZeros(String.format(Locale.US, "%." + maxDecimals + "f", v));
     }
 
     private String formatDecimalVal(Value val) {
