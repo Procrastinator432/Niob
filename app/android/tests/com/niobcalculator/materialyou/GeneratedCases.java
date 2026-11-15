@@ -19,9 +19,12 @@ final class GeneratedCases {
 
     private static final long TIMEOUT_MS = 30000;
     private static final int SHOWN_FAILURES = 30;
+    /** integral_split: the parts must add up within this multiple of the reported error estimates. */
+    private static final double SPLIT_DELTA_FACTOR = 10.0;
     private static final double EPS = Math.ulp(1.0);
     private static final String[] FILES = {
-        "derivatives", "integrals", "matrices", "exact_numbers", "antiderivatives", "polynomials"
+        "derivatives", "integrals", "matrices", "exact_numbers", "antiderivatives", "polynomials",
+        "integral_families", "derivative_families", "determinants", "integral_splits"
     };
 
     private GeneratedCases() {}
@@ -44,7 +47,8 @@ final class GeneratedCases {
         Fail(String message) { super(message); }
     }
 
-    private static final int PASS = 0, UNSUPPORTED = 1, UNCHECKED = 2;
+    /** REFUSED: an explicit error where one is allowed; NOT_CONVERGED: marked as not converged. Both are counted. */
+    private static final int PASS = 0, UNSUPPORTED = 1, UNCHECKED = 2, REFUSED = 3, NOT_CONVERGED = 4;
 
     private static List<Row> rows(Path path) throws IOException {
         List<Row> rows = new ArrayList<>();
@@ -211,7 +215,7 @@ final class GeneratedCases {
             case "number":
             case "number_or_error":
                 if (error != null) {
-                    if (row.check.equals("number_or_error")) return PASS;
+                    if (row.check.equals("number_or_error")) return REFUSED;
                     throw new Fail("Fehler: " + error);
                 }
                 requireNumber(result, Double.parseDouble(row.expected), row.absTol, row.relTol);
@@ -220,9 +224,9 @@ final class GeneratedCases {
                 if (error != null) return PASS;
                 throw new Fail("Fehlermeldung erwartet, erhalten " + result.decimalText);
             case "integral": {
-                if (error != null) return PASS;
+                if (error != null) return REFUSED;
                 CalculatorEngine.IntegrationReport report = engine.getLastIntegrationReport();
-                if (report != null && !report.converged) return PASS;
+                if (report != null && !report.converged) return NOT_CONVERGED;
                 try {
                     requireNumber(result, Double.parseDouble(row.expected), row.absTol, row.relTol);
                 } catch (Fail f) {
@@ -237,9 +241,10 @@ final class GeneratedCases {
             case "exact_fraction": {
                 if (error != null) throw new Fail("Fehler: " + error);
                 if (compact(result.exactText).equals(row.expected)) return PASS;
+                // The expected text is a fraction "p/q" or a plain integer.
                 int slash = row.expected.indexOf('/');
-                double expected = Double.parseDouble(row.expected.substring(0, slash))
-                        / Double.parseDouble(row.expected.substring(slash + 1));
+                double expected = slash < 0 ? Double.parseDouble(row.expected)
+                        : Double.parseDouble(row.expected.substring(0, slash)) / Double.parseDouble(row.expected.substring(slash + 1));
                 try {
                     requireNumber(result, expected, 0, row.relTol);
                 } catch (Fail f) {
@@ -337,6 +342,42 @@ final class GeneratedCases {
                 }
                 return PASS;
             }
+            case "integral_split": {
+                // Self-check without a reference: int(f,a,b) = int(f,a,m) + int(f,m,b) within the
+                // reported error estimates. Each integral runs on a fresh engine.
+                int semicolon = row.expected.indexOf(';');
+                String[] exprs = {row.expr, row.expected.substring(0, semicolon), row.expected.substring(semicolon + 1)};
+                double[] values = new double[3];
+                double[] deltas = new double[3];
+                for (int k = 0; k < 3; k++) {
+                    CalculatorEngine part = new CalculatorEngine();
+                    part.setRadiansMode(!row.degrees);
+                    CalculatorEngine.Result r;
+                    try {
+                        r = part.evaluateWithTimeout(exprs[k], TIMEOUT_MS);
+                    } catch (NullPointerException | ClassCastException | IndexOutOfBoundsException bug) {
+                        throw new Fail("Implementierungsfehler statt Rechenfehler: " + bug);
+                    } catch (RuntimeException e) {
+                        return REFUSED;
+                    }
+                    CalculatorEngine.IntegrationReport report = part.getLastIntegrationReport();
+                    if (report != null && !report.converged) return NOT_CONVERGED;
+                    if (isComplexText(r.decimalText) || !Double.isFinite(r.value)) {
+                        throw new Fail(shortText(exprs[k]) + ": kein endliches Zahlenergebnis: " + r.decimalText);
+                    }
+                    values[k] = r.value;
+                    deltas[k] = report == null ? 0 : Double.isNaN(report.absErr) ? Double.POSITIVE_INFINITY : Math.abs(report.absErr);
+                }
+                double gap = Math.abs(values[0] - values[1] - values[2]);
+                double size = Math.max(Math.abs(values[0]), Math.max(Math.abs(values[1]), Math.abs(values[2])));
+                double allowed = SPLIT_DELTA_FACTOR * (deltas[0] + deltas[1] + deltas[2]) + row.absTol + row.relTol * size;
+                if (gap > allowed) {
+                    throw new Fail(String.format(java.util.Locale.ROOT,
+                            "ganz %s (Δ %.1e), Teile %s + %s (Δ %.1e, %.1e): Abweichung %.2e",
+                            values[0], deltas[0], values[1], values[2], deltas[1], deltas[2], gap));
+                }
+                return PASS;
+            }
             default:
                 throw new IllegalArgumentException("unbekannte Prüfung " + row.check);
         }
@@ -346,12 +387,14 @@ final class GeneratedCases {
         List<Row> rows = rows(path);
         if (rows.isEmpty()) throw new AssertionError(name + ": keine Fälle");
         List<String> failures = new ArrayList<>();
-        int unsupported = 0, unchecked = 0;
+        int unsupported = 0, unchecked = 0, refused = 0, notConverged = 0;
         for (Row row : rows) {
             try {
                 int outcome = checkRow(row);
                 if (outcome == UNSUPPORTED) unsupported++;
                 if (outcome == UNCHECKED) unchecked++;
+                if (outcome == REFUSED) refused++;
+                if (outcome == NOT_CONVERGED) notConverged++;
             } catch (Fail f) {
                 failures.add("  " + row.id + " " + shortText(row.expr) + ": " + f.getMessage());
             }
@@ -359,6 +402,8 @@ final class GeneratedCases {
         StringBuilder summary = new StringBuilder(name + ": " + rows.size() + " Fälle, " + failures.size() + " falsch");
         if (unsupported > 0) summary.append(", ").append(unsupported).append(" nicht unterstützt");
         if (unchecked > 0) summary.append(", ").append(unchecked).append(" ohne prüfbare Stelle");
+        if (refused > 0) summary.append(", ").append(refused).append(" mit Fehlermeldung");
+        if (notConverged > 0) summary.append(", ").append(notConverged).append(" als nicht konvergiert gemeldet");
         System.out.println(summary);
         if (!failures.isEmpty()) {
             // NIOB_GENERATED_ALL=1 lists every failing case instead of the first few.

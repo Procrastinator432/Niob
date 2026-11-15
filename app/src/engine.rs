@@ -556,7 +556,11 @@ fn try_eval_bigrat_ast(node: &AstNode, engine: &MathEngine) -> Result<Option<Big
             den: BigUInt::one(),
         })),
         AstNode::Var(name) => {
-            if name == "ans" || name == "ANS" {
+            if (name.eq_ignore_ascii_case("ans") && engine.matrix_ans.is_some())
+                || engine.matrix_variables.contains_key(name)
+            {
+                Ok(None)
+            } else if name == "ans" || name == "ANS" {
                 Ok(engine.ans.rat.map(BigRat::from_exact_rat))
             } else if USER_VARIABLES.contains(&name.as_str()) {
                 Ok(engine.variables.get(name).and_then(|v| v.rat).map(BigRat::from_exact_rat))
@@ -632,7 +636,438 @@ fn try_eval_bigrat_ast(node: &AstNode, engine: &MathEngine) -> Result<Option<Big
             }
             Ok(None)
         }
+        AstNode::Func(name, args) if name == "det" && args.len() == 1 => {
+            if let AstNode::Pow(base, exp) = &args[0] {
+                if let (Some(mat), Some(e)) = (
+                    try_eval_bigrat_matrix_ast(base, engine)?,
+                    try_eval_bigrat_ast(exp, engine)?,
+                ) {
+                    if mat.is_empty() || mat.len() != mat[0].len() {
+                        return Err("Determinante erfordert eine quadratische Matrix".to_string());
+                    }
+                    if e.den.is_one() {
+                        if let Some(p) = e.num.to_i128() {
+                            if (-1000..=1000).contains(&p) {
+                                let p_i32 = p as i32;
+                                if p_i32 == 0 {
+                                    return Ok(Some(BigRat {
+                                        num: BigInt::from_i128(1),
+                                        den: BigUInt::one(),
+                                    }));
+                                }
+                                let det_base = exact_bigrat_det(mat)?;
+                                if p_i32 < 0 && det_base.num.mag.is_zero() {
+                                    return Err("Matrix ist singulär (nicht invertierbar)".to_string());
+                                }
+                                let res = det_base.pow(p_i32)?;
+                                if res.num.mag.bit_len().max(res.den.bit_len()) <= 65536 {
+                                    return Ok(Some(res));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(mat) = try_eval_bigrat_matrix_ast(&args[0], engine)? {
+                return Ok(Some(exact_bigrat_det(mat)?));
+            }
+            Ok(None)
+        }
         _ => Ok(None),
+    }
+}
+
+fn try_eval_bigrat_matrix_ast(node: &AstNode, engine: &MathEngine) -> Result<Option<Vec<Vec<BigRat>>>, String> {
+    check_eval_deadline()?;
+    match node {
+        AstNode::Var(name) => {
+            if name.eq_ignore_ascii_case("ans") {
+                if let Some(ref m) = engine.matrix_ans {
+                    return values_to_bigrat_matrix(m);
+                }
+            }
+            if let Some(m) = engine.matrix_variables.get(name) {
+                return values_to_bigrat_matrix(m);
+            }
+            Ok(None)
+        }
+        AstNode::Neg(inner) => {
+            let Some(m) = try_eval_bigrat_matrix_ast(inner, engine)? else { return Ok(None); };
+            Ok(Some(
+                m.into_iter()
+                    .map(|row| row.into_iter().map(|c| c.negate()).collect())
+                    .collect(),
+            ))
+        }
+        AstNode::Add(l, r) | AstNode::Sub(l, r) => {
+            let Some(a) = try_eval_bigrat_matrix_ast(l, engine)? else { return Ok(None); };
+            let Some(b) = try_eval_bigrat_matrix_ast(r, engine)? else { return Ok(None); };
+            if a.len() != b.len() || a[0].len() != b[0].len() {
+                return Err("Incompatible matrix dimensions".to_string());
+            }
+            let is_add = matches!(node, AstNode::Add(_, _));
+            let mut out = Vec::with_capacity(a.len());
+            for (ra, rb) in a.iter().zip(b.iter()) {
+                let mut row = Vec::with_capacity(ra.len());
+                for (ca, cb) in ra.iter().zip(rb.iter()) {
+                    let v = if is_add { ca.add(cb)? } else { ca.sub(cb)? };
+                    if v.num.mag.bit_len().max(v.den.bit_len()) > 32768 {
+                        return Ok(None);
+                    }
+                    row.push(v);
+                }
+                out.push(row);
+            }
+            Ok(Some(out))
+        }
+        AstNode::Mul(l, r) => {
+            let la = try_eval_bigrat_matrix_ast(l, engine)?;
+            let rb = try_eval_bigrat_matrix_ast(r, engine)?;
+            match (la, rb) {
+                (Some(a), Some(b)) => bigrat_matrix_mul(&a, &b),
+                (Some(a), None) => {
+                    if let Some(s) = try_eval_bigrat_ast(r, engine)? {
+                        bigrat_matrix_scale(&a, &s)
+                    } else {
+                        Ok(None)
+                    }
+                }
+                (None, Some(b)) => {
+                    if let Some(s) = try_eval_bigrat_ast(l, engine)? {
+                        bigrat_matrix_scale(&b, &s)
+                    } else {
+                        Ok(None)
+                    }
+                }
+                (None, None) => Ok(None),
+            }
+        }
+        AstNode::Div(l, r) => {
+            let Some(a) = try_eval_bigrat_matrix_ast(l, engine)? else { return Ok(None); };
+            let Some(s) = try_eval_bigrat_ast(r, engine)? else { return Ok(None); };
+            let inv_s = BigRat {
+                num: BigInt::from_i128(1),
+                den: BigUInt::one(),
+            }
+            .div(&s)?;
+            bigrat_matrix_scale(&a, &inv_s)
+        }
+        AstNode::Pow(base, exp) => {
+            let Some(a) = try_eval_bigrat_matrix_ast(base, engine)? else { return Ok(None); };
+            let Some(e) = try_eval_bigrat_ast(exp, engine)? else { return Ok(None); };
+            if a.is_empty() || a.len() != a[0].len() {
+                return Err("Matrixpotenz erfordert quadratische Matrix".to_string());
+            }
+            if !e.den.is_one() {
+                return Ok(None);
+            }
+            let Some(p) = e.num.to_i128() else { return Ok(None); };
+            if !(-1000..=1000).contains(&p) {
+                return Ok(None);
+            }
+            let p_i32 = p as i32;
+            let n = a.len();
+            let zero = BigRat { num: BigInt::from_i128(0), den: BigUInt::one() };
+            let one = BigRat { num: BigInt::from_i128(1), den: BigUInt::one() };
+            let mut res = vec![vec![zero.clone(); n]; n];
+            for i in 0..n {
+                res[i][i] = one.clone();
+            }
+            if p_i32 == 0 {
+                return Ok(Some(res));
+            }
+            let mut cur = if p_i32 < 0 {
+                let Some(inv_a) = bigrat_matrix_inv(&a)? else { return Ok(None); };
+                inv_a
+            } else {
+                a
+            };
+            let mut k = p_i32.unsigned_abs();
+            while k > 0 {
+                check_eval_deadline()?;
+                if (k & 1) != 0 {
+                    let Some(next) = bigrat_matrix_mul(&res, &cur)? else { return Ok(None); };
+                    res = next;
+                }
+                k >>= 1;
+                if k > 0 {
+                    let Some(sq) = bigrat_matrix_mul(&cur, &cur)? else { return Ok(None); };
+                    cur = sq;
+                }
+            }
+            Ok(Some(res))
+        }
+        AstNode::Func(name, args) if name == "inv" && args.len() == 1 => {
+            let Some(a) = try_eval_bigrat_matrix_ast(&args[0], engine)? else { return Ok(None); };
+            bigrat_matrix_inv(&a)
+        }
+        AstNode::Func(name, args) if (name == "trans" || name == "transpose") && args.len() == 1 => {
+            let Some(a) = try_eval_bigrat_matrix_ast(&args[0], engine)? else { return Ok(None); };
+            let rows = a.len();
+            let cols = a[0].len();
+            let zero = BigRat { num: BigInt::from_i128(0), den: BigUInt::one() };
+            let mut t = vec![vec![zero; rows]; cols];
+            for r in 0..rows {
+                for c in 0..cols {
+                    t[c][r] = a[r][c].clone();
+                }
+            }
+            Ok(Some(t))
+        }
+        AstNode::Func(name, args) if name == "[]" => {
+            if args.is_empty() {
+                return Err("Leere Matrix".to_string());
+            }
+            let mut rows = Vec::with_capacity(args.len());
+            let mut expected_cols: Option<usize> = None;
+            for row_node in args {
+                let AstNode::Func(rname, cells) = row_node else {
+                    return Err("Matrix muss mit [[...]] umschlossen sein".to_string());
+                };
+                if rname != "[]" {
+                    return Err("Matrix muss mit [[...]] umschlossen sein".to_string());
+                }
+                if cells.is_empty() {
+                    return Err("Leere Matrix".to_string());
+                }
+                match expected_cols {
+                    None => expected_cols = Some(cells.len()),
+                    Some(ec) if ec != cells.len() => return Err("Incompatible matrix dimensions".to_string()),
+                    _ => {}
+                }
+                let mut row_vals = Vec::with_capacity(cells.len());
+                for cell in cells {
+                    let Some(v) = try_eval_bigrat_ast(cell, engine)? else { return Ok(None); };
+                    row_vals.push(v);
+                }
+                rows.push(row_vals);
+            }
+            Ok(Some(rows))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn values_to_bigrat_matrix(m: &[Vec<Value>]) -> Result<Option<Vec<Vec<BigRat>>>, String> {
+    let mut out = Vec::with_capacity(m.len());
+    for row in m {
+        let mut rr = Vec::with_capacity(row.len());
+        for &cell in row {
+            let Some(br) = value_to_bigrat(cell) else { return Ok(None); };
+            rr.push(br);
+        }
+        out.push(rr);
+    }
+    Ok(Some(out))
+}
+
+fn bigrat_matrix_scale(m: &[Vec<BigRat>], s: &BigRat) -> Result<Option<Vec<Vec<BigRat>>>, String> {
+    let mut out = Vec::with_capacity(m.len());
+    for row in m {
+        let mut rr = Vec::with_capacity(row.len());
+        for cell in row {
+            let v = cell.mul(s)?;
+            if v.num.mag.bit_len().max(v.den.bit_len()) > 32768 {
+                return Ok(None);
+            }
+            rr.push(v);
+        }
+        out.push(rr);
+    }
+    Ok(Some(out))
+}
+
+fn bigrat_matrix_mul(left: &[Vec<BigRat>], right: &[Vec<BigRat>]) -> Result<Option<Vec<Vec<BigRat>>>, String> {
+    let rows = left.len();
+    let inner = left[0].len();
+    if right.len() != inner {
+        return Err("Incompatible matrix dimensions".to_string());
+    }
+    let cols = right[0].len();
+    let zero = BigRat { num: BigInt::from_i128(0), den: BigUInt::one() };
+    let mut out = Vec::with_capacity(rows);
+    for r in 0..rows {
+        let mut rr = Vec::with_capacity(cols);
+        for c in 0..cols {
+            check_eval_deadline()?;
+            let mut sum = zero.clone();
+            for k in 0..inner {
+                let prod = left[r][k].mul(&right[k][c])?;
+                sum = sum.add(&prod)?;
+                if sum.num.mag.bit_len().max(sum.den.bit_len()) > 32768 {
+                    return Ok(None);
+                }
+            }
+            rr.push(sum);
+        }
+        out.push(rr);
+    }
+    Ok(Some(out))
+}
+
+fn bigrat_matrix_inv(m: &[Vec<BigRat>]) -> Result<Option<Vec<Vec<BigRat>>>, String> {
+    let n = m.len();
+    if n == 0 || m[0].len() != n {
+        return Err("Matrix-Invertierung erfordert quadratische Matrix".to_string());
+    }
+    let zero = BigRat { num: BigInt::from_i128(0), den: BigUInt::one() };
+    let one = BigRat { num: BigInt::from_i128(1), den: BigUInt::one() };
+    let mut aug = Vec::with_capacity(n);
+    for r in 0..n {
+        let mut row = Vec::with_capacity(2 * n);
+        row.extend(m[r].iter().cloned());
+        for c in 0..n {
+            row.push(if r == c { one.clone() } else { zero.clone() });
+        }
+        aug.push(row);
+    }
+    for i in 0..n {
+        check_eval_deadline()?;
+        let mut pivot_row = None;
+        for k in i..n {
+            if !aug[k][i].num.mag.is_zero() {
+                pivot_row = Some(k);
+                break;
+            }
+        }
+        let Some(pr) = pivot_row else {
+            return Err("Matrix ist singulär (nicht invertierbar)".to_string());
+        };
+        if pr != i {
+            aug.swap(i, pr);
+        }
+        let pivot = aug[i][i].clone();
+        for col in i..(2 * n) {
+            aug[i][col] = aug[i][col].div(&pivot)?;
+            if aug[i][col].num.mag.bit_len().max(aug[i][col].den.bit_len()) > 32768 {
+                return Ok(None);
+            }
+        }
+        for r in 0..n {
+            if r != i && !aug[r][i].num.mag.is_zero() {
+                check_eval_deadline()?;
+                let factor = aug[r][i].clone();
+                aug[r][i] = zero.clone();
+                for col in (i + 1)..(2 * n) {
+                    if !aug[i][col].num.mag.is_zero() {
+                        let sub_term = factor.mul(&aug[i][col])?;
+                        aug[r][col] = aug[r][col].sub(&sub_term)?;
+                        if aug[r][col].num.mag.bit_len().max(aug[r][col].den.bit_len()) > 32768 {
+                            return Ok(None);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(Some(aug.into_iter().map(|row| row.into_iter().skip(n).collect()).collect()))
+}
+
+fn exact_bigrat_det(mut a: Vec<Vec<BigRat>>) -> Result<BigRat, String> {
+    let n = a.len();
+    if n == 0 || a[0].len() != n {
+        return Err("Determinante erfordert eine quadratische Matrix".to_string());
+    }
+    let zero = BigRat { num: BigInt::from_i128(0), den: BigUInt::one() };
+    let mut det = BigRat { num: BigInt::from_i128(1), den: BigUInt::one() };
+    let mut sign_neg = false;
+    for i in 0..n {
+        check_eval_deadline()?;
+        let mut pivot_row = None;
+        for k in i..n {
+            if !a[k][i].num.mag.is_zero() {
+                pivot_row = Some(k);
+                break;
+            }
+        }
+        let Some(pr) = pivot_row else {
+            return Ok(zero);
+        };
+        if pr != i {
+            a.swap(i, pr);
+            sign_neg = !sign_neg;
+        }
+        let pivot = a[i][i].clone();
+        det = det.mul(&pivot)?;
+        if det.num.mag.bit_len().max(det.den.bit_len()) > 65536 {
+            return Err("Matrix-Überlauf".to_string());
+        }
+        for k in (i + 1)..n {
+            if a[k][i].num.mag.is_zero() {
+                continue;
+            }
+            check_eval_deadline()?;
+            let factor = a[k][i].div(&pivot)?;
+            for j in (i + 1)..n {
+                if !a[i][j].num.mag.is_zero() {
+                    let sub_term = factor.mul(&a[i][j])?;
+                    a[k][j] = a[k][j].sub(&sub_term)?;
+                    if a[k][j].num.mag.bit_len().max(a[k][j].den.bit_len()) > 65536 {
+                        return Err("Matrix-Überlauf".to_string());
+                    }
+                }
+            }
+        }
+    }
+    Ok(if sign_neg { det.negate() } else { det })
+}
+
+fn try_exact_matrix_det(m: &[Vec<Value>]) -> Result<Option<BigRat>, String> {
+    let Some(mat) = values_to_bigrat_matrix(m)? else {
+        return Ok(None);
+    };
+    Ok(Some(exact_bigrat_det(mat)?))
+}
+
+fn parse_scientific_exact_rat(s: &str) -> Option<ExactRat> {
+    let (mant, exp_s) = s.split_once('e').or_else(|| s.split_once('E'))?;
+    let exp: i32 = exp_s.parse().ok()?;
+    if mant.is_empty() {
+        return None;
+    }
+    let (neg, unsigned_mant) = if let Some(rest) = mant.strip_prefix('-') {
+        (true, rest)
+    } else if let Some(rest) = mant.strip_prefix('+') {
+        (false, rest)
+    } else {
+        (false, mant)
+    };
+    let mut digits = String::with_capacity(unsigned_mant.len());
+    let mut frac_digits: i32 = 0;
+    let mut seen_dot = false;
+    for ch in unsigned_mant.chars() {
+        if ch == '.' {
+            if seen_dot {
+                return None;
+            }
+            seen_dot = true;
+        } else if ch.is_ascii_digit() {
+            digits.push(ch);
+            if seen_dot {
+                frac_digits += 1;
+            }
+        } else {
+            return None;
+        }
+    }
+    if digits.is_empty() {
+        return None;
+    }
+    let stripped = digits.trim_start_matches('0');
+    if stripped.is_empty() {
+        return Some(ExactRat::from_int(0));
+    }
+    let trimmed = stripped.trim_end_matches('0');
+    let dropped = (stripped.len() - trimmed.len()) as i32;
+    let scale = exp.checked_sub(frac_digits)?.checked_add(dropped)?;
+    let base: i128 = trimmed.parse().ok()?;
+    let signed_base = if neg { base.checked_neg()? } else { base };
+    if scale >= 0 {
+        let pow10 = 10i128.checked_pow(u32::try_from(scale).ok()?)?;
+        ExactRat::new(signed_base.checked_mul(pow10)?, 1)
+    } else {
+        let pow10 = 10i128.checked_pow(u32::try_from(-scale).ok()?)?;
+        ExactRat::new(signed_base, pow10)
     }
 }
 use crate::constants::{
@@ -723,7 +1158,14 @@ impl NumberFormatMode {
                 mantissa *= 10.0;
                 exp -= 1;
             }
-            let m_str = trim_float(mantissa, 11);
+            let mut m_str = trim_float(mantissa, 11);
+            if m_str == "10" {
+                m_str = "1".to_string();
+                exp += 1;
+            } else if m_str == "-10" {
+                m_str = "-1".to_string();
+                exp += 1;
+            }
             let m_formatted = self.apply_separators(&m_str);
             return format!("{} × 10{}", m_formatted, to_superscript(exp));
         }
@@ -1018,6 +1460,14 @@ impl Complex {
         if o.re == 0.0 && o.im == 0.0 {
             return Self::real(f64::NAN);
         }
+        if self.re.is_finite()
+            && self.im.is_finite()
+            && (o.re.is_infinite() || o.im.is_infinite())
+            && !o.re.is_nan()
+            && !o.im.is_nan()
+        {
+            return Self::real(0.0);
+        }
         if o.re.abs() >= o.im.abs() {
             let r = o.im / o.re;
             let den = o.re + o.im * r;
@@ -1030,6 +1480,9 @@ impl Complex {
     }
 
     pub fn exp(self) -> Self {
+        if self.im == 0.0 {
+            return Self::real(self.re.exp());
+        }
         let r = self.re.exp();
         Self::new(r * self.im.cos(), r * self.im.sin())
     }
@@ -1074,6 +1527,9 @@ impl Complex {
     }
 
     pub fn sin(self) -> Self {
+        if self.im == 0.0 {
+            return Self::real(self.re.sin());
+        }
         // sin(x + iy) = sin(x)cosh(y) + i cos(x)sinh(y)
         Self {
             re: self.re.sin() * self.im.cosh(),
@@ -1082,6 +1538,9 @@ impl Complex {
     }
 
     pub fn cos(self) -> Self {
+        if self.im == 0.0 {
+            return Self::real(self.re.cos());
+        }
         // cos(x + iy) = cos(x)cosh(y) - i sin(x)sinh(y)
         Self {
             re: self.re.cos() * self.im.cosh(),
@@ -1094,6 +1553,9 @@ impl Complex {
     }
 
     pub fn sinh(self) -> Self {
+        if self.im == 0.0 {
+            return Self::real(self.re.sinh());
+        }
         // sinh(x + iy) = sinh(x)cos(y) + i cosh(x)sin(y)
         Self {
             re: self.re.sinh() * self.im.cos(),
@@ -1102,6 +1564,9 @@ impl Complex {
     }
 
     pub fn cosh(self) -> Self {
+        if self.im == 0.0 {
+            return Self::real(self.re.cosh());
+        }
         // cosh(x + iy) = cosh(x)cos(y) + i sinh(x)sin(y)
         Self {
             re: self.re.cosh() * self.im.cos(),
@@ -1705,19 +2170,21 @@ impl MathEngine {
                 }
             }
             AstNode::Func(name, args) if (name == "d" || name == "deriv" || name == "diff") && args.len() == 2 => {
-                if let AstNode::Var(var) = &args[1] {
-                    if let Some(diff_ast) = args[0].diff_with_mode(var, self.angle_mode) {
-                        let res_ast = diff_ast.simplify();
-                        let res = res_ast.to_display_string();
-                        return Some(EvalOutput {
-                            exact_text: res.clone(),
-                            decimal_text: res,
-                            has_distinct_exact: true,
-                            numeric_value: None,
-                            val: None,
-                            integration_report: None,
-                            matrix_expression: None,
-                        });
+                if !args[0].contains_step_function() {
+                    if let AstNode::Var(var) = &args[1] {
+                        if let Some(diff_ast) = args[0].diff_with_mode(var, self.angle_mode) {
+                            let res_ast = diff_ast.simplify();
+                            let res = res_ast.to_display_string();
+                            return Some(EvalOutput {
+                                exact_text: res.clone(),
+                                decimal_text: res,
+                                has_distinct_exact: true,
+                                numeric_value: None,
+                                val: None,
+                                integration_report: None,
+                                matrix_expression: None,
+                            });
+                        }
                     }
                 }
             }
@@ -1979,6 +2446,30 @@ impl MathEngine {
     fn evaluate_matrix_expression_with_value(&self, expr: &str) -> Result<(EvalOutput, Option<Vec<Vec<Value>>>), String> {
         let trimmed = expr.trim();
         if let Ok(ast) = AstParser::parse(trimmed) {
+            if !self.contains_matrix_expression(&ast) {
+                if let Some(br) = try_eval_bigrat_ast(&ast, self)? {
+                let exact = br.to_exact_string();
+                let f = br.to_f64();
+                let dec = if br.den.is_one() {
+                    br.num.to_decimal_string()
+                } else {
+                    self.number_format.format_f64(f)
+                };
+                let val = Value {
+                    c: Complex::real(f),
+                    rat: br.to_exact_rat(),
+                };
+                return Ok((EvalOutput {
+                    has_distinct_exact: exact != dec,
+                    exact_text: exact,
+                    decimal_text: dec,
+                    numeric_value: Some(val.c),
+                    val: Some(val),
+                    integration_report: None,
+                    matrix_expression: None,
+                }, None));
+                }
+            }
             if let MatrixOrScalar::Scalar(val) = self.eval_matrix_or_scalar_ast(&ast)? {
                 let dec = self.format_value_decimal(val);
                 let exact = Self::format_exact_real(val).unwrap_or_else(|| dec.clone());
@@ -1996,6 +2487,28 @@ impl MathEngine {
 
         if let Some(inner) = trimmed.strip_prefix("det(").and_then(|s| s.strip_suffix(')')) {
             let mat = self.eval_matrix_expr(inner)?;
+            if let Some(br) = try_exact_matrix_det(&mat)? {
+                let exact = br.to_exact_string();
+                let f = br.to_f64();
+                let dec = if br.den.is_one() {
+                    br.num.to_decimal_string()
+                } else {
+                    self.number_format.format_f64(f)
+                };
+                let det = Value {
+                    c: Complex::real(f),
+                    rat: br.to_exact_rat(),
+                };
+                return Ok((EvalOutput {
+                    has_distinct_exact: exact != dec,
+                    exact_text: exact,
+                    decimal_text: dec,
+                    numeric_value: Some(det.c),
+                    val: Some(det),
+                    integration_report: None,
+                    matrix_expression: None,
+                }, None));
+            }
             let det = matrix_det(&mat)?;
             let dec = self.format_value_decimal(det);
             let exact = Self::format_exact_real(det).unwrap_or_else(|| dec.clone());
@@ -2086,7 +2599,31 @@ impl MathEngine {
         match node {
             AstNode::Num(_) | AstNode::BigInt(_) | AstNode::Var(_) => true,
             AstNode::Neg(inner) => self.is_antiderivative_valid_on(inner, var, lo, hi, ov),
-            AstNode::Add(a, b) | AstNode::Sub(a, b) | AstNode::Mul(a, b) => {
+            AstNode::Add(a, b) | AstNode::Sub(a, b) => {
+                self.is_antiderivative_valid_on(a, var, lo, hi, ov)
+                    && self.is_antiderivative_valid_on(b, var, lo, hi, ov)
+            }
+            AstNode::Mul(a, b) => {
+                let is_u_ln_pair = |lin: &AstNode, ln_cand: &AstNode| -> bool {
+                    if let AstNode::Func(fname, fargs) = ln_cand {
+                        if fname == "ln" && fargs.len() == 1 {
+                            if let AstNode::Func(an, aargs) = &fargs[0] {
+                                if an == "abs" && aargs.len() == 1 && aargs[0] == *lin && lin.match_linear(var).is_some() {
+                                    return self.is_antiderivative_valid_on(lin, var, lo, hi, ov);
+                                }
+                            }
+                            if fargs[0] == *lin && lin.match_linear(var).is_some() {
+                                if let (Some(v_lo), Some(v_hi)) = (eval_at(lin, lo), eval_at(lin, hi)) {
+                                    return v_lo >= 0.0 && v_hi >= 0.0;
+                                }
+                            }
+                        }
+                    }
+                    false
+                };
+                if is_u_ln_pair(a, b) || is_u_ln_pair(b, a) {
+                    return true;
+                }
                 self.is_antiderivative_valid_on(a, var, lo, hi, ov)
                     && self.is_antiderivative_valid_on(b, var, lo, hi, ov)
             }
@@ -2106,9 +2643,21 @@ impl MathEngine {
                     return self.is_antiderivative_valid_on(base, var, lo, hi, ov);
                 }
                 if let Ok(ev) = self.eval_ast_scalar_with_overrides(exp, ov) {
-                    if ev.c.is_real() && ev.c.re > 0.0 && ev.c.re.is_finite() && base.match_linear(var).is_some() {
-                        if let (Some(v_lo), Some(v_hi)) = (eval_at(base, lo), eval_at(base, hi)) {
-                            return v_lo >= 0.0 && v_hi >= 0.0;
+                    if ev.c.is_real() && ev.c.re.is_finite() {
+                        if let AstNode::Func(an, aargs) = &**base {
+                            if an == "abs" && aargs.len() == 1 && aargs[0].match_linear(var).is_some() {
+                                if ev.c.re > 0.0 {
+                                    return self.is_antiderivative_valid_on(&aargs[0], var, lo, hi, ov);
+                                }
+                                if let (Some(v_lo), Some(v_hi)) = (eval_at(&aargs[0], lo), eval_at(&aargs[0], hi)) {
+                                    return v_lo != 0.0 && v_hi != 0.0 && v_lo.signum() == v_hi.signum();
+                                }
+                            }
+                        }
+                        if ev.c.re > 0.0 && base.match_linear(var).is_some() {
+                            if let (Some(v_lo), Some(v_hi)) = (eval_at(base, lo), eval_at(base, hi)) {
+                                return v_lo >= 0.0 && v_hi >= 0.0;
+                            }
                         }
                     }
                 }
@@ -2119,8 +2668,22 @@ impl MathEngine {
                     return false;
                 }
                 match name.as_str() {
-                    "sin" | "cos" | "sinh" | "cosh" | "exp" | "atan" | "arctan" => {
+                    "sin" | "cos" | "sinh" | "cosh" | "exp" | "atan" | "arctan" | "abs" | "sign" | "sgn" => {
                         self.is_antiderivative_valid_on(&args[0], var, lo, hi, ov)
+                    }
+                    "ln" => {
+                        if let AstNode::Func(an, aargs) = &args[0] {
+                            if an == "abs" && aargs.len() == 1 && aargs[0].match_linear(var).is_some() {
+                                if let (Some(v_lo), Some(v_hi)) = (eval_at(&aargs[0], lo), eval_at(&aargs[0], hi)) {
+                                    return v_lo != 0.0 && v_hi != 0.0 && v_lo.signum() == v_hi.signum();
+                                }
+                            }
+                        } else if args[0].match_linear(var).is_some() {
+                            if let (Some(v_lo), Some(v_hi)) = (eval_at(&args[0], lo), eval_at(&args[0], hi)) {
+                                return v_lo > 0.0 && v_hi > 0.0;
+                            }
+                        }
+                        false
                     }
                     "asin" | "arcsin" | "acos" | "arccos" => {
                         if args[0].match_linear(var).is_some() {
@@ -2131,6 +2694,11 @@ impl MathEngine {
                         false
                     }
                     "sqrt" => {
+                        if let AstNode::Func(an, aargs) = &args[0] {
+                            if an == "abs" && aargs.len() == 1 && aargs[0].match_linear(var).is_some() {
+                                return self.is_antiderivative_valid_on(&aargs[0], var, lo, hi, ov);
+                            }
+                        }
                         if args[0].match_linear(var).is_some() {
                             if let (Some(v_lo), Some(v_hi)) = (eval_at(&args[0], lo), eval_at(&args[0], hi)) {
                                 return v_lo >= 0.0 && v_hi >= 0.0;
@@ -2149,6 +2717,44 @@ impl MathEngine {
                     _ => false,
                 }
             }
+        }
+    }
+
+    fn eval_antiderivative_endpoint(
+        &self,
+        node: &AstNode,
+        ov: Option<&HashMap<String, Value>>,
+    ) -> Result<Value, String> {
+        match node {
+            AstNode::Neg(a) => {
+                let v = self.eval_antiderivative_endpoint(a, ov)?;
+                Ok(Value {
+                    c: Complex::new(-v.c.re, -v.c.im),
+                    rat: v.rat.and_then(|r| Some(ExactRat { num: r.num.checked_neg()?, den: r.den })),
+                })
+            }
+            AstNode::Add(a, b) => Ok(self
+                .eval_antiderivative_endpoint(a, ov)?
+                .add(self.eval_antiderivative_endpoint(b, ov)?)),
+            AstNode::Sub(a, b) => Ok(self
+                .eval_antiderivative_endpoint(a, ov)?
+                .sub(self.eval_antiderivative_endpoint(b, ov)?)),
+            AstNode::Mul(a, b) => {
+                let va = self.eval_antiderivative_endpoint(a, ov)?;
+                let vb = self.eval_antiderivative_endpoint(b, ov)?;
+                let a_is_ln = matches!(a.as_ref(), AstNode::Func(n, _) if n == "ln");
+                let b_is_ln = matches!(b.as_ref(), AstNode::Func(n, _) if n == "ln");
+                if (va.c.is_real() && va.c.re == 0.0 && b_is_ln && vb.c.is_real() && vb.c.re.is_infinite())
+                    || (vb.c.is_real() && vb.c.re == 0.0 && a_is_ln && va.c.is_real() && va.c.re.is_infinite())
+                {
+                    return Ok(Value::from_f64(0.0));
+                }
+                Ok(va.mul(vb))
+            }
+            AstNode::Div(a, b) => self
+                .eval_antiderivative_endpoint(a, ov)?
+                .div(self.eval_antiderivative_endpoint(b, ov)?),
+            _ => self.eval_ast_scalar_with_overrides(node, ov),
         }
     }
 
@@ -2195,8 +2801,10 @@ impl MathEngine {
                     AstNode::Var(v) => v.clone(),
                     other => other.to_display_string(),
                 };
-                if let Some(d_ast) = args[0].diff_with_mode(&var_name, self.angle_mode) {
-                    return self.eval_ast_scalar_with_overrides(&d_ast.simplify(), ov);
+                if !args[0].contains_step_function() {
+                    if let Some(d_ast) = args[0].diff_with_mode(&var_name, self.angle_mode) {
+                        return self.eval_ast_scalar_with_overrides(&d_ast.simplify(), ov);
+                    }
                 }
                 let expr = node.to_display_string();
                 let mut p = ExprParser::new(&expr, self, ov);
@@ -2280,6 +2888,36 @@ impl MathEngine {
                     "ln" => Ok(Value::from_complex(v0.c.ln())),
                     "log10" | "lg" => Ok(Value::from_f64(v0.c.re.log10())),
                     "abs" => Ok(Value::from_f64(v0.c.abs())),
+                    "floor" => {
+                        if !v0.c.is_real() || !v0.c.re.is_finite() {
+                            return Err("floor erfordert endliche reelle Zahl".to_string());
+                        }
+                        Ok(Value::from_f64(v0.c.re.floor()))
+                    }
+                    "ceil" => {
+                        if !v0.c.is_real() || !v0.c.re.is_finite() {
+                            return Err("ceil erfordert endliche reelle Zahl".to_string());
+                        }
+                        Ok(Value::from_f64(v0.c.re.ceil()))
+                    }
+                    "round" => {
+                        if !v0.c.is_real() || !v0.c.re.is_finite() {
+                            return Err("round erfordert endliche reelle Zahl".to_string());
+                        }
+                        Ok(Value::from_f64(v0.c.re.round()))
+                    }
+                    "sign" | "sgn" => {
+                        if !v0.c.is_real() || !v0.c.re.is_finite() {
+                            return Err("sign erfordert endliche reelle Zahl".to_string());
+                        }
+                        Ok(Value::from_int(if v0.c.re > 0.0 {
+                            1
+                        } else if v0.c.re < 0.0 {
+                            -1
+                        } else {
+                            0
+                        }))
+                    }
                     _ => {
                         let expr = node.to_display_string();
                         let mut p = ExprParser::new(&expr, self, ov);
@@ -2326,14 +2964,14 @@ impl MathEngine {
                 let (va, ea) = self.eval_ast_with_cancel_err(a, ov)?;
                 let (vb, eb) = self.eval_ast_with_cancel_err(b, ov)?;
                 let res = va.add(vb);
-                let step = 8.0 * f64::EPSILON * (va.c.abs() + vb.c.abs());
+                let step = 1.5 * f64::EPSILON * (va.c.abs() + vb.c.abs());
                 Ok((res, ea + eb + step))
             }
             AstNode::Sub(a, b) => {
                 let (va, ea) = self.eval_ast_with_cancel_err(a, ov)?;
                 let (vb, eb) = self.eval_ast_with_cancel_err(b, ov)?;
                 let res = va.sub(vb);
-                let step = 8.0 * f64::EPSILON * (va.c.abs() + vb.c.abs());
+                let step = 1.5 * f64::EPSILON * (va.c.abs() + vb.c.abs());
                 Ok((res, ea + eb + step))
             }
             AstNode::Mul(a, b) => {
@@ -2404,9 +3042,15 @@ impl MathEngine {
         }
     }
 
-    fn push_critical_point(out: &mut Vec<f64>, root: f64, lo: f64, hi: f64) {
-        if out.len() < 64 && root.is_finite() && root > lo && root < hi {
-            out.push(root);
+    const MAX_CRITICAL_POINTS: usize = 2048;
+
+    fn push_critical_point(out: &mut Vec<f64>, root: f64, lo: f64, hi: f64, truncated: &mut bool) {
+        if root.is_finite() && root > lo && root < hi {
+            if out.len() >= Self::MAX_CRITICAL_POINTS {
+                *truncated = true;
+            } else {
+                out.push(root);
+            }
         }
     }
 
@@ -2420,6 +3064,7 @@ impl MathEngine {
         hi: f64,
         ov: Option<&HashMap<String, Value>>,
         out: &mut Vec<f64>,
+        truncated: &mut bool,
     ) {
         if let Some((a_node, b_node)) = arg.match_linear(var) {
             if let (Some(a), Some(b)) = (
@@ -2431,14 +3076,16 @@ impl MathEngine {
                     let u_hi = a * hi + b;
                     let m_min = ((u_lo.min(u_hi) - base_sol) / period).floor() as i64 - 1;
                     let m_max = ((u_lo.max(u_hi) - base_sol) / period).ceil() as i64 + 1;
-                    let start = m_min.max(-32);
-                    let end = m_max.min(32);
-                    for m in start..=end {
-                        if out.len() >= 64 {
-                            break;
-                        }
+                    let max_end = m_min.saturating_add(Self::MAX_CRITICAL_POINTS as i64 + 8).min(m_max);
+                    for m in m_min..=max_end {
                         let root = (base_sol + (m as f64) * period - b) / a;
-                        Self::push_critical_point(out, root, lo, hi);
+                        Self::push_critical_point(out, root, lo, hi, truncated);
+                        if *truncated {
+                            return;
+                        }
+                    }
+                    if max_end < m_max {
+                        *truncated = true;
                     }
                 }
             }
@@ -2447,7 +3094,7 @@ impl MathEngine {
                 Box::new(arg.clone()),
                 Box::new(AstNode::Num(Value::from_f64(base_sol))),
             );
-            self.collect_critical_points(&shifted, var, lo, hi, ov, out);
+            self.collect_critical_points(&shifted, var, lo, hi, ov, out, truncated);
         }
     }
 
@@ -2459,9 +3106,50 @@ impl MathEngine {
         hi: f64,
         ov: Option<&HashMap<String, Value>>,
         out: &mut Vec<f64>,
+        truncated: &mut bool,
     ) {
-        if out.len() >= 64 || !node.contains_var(var) {
+        if *truncated || out.len() >= Self::MAX_CRITICAL_POINTS {
+            if node.contains_var(var) && out.len() >= Self::MAX_CRITICAL_POINTS {
+                *truncated = true;
+            }
             return;
+        }
+        if !node.contains_var(var) {
+            return;
+        }
+        if let AstNode::Func(fname, fargs) = node {
+            if fargs.len() == 1 && fargs[0].match_linear(var).is_some() {
+                let arg = &fargs[0];
+                let half = if self.angle_mode == AngleMode::Degrees {
+                    180.0
+                } else {
+                    std::f64::consts::PI
+                };
+                match fname.as_str() {
+                    "sin" => {
+                        self.push_linear_periodic_roots(arg, var, 0.0, half, lo, hi, ov, out, truncated);
+                        return;
+                    }
+                    "cos" => {
+                        self.push_linear_periodic_roots(arg, var, 0.5 * half, half, lo, hi, ov, out, truncated);
+                        return;
+                    }
+                    "tan" => {
+                        self.push_linear_periodic_roots(arg, var, 0.0, half, lo, hi, ov, out, truncated);
+                        self.push_linear_periodic_roots(arg, var, 0.5 * half, half, lo, hi, ov, out, truncated);
+                        return;
+                    }
+                    "floor" | "ceil" => {
+                        self.push_linear_periodic_roots(arg, var, 0.0, 1.0, lo, hi, ov, out, truncated);
+                        return;
+                    }
+                    "round" => {
+                        self.push_linear_periodic_roots(arg, var, 0.5, 1.0, lo, hi, ov, out, truncated);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
         }
         if let Some((a_node, b_node)) = node.match_linear(var) {
             if let (Some(av), Some(bv)) = (
@@ -2469,7 +3157,7 @@ impl MathEngine {
                 self.eval_ast_with_x_default_zero(&b_node, var, None, ov),
             ) {
                 if av != 0.0 {
-                    Self::push_critical_point(out, -bv / av, lo, hi);
+                    Self::push_critical_point(out, -bv / av, lo, hi, truncated);
                 }
             }
         } else if let (Some(f0), Some(f1), Some(fm1), Some(f2)) = (
@@ -2484,15 +3172,14 @@ impl MathEngine {
             let f2_pred = 4.0 * qa + 2.0 * qb + qc;
             if qa.abs() > 1e-12 && (f2_pred - f2).abs() <= 1e-6 * (1.0 + f2.abs() + f0.abs()) {
                 let xv = -qb / (2.0 * qa);
-                Self::push_critical_point(out, xv, lo, hi);
+                Self::push_critical_point(out, xv, lo, hi, truncated);
                 let disc = qb * qb - 4.0 * qa * qc;
                 if disc >= 0.0 {
                     let s = disc.sqrt();
-                    Self::push_critical_point(out, (-qb - s) / (2.0 * qa), lo, hi);
-                    Self::push_critical_point(out, (-qb + s) / (2.0 * qa), lo, hi);
+                    Self::push_critical_point(out, (-qb - s) / (2.0 * qa), lo, hi, truncated);
+                    Self::push_critical_point(out, (-qb + s) / (2.0 * qa), lo, hi, truncated);
                 } else {
-                    // Nearby complex root still sharpens peak near vertex
-                    Self::push_critical_point(out, xv, lo, hi);
+                    Self::push_critical_point(out, xv, lo, hi, truncated);
                 }
             } else if let (Some(fm2), Some(f05)) = (
                 self.eval_ast_with_x_default_zero(node, var, Some(-2.0), ov),
@@ -2509,8 +3196,8 @@ impl MathEngine {
                         let u_vert = -bb / (2.0 * ba);
                         if u_vert > 0.0 {
                             let s = u_vert.sqrt();
-                            Self::push_critical_point(out, s, lo, hi);
-                            Self::push_critical_point(out, -s, lo, hi);
+                            Self::push_critical_point(out, s, lo, hi, truncated);
+                            Self::push_critical_point(out, -s, lo, hi, truncated);
                         }
                         let disc = bb * bb - 4.0 * ba * bc;
                         if disc >= 0.0 {
@@ -2518,8 +3205,8 @@ impl MathEngine {
                             for u_root in [(-bb - s) / (2.0 * ba), (-bb + s) / (2.0 * ba)] {
                                 if u_root >= 0.0 {
                                     let xr = u_root.sqrt();
-                                    Self::push_critical_point(out, xr, lo, hi);
-                                    Self::push_critical_point(out, -xr, lo, hi);
+                                    Self::push_critical_point(out, xr, lo, hi, truncated);
+                                    Self::push_critical_point(out, -xr, lo, hi, truncated);
                                 }
                             }
                         }
@@ -2547,40 +3234,40 @@ impl MathEngine {
                             let u0 = self.angle_mode.from_radians(target.asin());
                             let half = if self.angle_mode == AngleMode::Degrees { 180.0 } else { pi };
                             let full = 2.0 * half;
-                            self.push_linear_periodic_roots(arg, var, u0, full, lo, hi, ov, out);
-                            self.push_linear_periodic_roots(arg, var, half - u0, full, lo, hi, ov, out);
+                            self.push_linear_periodic_roots(arg, var, u0, full, lo, hi, ov, out, truncated);
+                            self.push_linear_periodic_roots(arg, var, half - u0, full, lo, hi, ov, out, truncated);
                         }
                         "cos" if target.abs() <= 1.0 => {
                             let u0 = self.angle_mode.from_radians(target.acos());
                             let full = if self.angle_mode == AngleMode::Degrees { 360.0 } else { 2.0 * pi };
-                            self.push_linear_periodic_roots(arg, var, u0, full, lo, hi, ov, out);
-                            self.push_linear_periodic_roots(arg, var, -u0, full, lo, hi, ov, out);
+                            self.push_linear_periodic_roots(arg, var, u0, full, lo, hi, ov, out, truncated);
+                            self.push_linear_periodic_roots(arg, var, -u0, full, lo, hi, ov, out, truncated);
                         }
                         "tan" => {
                             let u0 = self.angle_mode.from_radians(target.atan());
                             let half = if self.angle_mode == AngleMode::Degrees { 180.0 } else { pi };
-                            self.push_linear_periodic_roots(arg, var, u0, half, lo, hi, ov, out);
+                            self.push_linear_periodic_roots(arg, var, u0, half, lo, hi, ov, out, truncated);
                         }
                         "exp" if target > 0.0 => {
                             let shifted = AstNode::Sub(
                                 Box::new(arg.clone()),
                                 Box::new(AstNode::Num(Value::from_f64(target.ln()))),
                             );
-                            self.collect_critical_points(&shifted, var, lo, hi, ov, out);
+                            self.collect_critical_points(&shifted, var, lo, hi, ov, out, truncated);
                         }
                         "ln" => {
                             let shifted = AstNode::Sub(
                                 Box::new(arg.clone()),
                                 Box::new(AstNode::Num(Value::from_f64(target.exp()))),
                             );
-                            self.collect_critical_points(&shifted, var, lo, hi, ov, out);
+                            self.collect_critical_points(&shifted, var, lo, hi, ov, out, truncated);
                         }
                         "sqrt" if target >= 0.0 => {
                             let shifted = AstNode::Sub(
                                 Box::new(arg.clone()),
                                 Box::new(AstNode::Num(Value::from_f64(target * target))),
                             );
-                            self.collect_critical_points(&shifted, var, lo, hi, ov, out);
+                            self.collect_critical_points(&shifted, var, lo, hi, ov, out, truncated);
                         }
                         "abs" if target >= 0.0 => {
                             let s1 = AstNode::Sub(
@@ -2591,8 +3278,8 @@ impl MathEngine {
                                 Box::new(arg.clone()),
                                 Box::new(AstNode::Num(Value::from_f64(target))),
                             );
-                            self.collect_critical_points(&s1, var, lo, hi, ov, out);
-                            self.collect_critical_points(&s2, var, lo, hi, ov, out);
+                            self.collect_critical_points(&s1, var, lo, hi, ov, out, truncated);
+                            self.collect_critical_points(&s2, var, lo, hi, ov, out, truncated);
                         }
                         _ => {}
                     }
@@ -2600,18 +3287,18 @@ impl MathEngine {
             }
         }
         match node {
-            AstNode::Neg(inner) => self.collect_critical_points(inner, var, lo, hi, ov, out),
+            AstNode::Neg(inner) => self.collect_critical_points(inner, var, lo, hi, ov, out, truncated),
             AstNode::Add(l, r)
             | AstNode::Sub(l, r)
             | AstNode::Mul(l, r)
             | AstNode::Div(l, r) => {
-                self.collect_critical_points(l, var, lo, hi, ov, out);
-                self.collect_critical_points(r, var, lo, hi, ov, out);
+                self.collect_critical_points(l, var, lo, hi, ov, out, truncated);
+                self.collect_critical_points(r, var, lo, hi, ov, out, truncated);
             }
-            AstNode::Pow(base, _) => self.collect_critical_points(base, var, lo, hi, ov, out),
+            AstNode::Pow(base, _) => self.collect_critical_points(base, var, lo, hi, ov, out, truncated),
             AstNode::Func(_, args) => {
                 for a in args {
-                    self.collect_critical_points(a, var, lo, hi, ov, out);
+                    self.collect_critical_points(a, var, lo, hi, ov, out, truncated);
                 }
             }
             _ => {}
@@ -2850,7 +3537,7 @@ impl MathEngine {
                             ch == ',' && nested == 0
                         });
                         for cell in cells {
-                            let mut p = ExprParser::new(cell.trim(), self, None);
+                            let mut p = ExprParser::new_matrix_cell(cell.trim(), self, None);
                             let v = p.parse_expr()?;
                             p.skip_ws();
                             if p.pos < p.chars.len() || !v.c.is_real() || !v.c.re.is_finite() {
@@ -3245,6 +3932,13 @@ fn matrix_det(m: &[Vec<Value>]) -> Result<Value, String> {
     if n == 0 || m[0].len() != n {
         return Err("Determinante erfordert eine quadratische Matrix".to_string());
     }
+    if let Some(br) = try_exact_matrix_det(m)? {
+        let f = br.to_f64();
+        return Ok(Value {
+            c: Complex::real(f),
+            rat: br.to_exact_rat(),
+        });
+    }
     if n == 1 {
         return Ok(m[0][0]);
     }
@@ -3461,6 +4155,31 @@ pub fn adaptive_gauss_integrate_with_anchors<F>(
 where
     F: Fn(f64) -> Result<f64, String>,
 {
+    adaptive_gauss_integrate_with_anchors_impl(
+        f,
+        a,
+        b,
+        initial_subintervals,
+        eps_abs,
+        eps_rel,
+        extra_anchors,
+        false,
+    )
+}
+
+fn adaptive_gauss_integrate_with_anchors_impl<F>(
+    f: F,
+    a: f64,
+    b: f64,
+    initial_subintervals: usize,
+    eps_abs: f64,
+    eps_rel: f64,
+    extra_anchors: &[f64],
+    anchors_truncated: bool,
+) -> Result<IntegrationReport, String>
+where
+    F: Fn(f64) -> Result<f64, String>,
+{
     const NODES5: [f64; 5] = [
         0.0,
         0.5384693101056831,
@@ -3492,6 +4211,7 @@ where
         b: f64,
         val5: f64,
         err: f64,
+        refinable: bool,
     }
 
     let eval_sub = |ia: f64, ib: f64| -> Result<Subinterval, String> {
@@ -3523,7 +4243,8 @@ where
         let q3 = sum3 * half_h;
 
         let err = (q5 - q3).abs();
-        Ok(Subinterval { a: ia, b: ib, val5: q5, err })
+        let refinable = mid != ia && mid != ib;
+        Ok(Subinterval { a: ia, b: ib, val5: q5, err, refinable })
     };
 
     if a == b {
@@ -3546,95 +4267,114 @@ where
     let hi = a.max(b);
     let span = hi - lo;
     let step = span / (initial_subintervals as f64);
-    let mut pts = Vec::with_capacity(initial_subintervals + 128);
+    let mut pts: Vec<(f64, bool)> = Vec::with_capacity(initial_subintervals + extra_anchors.len() + 128);
     for i in 0..=initial_subintervals {
-        pts.push(if i == initial_subintervals { hi } else { lo + (i as f64) * step });
+        let p = if i == initial_subintervals { hi } else { lo + (i as f64) * step };
+        pts.push((p, i == 0 || i == initial_subintervals));
     }
 
+    let mut unique_extra: Vec<f64> = extra_anchors
+        .iter()
+        .copied()
+        .filter(|&ea| ea.is_finite() && ea > lo && ea < hi)
+        .collect();
+    unique_extra.sort_by(f64::total_cmp);
+    unique_extra.dedup_by(|b, a| (*b - *a).abs() <= 1e-12 * b.abs().max(1.0));
+    let many_extra = unique_extra.len() > 32;
     if initial_subintervals >= 500 {
         let mid = 0.5 * (lo + hi);
-        let mut anchors: Vec<f64> = Vec::with_capacity(extra_anchors.len() + 4);
-        anchors.push(lo);
+        let mut offset_anchors: Vec<f64> = vec![lo, mid, hi];
         if lo < 0.0 && hi > 0.0 {
-            anchors.push(0.0);
+            offset_anchors.push(0.0);
+            pts.push((0.0, true));
         }
-        anchors.push(mid);
-        anchors.push(hi);
-        for &ea in extra_anchors {
-            if ea.is_finite() && ea > lo && ea < hi {
-                anchors.push(ea);
+        pts.push((mid, true));
+        for &ea in &unique_extra {
+            pts.push((ea, true));
+            if !many_extra {
+                offset_anchors.push(ea);
             }
         }
         let offsets = [
             1e-7, 5e-7, 1e-6, 3e-6, 1e-5, 3e-5, 1e-4, 3e-4, 1e-3, 3e-3,
             1e-2, 3e-2, 1e-1, 1.0, 4.0, 16.0, 64.0, 256.0, 1024.0,
         ];
-        for anchor in anchors {
-            if anchor > lo && anchor < hi {
-                pts.push(anchor);
-            }
+        for anchor in offset_anchors {
             for &off in &offsets {
                 if off >= span * 0.25 {
                     break;
                 }
                 if anchor - off > lo {
-                    pts.push(anchor - off);
+                    pts.push((anchor - off, false));
                 }
                 if anchor + off < hi {
-                    pts.push(anchor + off);
+                    pts.push((anchor + off, false));
                 }
             }
         }
     } else {
-        let mut anchors: Vec<f64> = Vec::with_capacity(extra_anchors.len() + 1);
+        let mut offset_anchors: Vec<f64> = Vec::new();
         if lo < 0.0 && hi > 0.0 {
-            anchors.push(0.0);
+            offset_anchors.push(0.0);
+            pts.push((0.0, true));
         }
-        for &ea in extra_anchors {
-            if ea.is_finite() && ea > lo && ea < hi {
-                anchors.push(ea);
+        for &ea in &unique_extra {
+            pts.push((ea, true));
+            if !many_extra {
+                offset_anchors.push(ea);
             }
         }
         let nested_offsets = [1e-4, 5e-4, 2e-3, 5e-3, 1e-2, 2e-2, 5e-2, 0.25, 1.0, 4.0];
-        for anchor in anchors {
-            pts.push(anchor);
+        for anchor in offset_anchors {
             for &off in &nested_offsets {
                 if off >= span * 0.25 {
                     break;
                 }
                 if anchor - off > lo {
-                    pts.push(anchor - off);
+                    pts.push((anchor - off, false));
                 }
                 if anchor + off < hi {
-                    pts.push(anchor + off);
+                    pts.push((anchor + off, false));
                 }
             }
         }
     }
 
-    pts.sort_by(f64::total_cmp);
-    let mut dedup: Vec<f64> = Vec::with_capacity(pts.len());
-    for p in pts {
-        if let Some(&last) = dedup.last() {
-            if p - last <= 1e-12 * p.abs().max(1.0) {
-                if p == hi {
-                    *dedup.last_mut().unwrap() = hi;
+    pts.sort_by(|x, y| x.0.total_cmp(&y.0).then_with(|| y.1.cmp(&x.1)));
+    let mut dedup: Vec<(f64, bool)> = Vec::with_capacity(pts.len());
+    for (p, crit) in pts {
+        if let Some(&(last_p, last_crit)) = dedup.last() {
+            if p == last_p {
+                if crit {
+                    dedup.last_mut().unwrap().1 = true;
+                }
+                continue;
+            }
+            if p - last_p <= 1e-12 * p.abs().max(1.0) {
+                if crit && last_crit {
+                    dedup.push((p, true));
+                    continue;
+                }
+                if p == hi || (crit && !last_crit) {
+                    let last = dedup.last_mut().unwrap();
+                    last.0 = p;
+                    last.1 = crit;
                 }
                 continue;
             }
         }
-        dedup.push(p);
+        dedup.push((p, crit));
     }
     if a < b {
         for w in dedup.windows(2) {
-            let sub = eval_sub(w[0], w[1])?;
+            let sub = eval_sub(w[0].0, w[1].0)?;
             total_val += sub.val5;
             total_err += sub.err;
             intervals.push(sub);
         }
     } else {
         for w in dedup.windows(2).rev() {
-            let sub = eval_sub(w[1], w[0])?;
+            let sub = eval_sub(w[1].0, w[0].0)?;
             total_val += sub.val5;
             total_err += sub.err;
             intervals.push(sub);
@@ -3647,24 +4387,30 @@ where
 
     while total_err > target_tol && evals < max_evals {
         check_eval_deadline()?;
-        let mut worst_idx = 0;
-        let mut worst_err = intervals[0].err;
-        for (idx, iv) in intervals.iter().enumerate().skip(1) {
-            if iv.err > worst_err {
-                worst_err = iv.err;
-                worst_idx = idx;
+        let mut worst_opt: Option<(usize, f64)> = None;
+        for (idx, iv) in intervals.iter().enumerate() {
+            if iv.refinable && worst_opt.is_none_or(|(_, we)| iv.err > we) {
+                worst_opt = Some((idx, iv.err));
             }
         }
+        let Some((worst_idx, worst_err)) = worst_opt else {
+            break;
+        };
 
         if worst_err <= 1e-15 {
             break;
+        }
+
+        let mid = (intervals[worst_idx].a + intervals[worst_idx].b) * 0.5;
+        if mid == intervals[worst_idx].a || mid == intervals[worst_idx].b {
+            intervals[worst_idx].refinable = false;
+            continue;
         }
 
         let worst = intervals.swap_remove(worst_idx);
         total_val -= worst.val5;
         total_err -= worst.err;
 
-        let mid = (worst.a + worst.b) * 0.5;
         let left = eval_sub(worst.a, mid)?;
         let right = eval_sub(mid, worst.b)?;
 
@@ -3681,8 +4427,13 @@ where
         }
     }
 
-    let converged = total_err <= target_tol;
-    let message = if converged {
+    let converged = total_err <= target_tol && !anchors_truncated;
+    let message = if anchors_truncated {
+        format!(
+            "Konvergenz nicht erreicht: Zu viele Unstetigkeits-/Knickstellen im Intervall (Fehlerabschätzung {:.2e})",
+            total_err
+        )
+    } else if converged {
         format!(
             "Konvergiert: Fehlerabschätzung {:.2e} <= Toleranz {:.2e} ({} Auswertungen)",
             total_err, target_tol, evals
@@ -3774,20 +4525,32 @@ impl AstNode {
         }
     }
 
-    fn contains_step_function(&self) -> bool {
+    fn contains_nonsmooth_function(&self, include_abs: bool) -> bool {
         match self {
             AstNode::Num(_) | AstNode::BigInt(_) | AstNode::Var(_) => false,
-            AstNode::Neg(a) => a.contains_step_function(),
+            AstNode::Neg(a) => a.contains_nonsmooth_function(include_abs),
             AstNode::Add(a, b)
             | AstNode::Sub(a, b)
             | AstNode::Mul(a, b)
             | AstNode::Div(a, b)
-            | AstNode::Pow(a, b) => a.contains_step_function() || b.contains_step_function(),
+            | AstNode::Pow(a, b) => {
+                a.contains_nonsmooth_function(include_abs)
+                    || b.contains_nonsmooth_function(include_abs)
+            }
             AstNode::Func(name, args) => {
                 matches!(name.as_str(), "floor" | "ceil" | "round" | "sign" | "sgn" | "mod")
-                    || args.iter().any(|arg| arg.contains_step_function())
+                    || (include_abs && name == "abs")
+                    || args.iter().any(|arg| arg.contains_nonsmooth_function(include_abs))
             }
         }
+    }
+
+    fn contains_step_function(&self) -> bool {
+        self.contains_nonsmooth_function(false)
+    }
+
+    fn contains_step_or_abs(&self) -> bool {
+        self.contains_nonsmooth_function(true)
     }
 
     #[allow(dead_code)]
@@ -4095,10 +4858,13 @@ impl AstNode {
                         Box::new(AstNode::Func("exp".to_string(), vec![u.clone()])),
                     )),
                     "ln" => Some(AstNode::Div(Box::new(u_prime), Box::new(u.clone()))),
-                    "abs" => Some(AstNode::Div(
-                        Box::new(AstNode::Mul(Box::new(u_prime), Box::new(u.clone()))),
-                        Box::new(AstNode::Func("abs".to_string(), vec![u.clone()])),
+                    "abs" => Some(AstNode::Mul(
+                        Box::new(u_prime),
+                        Box::new(AstNode::Func("sign".to_string(), vec![u.clone()])),
                     )),
+                    "floor" | "ceil" | "round" | "sign" | "sgn" => {
+                        Some(AstNode::Num(Value::from_int(0)))
+                    }
                     _ => None,
                 }
             }
@@ -4455,7 +5221,16 @@ impl AstNode {
                     }
                     if let AstNode::Func(fname, fargs) = &sb {
                         if fname == "sqrt" && fargs.len() == 1 {
-                            if let Some((sq_a, _sq_b)) = fargs[0].match_linear(var) {
+                            let (sq_inner_lin, is_abs) = if let AstNode::Func(an, aargs) = &fargs[0] {
+                                if an == "abs" && aargs.len() == 1 {
+                                    (aargs[0].match_linear(var), true)
+                                } else {
+                                    (None, false)
+                                }
+                            } else {
+                                (fargs[0].match_linear(var), false)
+                            };
+                            if let Some((sq_a, _sq_b)) = sq_inner_lin {
                                 if !sq_a.is_zero() {
                                     let two = AstNode::Num(Value::from_int(2));
                                     let scaled = if a.is_one() {
@@ -4463,7 +5238,15 @@ impl AstNode {
                                     } else {
                                         AstNode::Mul(Box::new(two), a.clone()).simplify()
                                     };
-                                    let num = AstNode::Mul(Box::new(scaled), Box::new(sb.clone())).simplify();
+                                    let mut num = AstNode::Mul(Box::new(scaled), Box::new(sb.clone())).simplify();
+                                    if is_abs {
+                                        if let AstNode::Func(_, aargs) = &fargs[0] {
+                                            num = AstNode::Mul(
+                                                Box::new(AstNode::Func("sign".to_string(), vec![aargs[0].clone()])),
+                                                Box::new(num),
+                                            ).simplify();
+                                        }
+                                    }
                                     return Some(if sq_a.is_one() {
                                         num
                                     } else {
@@ -4698,22 +5481,46 @@ impl AstNode {
                         }
                     }
                 }
-                let (lin_a, _lin_b) = base.match_linear(var)?;
+                let (lin_opt, is_abs_base) = if let AstNode::Func(fname, fargs) = &**base {
+                    if fname == "abs" && fargs.len() == 1 {
+                        (fargs[0].match_linear(var), true)
+                    } else {
+                        (None, false)
+                    }
+                } else {
+                    (base.match_linear(var), false)
+                };
+                let (lin_a, _lin_b) = lin_opt?;
                 if lin_a.is_zero() {
                     return None;
                 }
                 let unit_a = lin_a.is_one();
+                let wrap_abs_sign = |res: AstNode| -> AstNode {
+                    if is_abs_base {
+                        if let AstNode::Func(_, fargs) = &**base {
+                            return AstNode::Mul(
+                                Box::new(AstNode::Func("sign".to_string(), vec![fargs[0].clone()])),
+                                Box::new(res),
+                            )
+                            .simplify();
+                        }
+                    }
+                    res
+                };
                 if let Some(er) = try_poly_rat_ast(exp) {
                     if er.den == 1 && er.num == -1 {
-                        let ln_node = AstNode::Func(
-                            "ln".to_string(),
-                            vec![AstNode::Func("abs".to_string(), vec![(**base).clone()])],
-                        );
-                        return Some(if unit_a {
+                        let abs_target = if is_abs_base {
+                            (**base).clone()
+                        } else {
+                            AstNode::Func("abs".to_string(), vec![(**base).clone()])
+                        };
+                        let ln_node = AstNode::Func("ln".to_string(), vec![abs_target]);
+                        let res = if unit_a {
                             ln_node
                         } else {
                             AstNode::Div(Box::new(ln_node), Box::new(lin_a)).simplify()
-                        });
+                        };
+                        return Some(wrap_abs_sign(res));
                     }
                     let new_exp = er.add(ExactRat::from_int(1))?;
                     if new_exp.den == 1 && new_exp.num < 0 {
@@ -4738,12 +5545,12 @@ impl AstNode {
                             };
                             AstNode::Mul(Box::new(coeff_node), Box::new(pow_node)).simplify()
                         };
-                        return Some(
+                        return Some(wrap_abs_sign(
                             AstNode::Neg(Box::new(
                                 AstNode::Div(Box::new(AstNode::Num(Value::from_int(1))), Box::new(denom)).simplify(),
                             ))
                             .simplify(),
-                        );
+                        ));
                     }
                     let new_exp_val = Value { c: Complex::real(new_exp.to_f64()), rat: Some(new_exp) };
                     let pow_node = if new_exp.den == 1 && new_exp.num == 1 {
@@ -4757,29 +5564,32 @@ impl AstNode {
                         } else {
                             AstNode::Mul(Box::new(AstNode::Num(new_exp_val)), Box::new(lin_a)).simplify()
                         };
-                        return Some(AstNode::Div(Box::new(pow_node), Box::new(denom)).simplify());
+                        return Some(wrap_abs_sign(AstNode::Div(Box::new(pow_node), Box::new(denom)).simplify()));
                     }
                     let coeff = ExactRat::from_int(1).div(new_exp)?;
                     let coeff_val = Value { c: Complex::real(coeff.to_f64()), rat: Some(coeff) };
                     let base_res = AstNode::Mul(Box::new(AstNode::Num(coeff_val)), Box::new(pow_node)).simplify();
-                    return Some(if unit_a {
+                    return Some(wrap_abs_sign(if unit_a {
                         base_res
                     } else {
                         AstNode::Div(Box::new(base_res), Box::new(lin_a)).simplify()
-                    });
+                    }));
                 }
                 if let Some(c_val) = exp.const_value() {
                     if c_val.c.is_real() {
                         if (c_val.c.re + 1.0).abs() < 1e-11 {
-                            let ln_node = AstNode::Func(
-                                "ln".to_string(),
-                                vec![AstNode::Func("abs".to_string(), vec![(**base).clone()])],
-                            );
-                            return Some(if unit_a {
+                            let abs_target = if is_abs_base {
+                                (**base).clone()
+                            } else {
+                                AstNode::Func("abs".to_string(), vec![(**base).clone()])
+                            };
+                            let ln_node = AstNode::Func("ln".to_string(), vec![abs_target]);
+                            let res = if unit_a {
                                 ln_node
                             } else {
                                 AstNode::Div(Box::new(ln_node), Box::new(lin_a)).simplify()
-                            });
+                            };
+                            return Some(wrap_abs_sign(res));
                         }
                         if (c_val.c.re - c_val.c.re.round()).abs() < 1e-11 {
                             let new_p = c_val.c.re.round() as i128 + 1;
@@ -4805,12 +5615,12 @@ impl AstNode {
                                     };
                                     AstNode::Mul(Box::new(coeff_node), Box::new(pow_node)).simplify()
                                 };
-                                return Some(
+                                return Some(wrap_abs_sign(
                                     AstNode::Neg(Box::new(
                                         AstNode::Div(Box::new(AstNode::Num(Value::from_int(1))), Box::new(denom)).simplify(),
                                     ))
                                     .simplify(),
-                                );
+                                ));
                             }
                             let pow_node = AstNode::Pow(base.clone(), Box::new(AstNode::Num(Value::from_int(new_p))));
                             let denom = if unit_a {
@@ -4818,7 +5628,7 @@ impl AstNode {
                             } else {
                                 AstNode::Mul(Box::new(AstNode::Num(Value::from_int(new_p))), Box::new(lin_a)).simplify()
                             };
-                            return Some(AstNode::Div(Box::new(pow_node), Box::new(denom)).simplify());
+                            return Some(wrap_abs_sign(AstNode::Div(Box::new(pow_node), Box::new(denom)).simplify()));
                         }
                         let new_p = c_val.c.re + 1.0;
                         let denom = if unit_a {
@@ -4826,10 +5636,10 @@ impl AstNode {
                         } else {
                             AstNode::Mul(Box::new(AstNode::Num(Value::from_f64(new_p))), Box::new(lin_a)).simplify()
                         };
-                        return Some(AstNode::Div(
+                        return Some(wrap_abs_sign(AstNode::Div(
                             Box::new(AstNode::Pow(base.clone(), Box::new(AstNode::Num(Value::from_f64(new_p))))),
                             Box::new(denom),
-                        ).simplify());
+                        ).simplify()));
                     }
                 }
                 None
@@ -4842,11 +5652,23 @@ impl AstNode {
                         Box::new(AstNode::Var(var.to_string())),
                     ));
                 }
-                let (a, _b) = u.match_linear(var)?;
+                let (u_lin, is_abs_arg) = if let AstNode::Func(an, aargs) = u {
+                    if an == "abs" && aargs.len() == 1 {
+                        (&aargs[0], true)
+                    } else {
+                        (u, false)
+                    }
+                } else {
+                    (u, false)
+                };
+                let (a, _b) = u_lin.match_linear(var)?;
                 if a.is_zero() {
                     return None;
                 }
                 let unit_a = a.is_one();
+                if is_abs_arg && !matches!(name.as_str(), "sqrt" | "ln") {
+                    return None;
+                }
                 let inv_deg_scale = || AstNode::Div(
                     Box::new(AstNode::Num(Value::from_int(180))),
                     Box::new(AstNode::Var("pi".to_string())),
@@ -4856,12 +5678,22 @@ impl AstNode {
                         let three_halves = ExactRat::new(3, 2)?;
                         let exp_val = Value { c: Complex::real(1.5), rat: Some(three_halves) };
                         let exp_node = AstNode::Num(exp_val);
+                        let pow_node = AstNode::Pow(Box::new(u.clone()), Box::new(exp_node));
+                        let scaled_pow = if is_abs_arg {
+                            AstNode::Mul(
+                                Box::new(AstNode::Func("sign".to_string(), vec![u_lin.clone()])),
+                                Box::new(pow_node),
+                            )
+                            .simplify()
+                        } else {
+                            pow_node
+                        };
                         if unit_a {
                             let two_thirds = ExactRat::new(2, 3)?;
                             let coeff_val = Value { c: Complex::real(2.0 / 3.0), rat: Some(two_thirds) };
                             Some(AstNode::Mul(
                                 Box::new(AstNode::Num(coeff_val)),
-                                Box::new(AstNode::Pow(Box::new(u.clone()), Box::new(exp_node))),
+                                Box::new(scaled_pow),
                             ))
                         } else {
                             let denom = AstNode::Mul(
@@ -4872,27 +5704,42 @@ impl AstNode {
                             Some(AstNode::Div(
                                 Box::new(AstNode::Mul(
                                     Box::new(AstNode::Num(Value::from_int(2))),
-                                    Box::new(AstNode::Pow(Box::new(u.clone()), Box::new(exp_node))),
+                                    Box::new(scaled_pow),
                                 )),
                                 Box::new(denom),
                             ))
                         }
                     }
-                    "exp" => {
+                    "abs" if !is_abs_arg => {
+                        let sq = AstNode::Mul(
+                            Box::new(AstNode::Func("sign".to_string(), vec![u_lin.clone()])),
+                            Box::new(AstNode::Pow(
+                                Box::new(u_lin.clone()),
+                                Box::new(AstNode::Num(Value::from_int(2))),
+                            )),
+                        );
+                        let denom = if unit_a {
+                            AstNode::Num(Value::from_int(2))
+                        } else {
+                            AstNode::Mul(Box::new(AstNode::Num(Value::from_int(2))), Box::new(a)).simplify()
+                        };
+                        Some(AstNode::Div(Box::new(sq), Box::new(denom)).simplify())
+                    }
+                    "exp" if !is_abs_arg => {
                         let base = AstNode::Func("exp".to_string(), vec![u.clone()]);
                         Some(if unit_a { base } else { AstNode::Div(Box::new(base), Box::new(a)).simplify() })
                     }
                     "ln" => {
                         let base = AstNode::Sub(
                             Box::new(AstNode::Mul(
-                                Box::new(u.clone()),
+                                Box::new(u_lin.clone()),
                                 Box::new(AstNode::Func("ln".to_string(), vec![u.clone()])),
                             )),
-                            Box::new(u.clone()),
+                            Box::new(u_lin.clone()),
                         );
                         Some(if unit_a { base } else { AstNode::Div(Box::new(base), Box::new(a)).simplify() })
                     }
-                    "sin" => {
+                    "sin" if !is_abs_arg => {
                         let cos_u = AstNode::Func("cos".to_string(), vec![u.clone()]);
                         let base = if unit_a {
                             AstNode::Neg(Box::new(cos_u))
@@ -5757,7 +6604,8 @@ fn can_simplify_as_polynomial(node: &AstNode) -> bool {
         || count_var_occurrences(node) >= 2
         || has_compound_power_base(node)
         || count_numeric_literals(node) >= 2
-        || (count_var_occurrences(node) >= 1 && !matches!(node, AstNode::Var(_)))
+        || (count_var_occurrences(node) >= 1
+            && !matches!(node, AstNode::Var(name) if !USER_VARIABLES.contains(&name.as_str())))
 }
 
 pub fn simplify_polynomial_ast(node: &AstNode) -> Option<AstNode> {
@@ -5844,6 +6692,7 @@ pub struct AstParser {
     chars: Vec<char>,
     pos: usize,
     depth: usize,
+    matrix_depth: usize,
 }
 
 impl AstParser {
@@ -5861,6 +6710,7 @@ impl AstParser {
             chars: normalized.chars().collect(),
             pos: 0,
             depth: 0,
+            matrix_depth: 0,
         };
         p.skip_ws();
         let node = p.parse_expr()?;
@@ -5941,7 +6791,7 @@ impl AstParser {
                 let right = self.parse_unary()?;
                 left = AstNode::Div(Box::new(left), Box::new(right));
             } else if let Some(ch) = self.peek() {
-                if ch == '(' || ch == '√' || ch.is_alphabetic() || ch == '_' {
+                if ch == '(' || ch == '√' || ch.is_alphabetic() {
                     // Implicit multiplication
                     let right = self.parse_unary()?;
                     left = AstNode::Mul(Box::new(left), Box::new(right));
@@ -6025,12 +6875,14 @@ impl AstParser {
 
         if self.eat('[') {
             self.enter_depth()?;
+            self.matrix_depth += 1;
             let mut entries = Vec::new();
             self.skip_ws();
             if !self.eat(']') {
                 loop {
                     let item = self.parse_expr();
                     if let Err(e) = item {
+                        self.matrix_depth -= 1;
                         self.depth -= 1;
                         return Err(e);
                     }
@@ -6041,11 +6893,13 @@ impl AstParser {
                     } else if self.eat(']') {
                         break;
                     } else {
+                        self.matrix_depth -= 1;
                         self.depth -= 1;
                         return Err("Erwarte ',' oder ']' in Matrix".to_string());
                     }
                 }
             }
+            self.matrix_depth -= 1;
             self.depth -= 1;
             return Ok(AstNode::Func("[]".to_string(), entries));
         }
@@ -6120,11 +6974,19 @@ impl AstParser {
                 }
             }
             let f = s.parse::<f64>().map_err(|e| e.to_string())?;
+            if has_exp && self.matrix_depth > 0 {
+                if let Some(rat) = parse_scientific_exact_rat(&s) {
+                    return Ok(AstNode::Num(Value {
+                        c: Complex::real(f),
+                        rat: Some(rat),
+                    }));
+                }
+            }
             return Ok(AstNode::Num(Value::from_f64(f)));
         }
 
         // Identifier or Function call
-        if ch.is_alphabetic() || ch == '_' {
+        if ch.is_alphabetic() {
             let start = self.pos;
             while self.pos < self.chars.len() && (self.chars[self.pos].is_alphanumeric() || self.chars[self.pos] == '_') {
                 self.pos += 1;
@@ -6172,6 +7034,7 @@ struct ExprParser<'a> {
     depth: usize,
     engine: &'a MathEngine,
     overrides: Option<&'a HashMap<String, Value>>,
+    in_matrix_cell: bool,
 }
 
 impl<'a> ExprParser<'a> {
@@ -6179,6 +7042,23 @@ impl<'a> ExprParser<'a> {
         input: &str,
         engine: &'a MathEngine,
         overrides: Option<&'a HashMap<String, Value>>,
+    ) -> Self {
+        Self::new_with_matrix_mode(input, engine, overrides, false)
+    }
+
+    fn new_matrix_cell(
+        input: &str,
+        engine: &'a MathEngine,
+        overrides: Option<&'a HashMap<String, Value>>,
+    ) -> Self {
+        Self::new_with_matrix_mode(input, engine, overrides, true)
+    }
+
+    fn new_with_matrix_mode(
+        input: &str,
+        engine: &'a MathEngine,
+        overrides: Option<&'a HashMap<String, Value>>,
+        in_matrix_cell: bool,
     ) -> Self {
         let normalized = input
             .replace('×', "*")
@@ -6194,6 +7074,7 @@ impl<'a> ExprParser<'a> {
             depth: 0,
             engine,
             overrides,
+            in_matrix_cell,
         }
     }
 
@@ -6426,6 +7307,14 @@ impl<'a> ExprParser<'a> {
             let v: f64 = num_s
                 .parse()
                 .map_err(|_| format!("Ungültige Zahl '{}'", num_s))?;
+            if has_exp && self.in_matrix_cell {
+                if let Some(rat) = parse_scientific_exact_rat(&num_s) {
+                    return Ok(Value {
+                        c: Complex::real(v),
+                        rat: Some(rat),
+                    });
+                }
+            }
             return Ok(Value::from_f64(v));
         }
 
@@ -6610,8 +7499,8 @@ impl<'a> ExprParser<'a> {
                                 let mut local_a = base_ov.clone();
                                 local_a.insert(var.clone(), Value::from_f64(a));
                                 if let (Ok(fb_val), Ok(fa_val)) = (
-                                    engine_ref.eval_ast_scalar_with_overrides(&anti, Some(&local_b)),
-                                    engine_ref.eval_ast_scalar_with_overrides(&anti, Some(&local_a)),
+                                    engine_ref.eval_antiderivative_endpoint(&anti, Some(&local_b)),
+                                    engine_ref.eval_antiderivative_endpoint(&anti, Some(&local_a)),
                                 ) {
                                     if fb_val.c.is_real()
                                         && fa_val.c.is_real()
@@ -6622,12 +7511,21 @@ impl<'a> ExprParser<'a> {
                                         let fb = fb_val.c.re;
                                         let diff = fb - fa;
                                         let scale = fa.abs().max(fb.abs());
-                                        let severe_cancellation = scale > 0.0
-                                            && diff.abs() <= 1e-5 * scale
+                                        let final_diff = if scale > 0.0
+                                            && diff.abs() <= 1e-15 * scale
+                                            && (b - a).abs() > 1e-9
+                                        {
+                                            0.0
+                                        } else {
+                                            diff
+                                        };
+                                        let severe_cancellation = final_diff != 0.0
+                                            && scale > 0.0
+                                            && final_diff.abs() <= 1e-5 * scale
                                             && (b - a).abs() <= 10.0;
-                                        if diff.is_finite() && !severe_cancellation {
+                                        if final_diff.is_finite() && !severe_cancellation {
                                             let report = IntegrationReport {
-                                                value: diff,
+                                                value: final_diff,
                                                 abs_err: 0.0,
                                                 converged: true,
                                                 subintervals: 1,
@@ -6635,7 +7533,7 @@ impl<'a> ExprParser<'a> {
                                                 message: "Konvergiert: Exakte Stammfunktion ausgewertet (2 Auswertungen)".to_string(),
                                             };
                                             engine_ref.last_integration_report.replace(Some(report));
-                                            return Ok(Value::from_f64(diff));
+                                            return Ok(Value::from_f64(final_diff));
                                         }
                                     }
                                 }
@@ -6644,6 +7542,7 @@ impl<'a> ExprParser<'a> {
                     }
                 }
                 let mut critical_anchors = Vec::new();
+                let mut anchors_truncated = false;
                 if let Some(ref ast) = parsed {
                     engine_ref.collect_critical_points(
                         ast,
@@ -6652,6 +7551,7 @@ impl<'a> ExprParser<'a> {
                         a.max(b),
                         Some(&base_ov),
                         &mut critical_anchors,
+                        &mut anchors_truncated,
                     );
                     if prev_depth == 0 {
                         if let Some(d_ast) = ast.diff_with_mode(&var, engine_ref.angle_mode) {
@@ -6662,6 +7562,7 @@ impl<'a> ExprParser<'a> {
                                 a.max(b),
                                 Some(&base_ov),
                                 &mut critical_anchors,
+                                &mut anchors_truncated,
                             );
                         }
                     }
@@ -6677,7 +7578,7 @@ impl<'a> ExprParser<'a> {
                     (1e-13, 1e-9)
                 };
 
-                let report = adaptive_gauss_integrate_with_anchors(
+                let report = adaptive_gauss_integrate_with_anchors_impl(
                     |x| {
                         let mut local = base_ov.clone();
                         local.insert(var.clone(), Value::from_f64(x));
@@ -6713,6 +7614,7 @@ impl<'a> ExprParser<'a> {
                     eps_abs,
                     eps_rel,
                     &critical_anchors,
+                    anchors_truncated,
                 )?;
                 engine_ref.last_integration_report.replace(Some(report.clone()));
                 return Ok(Value::from_f64(report.value));
@@ -6724,8 +7626,10 @@ impl<'a> ExprParser<'a> {
                 if raw_args.len() == 2 {
                     let var = raw_args[1].trim();
                     if let Ok(ast) = AstParser::parse(&raw_args[0]) {
-                        if let Some(d_ast) = ast.diff_with_mode(var, self.engine.angle_mode) {
-                            return self.engine.eval_ast_scalar_with_overrides(&d_ast.simplify(), self.overrides);
+                        if !ast.contains_step_function() {
+                            if let Some(d_ast) = ast.diff_with_mode(var, self.engine.angle_mode) {
+                                return self.engine.eval_ast_scalar_with_overrides(&d_ast.simplify(), self.overrides);
+                            }
                         }
                     }
                     return Err("Symbolic derivative handled in preview".to_string());
@@ -6747,53 +7651,67 @@ impl<'a> ExprParser<'a> {
                     Ok(val.c.re)
                 };
                 let f0 = eval_real_at(x0)?;
-                if let Ok(ast) = AstParser::parse(&raw_args[0]) {
-                    if !ast.contains_step_function() {
-                        if let Some(d_ast) = ast.diff_with_mode(var, self.engine.angle_mode) {
-                            let mut local = base_ov.clone();
-                            local.insert(var.to_string(), Value::from_f64(x0));
-                            if let Ok((d_val, cancel_err)) = self
-                                .engine
-                                .eval_ast_with_cancel_err(&d_ast.simplify(), Some(&local))
-                            {
-                                if d_val.c.is_real()
-                                    && d_val.c.re.is_finite()
-                                    && cancel_err <= 1e-3 * d_val.c.re.abs()
-                                {
+                let check_jump_or_kink = || -> Result<bool, String> {
+                    let h1 = 1e-7 * x0.abs().max(1.0);
+                    let h2 = 1e-5 * x0.abs().max(1.0);
+                    if let (Ok(fp1_k), Ok(fm1_k), Ok(fp2_k), Ok(fm2_k)) = (
+                        eval_real_at(x0 + h1),
+                        eval_real_at(x0 - h1),
+                        eval_real_at(x0 + h2),
+                        eval_real_at(x0 - h2),
+                    ) {
+                        let jump1 = (fp1_k - fm1_k).abs();
+                        let jump2 = (fp2_k - fm2_k).abs();
+                        let val_scale = f0.abs().max(fp1_k.abs()).max(fm1_k.abs()).max(1.0);
+                        if jump1 > 1e-4 * val_scale && jump2 < 2.5 * jump1 {
+                            return Err("Funktion an der Stelle nicht stetig / nicht differenzierbar".to_string());
+                        }
+                        let dr1 = (fp1_k - f0) / h1;
+                        let dl1 = (f0 - fm1_k) / h1;
+                        let dr2 = (fp2_k - f0) / h2;
+                        let dl2 = (f0 - fm2_k) / h2;
+                        let slope_scale = dr1.abs().max(dl1.abs()).max(1.0);
+                        if (dr1 - dr2).abs() <= 1e-2 * slope_scale
+                            && (dl1 - dl2).abs() <= 1e-2 * slope_scale
+                            && (dr1 - dl1).abs() > 1e-3 * slope_scale
+                        {
+                            return Err("Funktion an der Stelle nicht differenzierbar".to_string());
+                        }
+                        return Ok(fp1_k == f0 && fm1_k == f0 && fp2_k == f0 && fm2_k == f0);
+                    }
+                    Ok(false)
+                };
+                let parsed_ast = AstParser::parse(&raw_args[0]).ok();
+                let jump_checked = parsed_ast
+                    .as_ref()
+                    .is_some_and(|ast| ast.contains_step_or_abs());
+                let mut is_flat = if jump_checked {
+                    check_jump_or_kink()?
+                } else {
+                    false
+                };
+                if let Some(ast) = parsed_ast {
+                    if let Some(d_ast) = ast.diff_with_mode(var, self.engine.angle_mode) {
+                        let mut local = base_ov.clone();
+                        local.insert(var.to_string(), Value::from_f64(x0));
+                        if let Ok((d_val, cancel_err)) = self
+                            .engine
+                            .eval_ast_with_cancel_err(&d_ast.simplify(), Some(&local))
+                        {
+                            if d_val.c.is_real() && d_val.c.re.is_finite() {
+                                if cancel_err <= 5e-7 * d_val.c.re.abs() {
                                     return Ok(Value::from_f64(d_val.c.re));
                                 }
+                                return Err("Auslöschung zu stark für verlässliche Ableitung".to_string());
                             }
                         }
                     }
                 }
-                let h1 = 1e-7 * x0.abs().max(1.0);
-                let h2 = 1e-5 * x0.abs().max(1.0);
-                if let (Ok(fp1_k), Ok(fm1_k), Ok(fp2_k), Ok(fm2_k)) = (
-                    eval_real_at(x0 + h1),
-                    eval_real_at(x0 - h1),
-                    eval_real_at(x0 + h2),
-                    eval_real_at(x0 - h2),
-                ) {
-                    let jump1 = (fp1_k - fm1_k).abs();
-                    let jump2 = (fp2_k - fm2_k).abs();
-                    let val_scale = f0.abs().max(fp1_k.abs()).max(fm1_k.abs()).max(1.0);
-                    if jump1 > 1e-4 * val_scale && jump2 < 2.5 * jump1 {
-                        return Err("Funktion an der Stelle nicht stetig / nicht differenzierbar".to_string());
-                    }
-                    let dr1 = (fp1_k - f0) / h1;
-                    let dl1 = (f0 - fm1_k) / h1;
-                    let dr2 = (fp2_k - f0) / h2;
-                    let dl2 = (f0 - fm2_k) / h2;
-                    let slope_scale = dr1.abs().max(dl1.abs()).max(1.0);
-                    if (dr1 - dr2).abs() <= 1e-2 * slope_scale
-                        && (dl1 - dl2).abs() <= 1e-2 * slope_scale
-                        && (dr1 - dl1).abs() > 1e-3 * slope_scale
-                    {
-                        return Err("Funktion an der Stelle nicht differenzierbar".to_string());
-                    }
-                    if fp1_k == f0 && fm1_k == f0 && fp2_k == f0 && fm2_k == f0 {
-                        return Ok(Value::from_f64(0.0));
-                    }
+                if !jump_checked {
+                    is_flat = check_jump_or_kink()?;
+                }
+                if is_flat {
+                    return Ok(Value::from_f64(0.0));
                 }
                 let mut h = 1e-4 * x0.abs().max(1.0);
                 let mut adjusted = false;

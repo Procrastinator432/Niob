@@ -4,6 +4,11 @@ mod theme;
 mod verification;
 
 use std::path::PathBuf;
+use std::sync::mpsc;
+
+type PreviewKey = (String, AngleMode, bool, u64);
+type AsyncPreviewMsg = (PreviewKey, Result<EvalOutput, String>);
+type AsyncCommitMsg = (String, MathEngine, Result<EvalOutput, String>);
 use egui::{
     Align, Color32, CornerRadius, FontId, Frame, Layout, Pos2, RichText, ScrollArea, Sense,
     Stroke, StrokeKind, Ui, Vec2,
@@ -719,10 +724,14 @@ struct NiobCalculatorApp {
     unit_to_idx: usize,
     unit_input_str: String,
 
-    // Preview evaluation cache
+    // Preview & async evaluation state
     eval_revision: u64,
-    preview_cache_key: Option<(String, AngleMode, bool, u64)>,
+    preview_cache_key: Option<PreviewKey>,
     preview_cache_result: Option<Result<EvalOutput, String>>,
+    preview_pending_key: Option<PreviewKey>,
+    preview_rx: Option<mpsc::Receiver<AsyncPreviewMsg>>,
+    commit_pending: bool,
+    commit_rx: Option<mpsc::Receiver<AsyncCommitMsg>>,
 
     // Screenshot automation
     screenshot_path: Option<PathBuf>,
@@ -812,6 +821,10 @@ impl NiobCalculatorApp {
             eval_revision: 0,
             preview_cache_key: None,
             preview_cache_result: None,
+            preview_pending_key: None,
+            preview_rx: None,
+            commit_pending: false,
+            commit_rx: None,
             screenshot_path,
             frame_count: 0,
             screenshot_requested: false,
@@ -862,13 +875,17 @@ impl NiobCalculatorApp {
         self.input_expr.pop();
     }
 
-    fn evaluate_current(&mut self) {
-        let trimmed = self.input_expr.trim().to_string();
-        if trimmed.is_empty() {
-            return;
-        }
-        match self.engine.evaluate_and_commit(&trimmed) {
+    fn finish_commit(&mut self, trimmed: String, res: Result<EvalOutput, String>, updated_engine: Option<MathEngine>) {
+        match res {
             Ok(out) => {
+                if let Some(up) = updated_engine {
+                    let rep = up.get_last_integration_report();
+                    self.engine.ans = up.ans;
+                    self.engine.matrix_ans = up.matrix_ans;
+                    self.engine.variables = up.variables;
+                    self.engine.matrix_variables = up.matrix_variables;
+                    self.engine.last_integration_report.replace(rep);
+                }
                 self.history.push(HistoryItem {
                     raw_input: trimmed,
                     reusable_result: out.reusable_expression(),
@@ -897,6 +914,67 @@ impl NiobCalculatorApp {
         self.mark_state_dirty();
     }
 
+    fn poll_async_eval(&mut self) {
+        if let Some(ref rx) = self.preview_rx {
+            match rx.try_recv() {
+                Ok((key, res)) => {
+                    if self.preview_pending_key.as_ref() == Some(&key) {
+                        self.preview_pending_key = None;
+                    }
+                    self.preview_cache_key = Some(key);
+                    self.preview_cache_result = Some(res);
+                    self.preview_rx = None;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.preview_pending_key = None;
+                    self.preview_rx = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if let Some(ref rx) = self.commit_rx {
+            match rx.try_recv() {
+                Ok((trimmed, updated_engine, res)) => {
+                    self.commit_pending = false;
+                    self.commit_rx = None;
+                    self.finish_commit(trimmed, res, Some(updated_engine));
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.commit_pending = false;
+                    self.commit_rx = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+    }
+
+    fn evaluate_current(&mut self, ctx: Option<&egui::Context>) {
+        if self.commit_pending {
+            return;
+        }
+        let trimmed = self.input_expr.trim().to_string();
+        if trimmed.is_empty() {
+            return;
+        }
+        if self.screenshot_path.is_some() {
+            let res = self.engine.evaluate_and_commit(&trimmed);
+            self.finish_commit(trimmed, res, None);
+            return;
+        }
+        let mut bg_engine = self.engine.clone();
+        let (tx, rx) = mpsc::channel();
+        let ctx_opt = ctx.cloned();
+        self.commit_pending = true;
+        self.commit_rx = Some(rx);
+        std::thread::spawn(move || {
+            let res = bg_engine.evaluate_and_commit(&trimmed);
+            let _ = tx.send((trimmed, bg_engine, res));
+            if let Some(c) = ctx_opt {
+                c.request_repaint();
+            }
+        });
+    }
+
     fn handle_keyboard_input(&mut self, ctx: &egui::Context) {
         if self.active_tab != MainTab::Calculator {
             return;
@@ -905,15 +983,16 @@ impl NiobCalculatorApp {
         if ctx.memory(|m| m.focused().is_some()) {
             return;
         }
+        let mut enter_pressed = false;
         ctx.input(|i| {
             if i.key_pressed(egui::Key::Enter) {
-                self.evaluate_current();
+                enter_pressed = true;
             } else if i.key_pressed(egui::Key::Backspace) {
                 self.backspace();
             } else if i.key_pressed(egui::Key::Escape) {
                 self.input_expr.clear();
             }
-            for event in &i. events {
+            for event in &i.events {
                 if let egui::Event::Text(text) = event {
                     for ch in text.chars() {
                         if !ch.is_control() && ch != '\r' && ch != '\n' {
@@ -923,6 +1002,9 @@ impl NiobCalculatorApp {
                 }
             }
         });
+        if enter_pressed {
+            self.evaluate_current(Some(ctx));
+        }
     }
 
     fn handle_screenshot(&mut self, ctx: &egui::Context) {
@@ -1527,43 +1609,84 @@ impl NiobCalculatorApp {
                             .color(pal.on_surface_variant),
                         );
                     } else {
-                        let key = (
+                        let key: PreviewKey = (
                             raw,
                             self.engine.angle_mode,
                             self.engine.modulo_always_positive,
                             self.eval_revision,
                         );
-                        if self.preview_cache_key.as_ref() != Some(&key) {
-                            self.preview_cache_result = Some(self.engine.evaluate_preview(&key.0, false));
-                            self.preview_cache_key = Some(key);
-                        }
-                        match self.preview_cache_result.as_ref().unwrap() {
-                            Ok(preview) => {
-                                ui.label(
-                                    RichText::new(format!("exact: {}", preview.exact_text))
-                                        .font(FontId::proportional(13.5))
-                                        .strong()
-                                        .color(pal.primary),
-                                );
-                                if preview.has_distinct_exact {
-                                    ui.separator();
-                                    ui.label(
-                                        RichText::new(format!("decim.: ≈ {}", preview.decimal_text))
-                                            .font(FontId::proportional(13.5))
-                                            .color(pal.on_surface_variant),
-                                    );
+                        if self.commit_pending {
+                            ui.label(
+                                RichText::new(if self.german_ui {
+                                    "… wird berechnet"
+                                } else {
+                                    "… calculating"
+                                })
+                                .font(FontId::proportional(12.5))
+                                .color(pal.on_surface_variant),
+                            );
+                        } else {
+                            if self.screenshot_path.is_some() {
+                                if self.preview_cache_key.as_ref() != Some(&key) {
+                                    self.preview_cache_result = Some(self.engine.evaluate_preview(&key.0, false));
+                                    self.preview_cache_key = Some(key.clone());
                                 }
+                            } else if self.preview_cache_key.as_ref() != Some(&key)
+                                && self.preview_pending_key.as_ref() != Some(&key)
+                            {
+                                let mut bg_engine = self.engine.clone();
+                                let expr = key.0.clone();
+                                let key_clone = key.clone();
+                                let ctx_clone = ui.ctx().clone();
+                                let (tx, rx) = mpsc::channel();
+                                self.preview_pending_key = Some(key.clone());
+                                self.preview_rx = Some(rx);
+                                std::thread::spawn(move || {
+                                    let res = bg_engine.evaluate_preview(&expr, false);
+                                    let _ = tx.send((key_clone, res));
+                                    ctx_clone.request_repaint();
+                                });
                             }
-                            Err(_) => {
+                            if self.preview_cache_key.as_ref() != Some(&key) {
                                 ui.label(
                                     RichText::new(if self.german_ui {
-                                        "… Ausdruck wird vervollständigt"
+                                        "… wird berechnet"
                                     } else {
-                                        "… completing expression"
+                                        "… calculating"
                                     })
                                     .font(FontId::proportional(12.5))
                                     .color(pal.on_surface_variant),
                                 );
+                            } else {
+                                match self.preview_cache_result.as_ref().unwrap() {
+                                    Ok(preview) => {
+                                        ui.label(
+                                            RichText::new(format!("exact: {}", preview.exact_text))
+                                                .font(FontId::proportional(13.5))
+                                                .strong()
+                                                .color(pal.primary),
+                                        );
+                                        if preview.has_distinct_exact {
+                                            ui.separator();
+                                            ui.label(
+                                                RichText::new(format!("decim.: ≈ {}", preview.decimal_text))
+                                                    .font(FontId::proportional(13.5))
+                                                    .color(pal.on_surface_variant),
+                                            );
+                                        }
+                                    }
+                                    Err(_) => {
+                                        ui.label(
+                                            RichText::new(if self.german_ui {
+                                                "… Ausdruck wird vervollständigt"
+                                            } else {
+                                                "… completing expression"
+                                            })
+                                            .font(FontId::proportional(12.5))
+                                            .color(pal.on_surface_variant),
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -1733,6 +1856,7 @@ impl NiobCalculatorApp {
                 let spacing_y = ui.spacing().item_spacing.y;
                 let op_row_h = ((4.0 * digit_row_h - spacing_y) / 5.0).max(16.0);
 
+                let ctx_clone = ui.ctx().clone();
                 ui.columns(4, |cols| {
                     let digit_cols = [
                         ["7", "4", "1", "0"],
@@ -1754,7 +1878,7 @@ impl NiobCalculatorApp {
                             };
                             if Self::key_btn(&mut cols[c_idx], lbl, digit_row_h, fill, fg) {
                                 if is_enter {
-                                    self.evaluate_current();
+                                    self.evaluate_current(Some(&ctx_clone));
                                 } else {
                                     self.insert_token(lbl);
                                 }
@@ -2980,6 +3104,7 @@ fn convert_temperature(v: f64, from: usize, to: usize) -> f64 {
 impl eframe::App for NiobCalculatorApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.poll_async_eval();
         let pal = MaterialYouPalette::generate(self.theme_mode, self.accent_seed);
         pal.apply(&ctx, self.theme_mode);
 

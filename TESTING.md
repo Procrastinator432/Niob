@@ -14,7 +14,7 @@ test.bat
 
 Der Aufruf führt die Rust-Tests und die Tests des Android-Rechenkerns aus. Alle ausgewählten Tests müssen bestehen, damit der Befehl Exitcode 0 liefert. Fehler sind normale fehlgeschlagene Tests: Sie sind weder ignoriert noch als erwartete Fehlschläge versteckt.
 
-Beim aktuellen Prüfstand vom 15.11.2026 bestanden **376 Tests** (178 Rust und 198 Android/JVM, 0 Fehler, inkl. `NIOB_GENERATED_ALL='1'` über alle 6 generierten Testsuiten mit 2 692 Fällen pro Kern). Die Ergebnisse der vorangegangenen Emulatorprüfungen stehen in der [Nachprüfung](CODE-SMELL-NACHPRUEFUNG.md); die Befunde und Nachprüfungen zu den Rechenkernen, Desktop-Persistenz und Release-Konfiguration sind in [BEWERTUNG-2026-11-15-2.md](BEWERTUNG-2026-11-15-2.md) dokumentiert.
+Beim aktuellen Prüfstand vom 16.11.2026 bestanden **386 Tests** (183 Rust und 203 Android/JVM, 0 Fehler, inkl. `NIOB_GENERATED_ALL='1'` über alle 10 generierten Testsuiten mit 3 329 Fällen pro Kern). Die Ergebnisse der vorangegangenen Emulatorprüfungen stehen in der [Nachprüfung](CODE-SMELL-NACHPRUEFUNG.md); die Befunde und Nachprüfungen zu den Rechenkernen, Desktop-Persistenz und Release-Konfiguration sind in [BEWERTUNG-2026-11-15-2.md](BEWERTUNG-2026-11-15-2.md) und [BEWERTUNG-2026-11-15-4.md](BEWERTUNG-2026-11-15-4.md) dokumentiert.
 
 ## Einen Fix gezielt ausprobieren
 
@@ -78,7 +78,7 @@ Die Tests decken Rechenkern und Zahlenausgabe ab. Sie ersetzen keine Tests für 
 
 ## Generierte Fälle
 
-Zusätzlich zu den Einzelfällen prüfen sechs Tests je Implementierung zusammen rund 2 700 erzeugte Fälle mit unabhängig berechneten Sollwerten:
+Zusätzlich zu den Einzelfällen prüfen zehn Tests je Implementierung zusammen rund 3 300 erzeugte Fälle, fast alle mit unabhängig berechneten Sollwerten:
 
 | Test | Fälle | Inhalt |
 |---|---:|---|
@@ -88,12 +88,16 @@ Zusätzlich zu den Einzelfällen prüfen sechs Tests je Implementierung zusammen
 | `generated_exact_numbers` | 400 | Ganzzahl- und Bruchrechnung bis 300 Stellen, einschließlich `mod` und Fakultät |
 | `generated_antiderivatives` | 370 | Symbolische Stammfunktionen, RAD und DEG; Gegenprobe durch Ableiten an Stützstellen |
 | `generated_polynomials` | 200 | Ausmultiplizieren von Produkten und Potenzen linearer Terme in `y`, `z`, `w` |
+| `generated_integral_families` | 175 | Viele Knicke (`abs(sin(k*x))`), Knicke an nichtlinearen Stellen, Sprünge (`floor`, `ceil`, `round`, `sign(sin(k*x))`), Singularitäten innerhalb und am Rand, Spitzen in sechs Schreibweisen |
+| `generated_derivative_families` | 268 | 18 weitere glatte Funktionen, Funktionen mit Knick oder Sprung, starke Auslöschung (`x-sin(x)` nahe 0) |
+| `generated_determinants` | 134 | Ganzzahlige Matrizen mit großen Einträgen, Matrixpotenzen, Brüche, Einträge von 10⁻³⁰ bis 10³⁰, `det(A)*det(inv(A))` |
+| `generated_integral_splits` | 60 | Selbstprüfung ohne Sollwert: `int(f,a,b)` gleich `int(f,a,m)+int(f,m,b)` im Rahmen der gemeldeten Fehler, für zufällig zusammengesetzte Integranden |
 
 Die Fälle liegen in `app/tests/data/generated/`. Rust (`app/tests/generated.rs`) und Android (`GeneratedCases.java`) lesen dieselben Dateien; beide Rechenkerne werden also gegen dieselben Sollwerte geprüft. Die Sollwerte stammen nicht aus einem der beiden Kerne, sondern aus sympy, mpmath und exakter Python-Arithmetik. Für den Testlauf ist kein Python nötig.
 
 Grundsatz: Ein korrektes Ergebnis oder eine ausdrückliche Fehlermeldung ist in Ordnung, ein falsches Ergebnis nicht. Wo Gleitkomma an seine Grenzen kommt (nahe Polstellen, starke Auslöschung), ist deshalb auch eine Fehlermeldung zulässig; bei Integralen zusätzlich ein Ergebnis, das als nicht konvergiert gekennzeichnet ist. Die Prüfungen sind in [app/tests/data/generated/README.md](app/tests/data/generated/README.md) beschrieben.
 
-Jeder der sechs Tests meldet im Fehlerfall die Anzahl falscher Fälle und die ersten 30 davon. Alle Fehlschläge zeigt:
+Jeder der zehn Tests meldet im Fehlerfall die Anzahl falscher Fälle und die ersten 30 davon. Zulässige Fehlermeldungen und als nicht konvergiert gemeldete Integrale werden mitgezählt, schlagen aber nicht fehl. Alle Fehlschläge zeigt:
 
 ```powershell
 $env:NIOB_GENERATED_ALL = '1'; .\test.ps1 -Filter generated_; Remove-Item Env:NIOB_GENERATED_ALL
@@ -110,7 +114,18 @@ Beim Einbau am 15.11.2026 schlugen diese Tests fehl (Rust 5 von 6, Android 3 von
 | `generated_antiderivatives` | 0 (56 nicht unterstützt) | 0 (56 nicht unterstützt) |
 | `generated_polynomials` | 8 | 8 |
 
-Die erzeugten Integrale brauchen in einem Rust-Debug-Build einige Sekunden; das Standard-Zeitlimit von `test.ps1` beträgt deshalb 300 Sekunden.
+Beim Einbau der vier weiteren Tests (`integral_families` bis `integral_splits`) am 15.11.2026, nach der [vierten Nachprüfung](BEWERTUNG-2026-11-15-4.md), schlugen alle vier in beiden Kernen fehl:
+
+| Test | Rust falsch | Android falsch |
+|---|---:|---:|
+| `generated_integral_families` | 46 (18 mit Fehlermeldung) | 46 (27 mit Fehlermeldung) |
+| `generated_derivative_families` | 26 | 26 |
+| `generated_determinants` | 1 | 14 |
+| `generated_integral_splits` | 19 | 19 |
+
+Nach Abschluss der Fixes in Rust und Android bestehen nun alle 10 generierten Suiten sowie die Regressionstests in beiden Rechenkernen mit **0 Fehlern**.
+
+Die erzeugten Integrale brauchen in einem Rust-Debug-Build Zeit: Alle generierten Tests zusammen liefen auf einem Linux-Server in rund 80 Sekunden (Android-JVM rund 12 Sekunden). Das Standard-Zeitlimit von `test.ps1` beträgt deshalb 300 Sekunden.
 
 Neue Fälle entstehen nicht von Hand, sondern im Generator `tools/generate_test_cases.py` (benötigt Python 3.9 oder neuer sowie `pip install sympy mpmath`):
 

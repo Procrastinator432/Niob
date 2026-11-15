@@ -16,6 +16,7 @@ Usage:        python tools/generate_test_cases.py
 import math
 import os
 import random
+from decimal import Decimal
 from fractions import Fraction
 
 import mpmath as mp
@@ -455,6 +456,454 @@ def polynomials():
           'and agree with the input at the sample points y=..,z=..,w=..:value.')
 
 
+# ---------------------------------------------------------------------------
+# Further families: integrands with many kinks, jumps and singularities
+# ---------------------------------------------------------------------------
+EPS = 2.0 ** -52
+
+
+def floor_integral(k, b, lo, hi):
+    """Exact integral of floor(k*x + b) over [lo, hi] for rational k != 0 and b."""
+    def big_f(u):  # integral of floor(t) from 0 to u
+        n = math.floor(u)
+        return n * u - Fraction(n * (n + 1), 2)
+    return (big_f(k * hi + b) - big_f(k * lo + b)) / k
+
+
+def abs_sin_integral(k, b, lo, hi):
+    """Exact integral of |sin(k*x + b)| over [lo, hi] for k > 0."""
+    def g(t):  # integral of |sin| from 0 to t
+        n = mp.floor(t / mp.pi)
+        return 2 * n + 1 - mp.cos(t - n * mp.pi)
+    return (g(k * hi + b) - g(k * lo + b)) / k
+
+
+def quad_with_breaks(f, lo, hi, breaks):
+    pts = sorted({lo, hi} | {p for p in breaks if lo < p < hi})
+    return mp.fsum(mp.quad(f, [pts[i], pts[i + 1]]) for i in range(len(pts) - 1))
+
+
+def integral_families():
+    rnd = random.Random(41)
+    rows = []
+
+    def add(expr, ref, kind, abs_tol=1e-12):
+        rows.append([f'intf_{kind}_{len(rows):04d}', expr, expr, 'integral', num(ref), num(abs_tol), '1e-7', 'rad'])
+
+    def r6(v):
+        return float(f'{v:.6g}')
+
+    # Many kinks: |sin(k*x+b)| and |cos(k*x)| over up to several hundred zeros.
+    for _ in range(30):
+        k = rnd.choice([1, 2, 3, 5, 7])
+        b = rnd.choice([0, 0, 0, 1, 0.5])
+        hi = r6(rnd.uniform(5, 300))
+        km, bm, him = mp.mpf(k), mp.mpf(str(b)), mp.mpf(repr(hi))
+        if rnd.random() < 0.7:
+            arg = ('x' if k == 1 else f'{k}*x') + (f'+{b}' if b else '')
+            add(f'int(abs(sin({arg})),x,0,{num(hi)})', abs_sin_integral(km, bm, 0, him), 'abs_periodic')
+        else:
+            arg = 'x' if k == 1 else f'{k}*x'
+            add(f'int(abs(cos({arg})),x,0,{num(hi)})', abs_sin_integral(km, mp.pi / 2, 0, him), 'abs_periodic')
+    # Kinks where a nonlinear expression crosses a constant.
+    for _ in range(20):
+        kind = rnd.choice(['cos', 'sin', 'square', 'exp'])
+        c = round(rnd.uniform(-0.95, 0.95), 3)
+        hi = r6(rnd.uniform(3, 60))
+        cm, him = mp.mpf(str(c)), mp.mpf(repr(hi))
+        if kind == 'cos':
+            s = mp.acos(cm)
+            br = [sg * s + 2 * mp.pi * n for n in range(-1, 12) for sg in (1, -1)]
+            add(f'int(abs(cos(x)-({c})),x,0,{num(hi)})', quad_with_breaks(lambda t: abs(mp.cos(t) - cm), 0, him, br), 'abs_nonlinear')
+        elif kind == 'sin':
+            s = mp.asin(cm)
+            br = [s + 2 * mp.pi * n for n in range(-1, 12)] + [mp.pi - s + 2 * mp.pi * n for n in range(-1, 12)]
+            add(f'int(abs(sin(x)-({c})),x,0,{num(hi)})', quad_with_breaks(lambda t: abs(mp.sin(t) - cm), 0, him, br), 'abs_nonlinear')
+        elif kind == 'square':
+            q = mp.mpf(mp.nstr(mp.mpf(str(abs(c) * 20)), 6))
+            top = round(hi / 6, 3)
+            add(f'int(abs(x^2-{mp.nstr(q, 6)}),x,-5,{num(top)})',
+                quad_with_breaks(lambda t: abs(t * t - q), -5, mp.mpf(repr(top)), [-mp.sqrt(q), mp.sqrt(q)]), 'abs_nonlinear')
+        else:
+            q = mp.mpf(mp.nstr(mp.mpf(str(abs(c) * 10 + 1)), 6))
+            top = round(hi / 20, 3)
+            add(f'int(abs(exp(x)-{mp.nstr(q, 6)}),x,-2,{num(top)})',
+                quad_with_breaks(lambda t: abs(mp.exp(t) - q), -2, mp.mpf(repr(top)), [mp.log(q)]), 'abs_nonlinear')
+    # Jumps: floor, ceil and round with a linear argument, and square waves.
+    for _ in range(24):
+        kind = rnd.choice(['floor', 'floor', 'floor_div', 'floor_shift', 'ceil', 'round', 'sign_sin'])
+        lo = Fraction(str(round(rnd.uniform(-5, 5), 2)))
+        hi = lo + Fraction(str(round(rnd.uniform(0.5, 20), 2)))
+        k = rnd.choice([2, 3, 7, 10])
+        lo_t, hi_t = num(float(lo)), num(float(hi))
+        if kind == 'floor':
+            add(f'int(floor({k}*x),x,{lo_t},{hi_t})', float(floor_integral(Fraction(k), 0, lo, hi)), 'step')
+        elif kind == 'floor_div':
+            add(f'int(floor(x/{k}),x,{lo_t},{hi_t})', float(floor_integral(Fraction(1, k), 0, lo, hi)), 'step')
+        elif kind == 'floor_shift':
+            b = Fraction(str(round(rnd.uniform(-1, 1), 2)))
+            add(f'int(floor({k}*x+({float(b)})),x,{lo_t},{hi_t})', float(floor_integral(Fraction(k), b, lo, hi)), 'step')
+        elif kind == 'ceil':  # ceil(u) = -floor(-u)
+            add(f'int(ceil({k}*x),x,{lo_t},{hi_t})', float(-floor_integral(Fraction(-k), 0, lo, hi)), 'step')
+        elif kind == 'round':  # round(u) = floor(u + 1/2) except at measure-zero points
+            add(f'int(round({k}*x),x,{lo_t},{hi_t})', float(floor_integral(Fraction(k), Fraction(1, 2), lo, hi)), 'step')
+        else:
+            km = mp.mpf(k)
+            br = [n * mp.pi / km for n in range(int(float(lo) * k / 3.2) - 2, int(float(hi) * k / 3.1) + 3)]
+            lm, hm = mp.mpf(str(float(lo))), mp.mpf(str(float(hi)))
+            add(f'int(sign(sin({k}*x)),x,{lo_t},{hi_t})', quad_with_breaks(lambda t: mp.sign(mp.sin(km * t)), lm, hm, br), 'step')
+    # Integrable singularities inside the interval, away from 0.
+    for _ in range(24):
+        lo = r6(rnd.uniform(-10, 5))
+        hi = r6(lo + rnd.uniform(1, 15))
+        c = round(rnd.uniform(lo + 0.1 * (hi - lo), hi - 0.1 * (hi - lo)), 3)
+        lm, hm, cm = mp.mpf(repr(lo)), mp.mpf(repr(hi)), mp.mpf(str(c))
+        kind = rnd.choice(['sqrt', 'pow', 'log'])
+        if kind == 'sqrt':
+            add(f'int(1/sqrt(abs(x-({c}))),x,{num(lo)},{num(hi)})', 2 * mp.sqrt(cm - lm) + 2 * mp.sqrt(hm - cm), 'inner_singularity')
+        elif kind == 'pow':
+            p = rnd.choice(['0.3', '0.6', '0.8'])
+            pm = mp.mpf(p)
+            add(f'int(abs(x-({c}))^(-{p}),x,{num(lo)},{num(hi)})',
+                ((hm - cm) ** (1 - pm) + (cm - lm) ** (1 - pm)) / (1 - pm), 'inner_singularity')
+        else:
+            big_f = lambda u: u * mp.log(u) - u
+            add(f'int(ln(abs(x-({c}))),x,{num(lo)},{num(hi)})', big_f(hm - cm) + big_f(cm - lm), 'inner_singularity')
+    # Integrable singularities at random endpoints.
+    for _ in range(20):
+        lo = r6(rnd.uniform(-5, 5))
+        length = r6(rnd.uniform(0.5, 20))
+        hi = r6(lo + length)
+        lm, hm = mp.mpf(repr(lo)), mp.mpf(repr(hi))
+        kind = rnd.choice(['sqrt_left', 'sqrt_right', 'pow', 'log'])
+        if kind == 'sqrt_left':
+            add(f'int(1/sqrt(x-({num(lo)})),x,{num(lo)},{num(hi)})', 2 * mp.sqrt(hm - lm), 'endpoint_singularity')
+        elif kind == 'sqrt_right':
+            add(f'int(1/sqrt({num(hi)}-x),x,{num(lo)},{num(hi)})', 2 * mp.sqrt(hm - lm), 'endpoint_singularity')
+        elif kind == 'pow':
+            p = rnd.choice(['0.5', '0.9', '0.95'])
+            pm = mp.mpf(p)
+            add(f'int((x-({num(lo)}))^(-{p}),x,{num(lo)},{num(hi)})', (hm - lm) ** (1 - pm) / (1 - pm), 'endpoint_singularity')
+        else:
+            u = hm - lm
+            add(f'int(ln(x-({num(lo)})),x,{num(lo)},{num(hi)})', u * mp.log(u) - u, 'endpoint_singularity')
+    # Narrow peaks written in six ways. The absolute tolerance includes the loss of digits when the
+    # exponent of the input itself cancels (k*c^2 large), which no integrator can undo.
+    forms = ['expanded', 'product', 'division', 'sech', 'absexp', 'square']
+    for i in range(48):
+        form = forms[i % len(forms)]
+        # The square form exp(-k*(x^2-q)^2) loses digits like k*q*eps, so it stays at moderate q.
+        lo, hi = rnd.choice([(0, 10), (0, 100)] if form == 'square' else [(0, 10), (0, 1000), (-100, 100), (0, 100000)])
+        c = round(rnd.uniform(lo + (hi - lo) * 0.05, hi - (hi - lo) * 0.05), rnd.choice([1, 2, 3]))
+        k = 10 ** rnd.choice([2, 4, 6, 8])
+        while k > 1 and k * c * c > 4e9:
+            k //= 100
+        k = max(k, 1)
+        cm = mp.mpf(str(c))
+        width = 1 / mp.sqrt(k)
+        center = cm
+        cond = 0.0
+        if form == 'expanded':
+            # The reference uses the coefficients exactly as typed, so only the evaluation error remains.
+            two_c, c_sq = str(Decimal(str(c)) * 2), str(Decimal(str(c)) ** 2)
+            bm, cc = mp.mpf(two_c), mp.mpf(c_sq)
+            expr = f'int(exp(-{k}*(x^2-({two_c})*x+{c_sq})),x,{lo},{hi})'
+            f = lambda t: mp.exp(-k * (t * t - bm * t + cc))
+            cond = 8 * EPS * k * 4 * c * c
+        elif form == 'product':
+            expr = f'int(exp(-{k}*(x-({c}))*(x-({c}))),x,{lo},{hi})'
+            f = lambda t: mp.exp(-k * (t - cm) ** 2)
+        elif form == 'division':
+            expr = f'int(exp(-(x-({c}))^2/{num(1 / k)}),x,{lo},{hi})'
+            d = mp.mpf(num(1 / k))
+            f = lambda t: mp.exp(-(t - cm) ** 2 / d)
+        elif form == 'sech':
+            s = int(math.sqrt(k))
+            expr = f'int(1/cosh({s}*(x-({c}))),x,{lo},{hi})'
+            f = lambda t: 1 / mp.cosh(s * (t - cm))
+            width = mp.mpf(1) / s
+        elif form == 'absexp':
+            s = int(math.sqrt(k))
+            expr = f'int(exp(-{s}*abs(x-({c}))),x,{lo},{hi})'
+            f = lambda t: mp.exp(-s * abs(t - cm))
+            width = mp.mpf(1) / s
+        else:
+            lo = max(lo, 0)
+            q = round(abs(c) * abs(c), 2)
+            kk = 10 ** rnd.choice([2, 4, 6])
+            qm = mp.mpf(str(q))
+            expr = f'int(exp(-{kk}*(x^2-{num(q)})^2),x,{lo},{hi})'
+            f = lambda t: mp.exp(-kk * (t * t - qm) ** 2)
+            center = mp.sqrt(qm)
+            width = 1 / (2 * center * mp.sqrt(kk))
+            cond = 8 * EPS * math.sqrt(kk) * 2 * q
+        br = [center + t * width for t in (-40, -10, -3, -1, 0, 1, 3, 10, 40)]
+        ref = quad_with_breaks(f, mp.mpf(lo), mp.mpf(hi), br)
+        add(expr, ref, 'peak', max(1e-12, cond * float(abs(ref))))
+    # Cases from the fourth review.
+    for expr, ref in [
+        ('int(abs(sin(5*x)),x,0,247.421)', abs_sin_integral(5, 0, 0, mp.mpf('247.421'))),
+        ('int(abs(sin(x)),x,0,100)', abs_sin_integral(1, 0, 0, 100)),
+        ('int(abs(sin(5*x)-0.001),x,0,60)', quad_with_breaks(
+            lambda t: abs(mp.sin(5 * t) - mp.mpf('0.001')), 0, 60,
+            [(s + 2 * mp.pi * n) / 5 for n in range(60) for s in (mp.asin(mp.mpf('0.001')), mp.pi - mp.asin(mp.mpf('0.001')))])),
+        ('int(floor(2*x),x,0,3)', mp.mpf('7.5')),
+        ('int(floor(2*x),x,-4.66,11.04)', float(floor_integral(Fraction(2), 0, Fraction('-4.66'), Fraction('11.04')))),
+        ('int(floor(x/2),x,0,7)', mp.mpf(9)),
+        ('int(1/sqrt(abs(x-0.3)),x,0,1)', 2 * mp.sqrt(mp.mpf('0.3')) + 2 * mp.sqrt(mp.mpf('0.7'))),
+        ('int(abs(x-0.5)^(-0.6),x,0,1)', 2 * mp.mpf('0.5') ** mp.mpf('0.4') / mp.mpf('0.4')),
+        ('int(1/cosh(x),x,-800,800)', 2 * (2 * mp.atan(mp.tanh(400)))),
+    ]:
+        add(expr, ref, 'review')
+    write('integral_families.tsv', rows,
+          'Integrands with many kinks, jumps (floor, ceil, round, sign), integrable singularities inside the interval and '
+          'at random endpoints, and narrow peaks written in six ways. Same rule as integrals.tsv.')
+
+
+# ---------------------------------------------------------------------------
+# Further derivative families
+# ---------------------------------------------------------------------------
+def derivative_families():
+    rnd = random.Random(43)
+    rows = []
+
+    def add(kind, expr, check, ref, abs_tol, rel_tol):
+        rows.append([f'derivf_{kind}_{len(rows):04d}', expr, expr, check, ref, abs_tol, rel_tol, 'rad'])
+
+    def r6(v):
+        return float(f'{v:.6g}')
+
+    smooth = [
+        ('x^4*exp(-x)', X ** 4 * sp.exp(-X), None), ('ln(x^2+3)', sp.log(X ** 2 + 3), None), ('atan(x^2)', sp.atan(X ** 2), None),
+        ('exp(x)*cos(x)', sp.exp(X) * sp.cos(X), 'moderate'), ('x/(1+x^4)', X / (1 + X ** 4), None), ('sin(x)^2', sp.sin(X) ** 2, None),
+        ('cos(x^2)*x', sp.cos(X ** 2) * X, 'moderate'), ('sqrt(x^2+0.01)', sp.sqrt(X ** 2 + sp.Rational(1, 100)), None),
+        ('2^x', 2 ** X, 'moderate'), ('asinh(x)', sp.asinh(X), None), ('acosh(x)', sp.acosh(X), 'gt1'),
+        ('atanh(x)', sp.atanh(X), 'lt1'), ('x^2*ln(x)', X ** 2 * sp.log(X), 'pos'), ('tan(x)^2', sp.tan(X) ** 2, 'moderate'),
+        ('1/(x^2-4)', 1 / (X ** 2 - 4), None), ('sin(exp(x))', sp.sin(sp.exp(X)), 'small'), ('ln(ln(x))', sp.log(sp.log(X)), 'gt1'),
+        ('x^(2/3)', X ** sp.Rational(2, 3), 'pos'),
+    ]
+    kinked = [  # derivative away from the kink or jump
+        ('abs(x)^3', sp.Abs(X) ** 3), ('x*abs(x)', X * sp.Abs(X)), ('floor(x)+x^2', X ** 2),
+        ('abs(x-1)*x', sp.Abs(X - 1) * X), ('sqrt(abs(x))', sp.sqrt(sp.Abs(X))), ('abs(sin(x))', sp.Abs(sp.sin(X))),
+    ]
+    cancel = [  # f'(x0) is much smaller than the terms it is computed from
+        ('x-sin(x)', X - sp.sin(X)), ('exp(x)-x', sp.exp(X) - X), ('ln(1+x)-x', sp.log(1 + X) - X),
+        ('sqrt(1+x)-x/2', sp.sqrt(1 + X) - X / 2), ('tan(x)-x', sp.tan(X) - X), ('cosh(x)-x^2/2', sp.cosh(X) - X ** 2 / 2),
+    ]
+
+    def value(df, p):
+        try:
+            v = complex(df.subs(X, sp.Float(repr(p), 50)).evalf(40))
+        except (TypeError, ValueError, ZeroDivisionError):
+            return None
+        return v.real if v.imag == 0 and math.isfinite(v.real) else None
+
+    for txt, f, dom in smooth:
+        df = sp.diff(f, X)
+        made = 0
+        while made < 8:
+            if dom == 'small':
+                p = r6(rnd.uniform(-3, 3))
+            elif dom == 'lt1':
+                p = r6(rnd.uniform(-0.999, 0.999))
+            elif dom == 'moderate':  # keep cos/tan arguments small enough to be meaningful in double
+                p = r6(rnd.choice([1, -1]) * 10 ** rnd.uniform(-4, 1.5))
+            else:
+                p = r6(rnd.choice([1, -1]) * 10 ** rnd.uniform(-4, 3))
+            if dom in ('pos', 'gt1'):
+                p = abs(p) + (1 if dom == 'gt1' else 0)
+            if txt.startswith('tan') and abs(math.cos(p)) < 1e-3 or txt == '1/(x^2-4)' and abs(abs(p) - 2) < 1e-3:
+                continue
+            v = value(df, p)
+            if v is None:
+                continue
+            add('smooth', f'deriv({txt},x,{num(p)})', 'number', num(v), '1e-12', '1e-6')
+            made += 1
+    for txt, f in kinked:
+        df = sp.diff(f, X)
+        made = 0
+        while made < 8:
+            p = r6(rnd.choice([1, -1]) * 10 ** rnd.uniform(-3, 3.7))
+            if 'floor' in txt and abs(p - round(p)) < 1e-3 or 'sin' in txt and abs(math.sin(p)) < 1e-3 or abs(p - 1) < 1e-3:
+                continue
+            v = value(df, p)
+            if v is None:
+                continue
+            add('kinked', f'deriv({txt},x,{num(p)})', 'number', num(v), '1e-12', '1e-6')
+            made += 1
+    # At the kink or jump itself: either an explicit error, or the right value where it exists.
+    for txt, p in [('floor(2*x)', '0.5'), ('floor(x/3)', '3'), ('ceil(2*x)', '1.5'), ('round(x)', '2.5'),
+                   ('abs(x-1)*x', '1'), ('abs(x^2-4)', '2'), ('sign(x-0.25)', '0.25'), ('abs(exp(x)-1)', '0')]:
+        add('jump', f'deriv({txt},x,{p})', 'error', 'no derivative at a jump or kink', '0', '0')
+    for txt, p, v in [('x*abs(x)', '0', 0), ('abs(x)^3', '0', 0), ('abs(x)*sin(x)', '0', 0)]:
+        add('smooth_kink', f'deriv({txt},x,{p})', 'number_or_error', num(v), '1e-12', '0')
+    for txt, f in cancel:
+        df = sp.diff(f, X)
+        for _ in range(10):
+            p = r6(10 ** rnd.uniform(-8, -2))
+            add('cancellation', f'deriv({txt},x,{num(p)})', 'number_or_error', num(value(df, p)), '0', '1e-6')
+    for expr, ref in [('deriv(cosh(x)-x^2/2,x,2.80368e-08)', sp.sinh(X) - X), ('deriv(tan(x)-x,x,1.17979e-08)', sp.tan(X) ** 2),
+                      ('deriv(x-sin(x),x,2.09896e-08)', 1 - sp.cos(X))]:
+        p = float(expr.rsplit(',', 1)[1][:-1])
+        add('review', expr, 'number_or_error', num(value(ref, p)), '0', '1e-6')
+    for p in ['5000.5', '-496.93']:
+        add('review', f'deriv(floor(x)+x^2,x,{p})', 'number', num(2 * float(p)), '1e-12', '1e-6')
+    write('derivative_families.tsv', rows,
+          'Derivatives of new smooth functions at random points, of functions with kinks or jumps away from and at the '
+          'kink, and of differences that cancel (x-sin(x) near 0). number_or_error: a correct value or an explicit error.')
+
+
+# ---------------------------------------------------------------------------
+# Determinants
+# ---------------------------------------------------------------------------
+def determinants():
+    rnd = random.Random(47)
+    rows = []
+
+    def text(m):
+        return '[' + ','.join('[' + ','.join(str(v) for v in r) + ']' for r in m) + ']'
+
+    def add(kind, expr, check, expected, rel='0'):
+        rows.append([f'det_{kind}_{len(rows):04d}', expr, expr, check, expected, '0', rel, 'rad'])
+
+    def exact(value):
+        # The exact text, or a decimal that agrees to 10 digits: a determinant shown as 1.2345678901 × 10³⁶
+        # is acceptable, one that is wrong in the ninth digit or shows 0 is not.
+        value = sp.Rational(value)
+        return 'exact_fraction', str(value.p) if value.q == 1 else f'{value.p}/{value.q}'
+
+    # Integer matrices whose products exceed 2^53.
+    while len(rows) < 40:
+        n = rnd.choice([2, 2, 3, 3, 4])
+        digits = rnd.choice([5, 8, 9, 12])
+        m = [[rnd.randint(-10 ** digits, 10 ** digits) for _ in range(n)] for _ in range(n)]
+        if rnd.random() < 0.5:  # nearly dependent rows: the determinant is small compared with the entries
+            m[1] = [v + rnd.randint(-3, 3) for v in m[0]]
+        d = sp.Matrix(m).det()
+        add('integer', f'det({text(m)})', *exact(d), rel='1e-10')
+    # Powers of small integer matrices: det(A^n) = det(A)^n.
+    while len(rows) < 70:
+        n = rnd.choice([2, 2, 3])
+        m = [[rnd.randint(-4, 4) for _ in range(n)] for _ in range(n)]
+        d = sp.Matrix(m).det()
+        if d == 0:
+            continue
+        e = rnd.randint(8, 24)
+        add('power', f'det({text(m)}^{e})', *exact(d ** e), rel='1e-10')
+    # Rational entries.
+    while len(rows) < 90:
+        n = rnd.choice([2, 3, 4])
+        m = [[sp.Rational(rnd.randint(-9, 9), rnd.randint(1, 9)) for _ in range(n)] for _ in range(n)]
+        d = sp.Matrix(m).det()
+        if d == 0:
+            continue
+        mt = [[f'{v.p}/{v.q}' if v.q != 1 else str(v.p) for v in r] for r in m]
+        add('rational', f'det({text(mt)})', *exact(d), rel='1e-10')
+    # Tiny and huge scales: only the magnitude differs, the matrix is well conditioned.
+    while len(rows) < 110:
+        n = rnd.choice([2, 3, 4, 5])
+        e = rnd.choice([-30, -20, -16, -12, 12, 20, 30])
+        base = [[rnd.randint(1, 9) if i == j else rnd.randint(-1, 1) for j in range(n)] for i in range(n)]
+        for i in range(n):
+            base[i][i] += n
+        d = sp.Matrix(base).det() * sp.Rational(10) ** (e * n)
+        mt = [[f'{v}e{e}' for v in r] for r in base]
+        add('scaled', f'det({text(mt)})', 'number', num(d), rel='1e-9')
+    # det(A)*det(inv(A)) = 1 for random well-conditioned integer matrices.
+    while len(rows) < 130:
+        n = rnd.choice([2, 3, 4])
+        m = [[rnd.randint(-9, 9) for _ in range(n)] for _ in range(n)]
+        a = sp.Matrix(m)
+        if a.det() == 0:
+            continue
+        cond = float(a.norm(1) * a.inv().norm(1))
+        if cond > 1e6:
+            continue
+        add('inverse', f'det({text(m)})*det(inv({text(m)}))', 'number', '1', rel=num(1e-9 * max(1.0, cond)))
+    for expr, value in [('det([[123456789,987654321],[123456788,987654320]])', 864197532),
+                        ('det([[1,2],[3,4]]^15)', -32768),
+                        ('det([[100000001,100000000],[100000000,99999999]])', -1)]:
+        add('review', expr, 'exact_fraction', str(value), rel='1e-10')
+    add('review', 'det([[1e-16,0,0,0],[0,1e-16,0,0],[0,0,1e-16,0],[0,0,0,1e-16]])', 'number', '1e-64', rel='1e-9')
+    write('determinants.tsv', rows,
+          'Determinants of integer matrices with large entries, of matrix powers, of rational and scaled matrices, '
+          'and det(A)*det(inv(A)). exact_fraction: the exact integer or fraction, or a decimal within 1e-10.')
+
+
+# ---------------------------------------------------------------------------
+# Self-checks without reference values: splitting an integral
+# ---------------------------------------------------------------------------
+def integral_splits():
+    """int(f,a,b) must equal int(f,a,m) + int(f,m,b) within the reported error estimates.
+
+    The integrands are random combinations of kinks, jumps, peaks, singularities and smooth terms, so the
+    check reaches forms that no reference family lists. No reference value is needed."""
+    rnd = random.Random(53)
+
+    def c3(lo, hi):
+        return round(rnd.uniform(lo, hi), 3)
+
+    def term():
+        k = rnd.choice([1, 2, 3, 5, 7, 10])
+        kx = 'x' if k == 1 else f'{k}*x'
+        kind = rnd.choice(['abs_sin', 'abs_cos_c', 'floor', 'ceil', 'sign', 'square_wave', 'gauss', 'lorentz',
+                           'sqrt_abs', 'ln_abs', 'abs_square', 'poly', 'sin', 'exp_poly', 'abs_lin'])
+        if kind == 'abs_sin':
+            return f'abs(sin({kx}))'
+        if kind == 'abs_cos_c':
+            return f'abs(cos({kx})-({c3(-0.9, 0.9)}))'
+        if kind == 'floor':
+            return f'floor({kx})' if rnd.random() < 0.5 else f'floor(x/{k})'
+        if kind == 'ceil':
+            return f'ceil({kx}+({c3(-1, 1)}))'
+        if kind == 'sign':
+            return f'sign(x-({c3(-5, 5)}))'
+        if kind == 'square_wave':
+            return f'sign(sin({kx}))'
+        if kind == 'gauss':
+            return f'exp(-{10 ** rnd.choice([2, 4, 6])}*(x-({c3(-5, 5)}))^2)'
+        if kind == 'lorentz':
+            return f'1/(1+{10 ** rnd.choice([2, 4, 6])}*(x-({c3(-5, 5)}))^2)'
+        if kind == 'sqrt_abs':
+            return f'sqrt(abs(x-({c3(-5, 5)})))'
+        if kind == 'ln_abs':
+            return f'ln(abs(x-({c3(-5, 5)})))'
+        if kind == 'abs_square':
+            return f'abs(x^2-{c3(0.5, 20)})'
+        if kind == 'poly':
+            return f'x^{rnd.randint(1, 4)}'
+        if kind == 'sin':
+            return f'sin({rnd.choice([1, 3, 10, 50])}*x)'
+        if kind == 'exp_poly':
+            return f'x^{rnd.randint(1, 3)}*exp(-abs(x))'
+        return f'abs({kx}-({c3(-5, 5)}))'
+
+    rows = []
+    seen = set()
+    while len(rows) < 60:
+        shape = rnd.random()
+        if shape < 0.4:
+            f = term()
+        elif shape < 0.8:
+            f = f'{term()}+{rnd.randint(2, 5)}*{term()}'
+        else:
+            f = f'({term()})*({term()})'
+        lo = c3(-6, 2)
+        length = rnd.choice([2, 5, 10, 30, 100])
+        hi = round(lo + length * rnd.uniform(0.5, 1.0), 3)
+        mid = round(lo + (hi - lo) * rnd.uniform(0.15, 0.85), 3)
+        whole = f'int({f},x,{lo},{hi})'
+        if whole in seen:
+            continue
+        seen.add(whole)
+        parts = f'int({f},x,{lo},{mid});int({f},x,{mid},{hi})'
+        rows.append([f'split_{len(rows):04d}', whole, whole, 'integral_split', parts, '1e-12', '1e-9', 'rad'])
+    write('integral_splits.tsv', rows,
+          'Self-check without reference values: int(f,a,b) must equal int(f,a,m)+int(f,m,b) within ten times the sum of '
+          'the reported error estimates (plus absolute and relative floors). Errors and results marked as not converged '
+          'are accepted.')
+
+
 if __name__ == '__main__':
     derivatives()
     integrals()
@@ -462,3 +911,7 @@ if __name__ == '__main__':
     exact_numbers()
     antiderivatives()
     polynomials()
+    integral_families()
+    derivative_families()
+    determinants()
+    integral_splits()

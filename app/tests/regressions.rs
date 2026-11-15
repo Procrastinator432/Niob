@@ -937,7 +937,7 @@ fn subnormal_pow2_neg1074_displays_without_inf() {
     let out = engine
         .evaluate_preview("2^-1074", false)
         .expect("subnormal power must succeed");
-    let expected = 2.0_f64.powi(-1074);
+    let expected = f64::from_bits(1);
     let val = out.numeric_value.expect("numeric value expected");
     assert!(val.re > 0.0 && val.re.is_finite(), "expected finite positive, got {}", val.re);
     close(val.re, expected, 0.0, 1e-12);
@@ -989,5 +989,30 @@ fn symbolic_antiderivatives_no_double_minus_and_derivative_match() {
                 .unwrap_or_else(|| panic!("cannot eval integrand {expr} at {x}"));
             close(deriv_est, target, 1e-6, 1e-6);
         }
+    }
+}
+
+#[test]
+fn complex_overflow_standalone_y_and_underscore_rejection() {
+    let mut engine = new_engine();
+    let cosh_inv = engine
+        .evaluate_preview("1/cosh(800)", false)
+        .expect("1/cosh(800) should evaluate cleanly to 0");
+    close(displayed_number(&cosh_inv.decimal_text), 0.0, 1e-12, 0.0);
+
+    let y_out = engine
+        .evaluate_preview("y", false)
+        .expect("standalone y should simplify symbolically");
+    assert_eq!(normalized(&y_out.exact_text), "y");
+
+    assert!(
+        engine.evaluate_preview("foo", false).is_err(),
+        "unknown multi-letter standalone identifier should still fail"
+    );
+    for invalid in ["1_000", "(1_000)", "_000"] {
+        assert!(
+            engine.evaluate_preview(invalid, false).is_err(),
+            "{invalid} must be rejected"
+        );
     }
 }

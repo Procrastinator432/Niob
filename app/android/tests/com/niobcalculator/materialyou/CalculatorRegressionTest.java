@@ -745,6 +745,25 @@ public final class CalculatorRegressionTest {
                 }
             }
         });
+        add("complex_overflow_standalone_y_and_underscore_rejection", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            CalculatorEngine.Result coshInv = engine.evaluate("1/cosh(800)");
+            close(displayedNumber(coshInv.decimalText), 0.0, 1e-12, 0.0);
+
+            CalculatorEngine.Result yOut = engine.evaluate("y");
+            require("y".equals(normalized(yOut.exactText)),
+                    "standalone y should simplify symbolically, got " + yOut.exactText);
+
+            for (String invalid : new String[]{"foo", "1_000", "(1_000)", "_000"}) {
+                boolean rejected = false;
+                try {
+                    engine.evaluate(invalid);
+                } catch (RuntimeException expected) {
+                    rejected = true;
+                }
+                require(rejected, invalid + " must be rejected");
+            }
+        });
     }
 
     public static void main(String[] args) throws Exception {

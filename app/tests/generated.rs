@@ -16,10 +16,16 @@ const MATRICES: &str = include_str!("data/generated/matrices.tsv");
 const EXACT_NUMBERS: &str = include_str!("data/generated/exact_numbers.tsv");
 const ANTIDERIVATIVES: &str = include_str!("data/generated/antiderivatives.tsv");
 const POLYNOMIALS: &str = include_str!("data/generated/polynomials.tsv");
+const INTEGRAL_FAMILIES: &str = include_str!("data/generated/integral_families.tsv");
+const DERIVATIVE_FAMILIES: &str = include_str!("data/generated/derivative_families.tsv");
+const DETERMINANTS: &str = include_str!("data/generated/determinants.tsv");
+const INTEGRAL_SPLITS: &str = include_str!("data/generated/integral_splits.tsv");
 
 /// Generous per-case time limit so that slow debug builds do not turn into timeouts.
 const TIMEOUT_MS: u64 = 30_000;
 const SHOWN_FAILURES: usize = 30;
+/// integral_split: the parts must add up within this multiple of the reported error estimates.
+const SPLIT_DELTA_FACTOR: f64 = 10.0;
 
 struct Row<'a> {
     id: &'a str,
@@ -193,6 +199,27 @@ enum Outcome {
     Fail(String),
     Unsupported,
     Unchecked,
+    /// An explicit error message where one is allowed. Counted so that refusals stay visible.
+    Refused,
+    /// A result the integration report marks as not converged. Allowed, but counted.
+    NotConverged,
+}
+
+/// One integral for integral_split: its value and reported error, or the reason to stop.
+fn split_part(expr: &str, degrees: bool) -> Result<(f64, f64), Outcome> {
+    let mut engine = new_engine(degrees);
+    let out = eval(&mut engine, expr).map_err(|_| Outcome::Refused)?;
+    if out.integration_report.as_ref().is_some_and(|r| !r.converged) {
+        return Err(Outcome::NotConverged);
+    }
+    let Some(c) = out.numeric_value else {
+        return Err(Outcome::Fail(format!("{}: kein Zahlenergebnis: {}", short(expr), out.decimal_text)));
+    };
+    if !c.re.is_finite() {
+        return Err(Outcome::Fail(format!("{}: kein endliches Ergebnis: {}", short(expr), out.decimal_text)));
+    }
+    let delta = out.integration_report.as_ref().map(|r| r.abs_err).unwrap_or(0.0);
+    Ok((c.re, if delta.is_nan() { f64::INFINITY } else { delta.abs() }))
 }
 
 fn check_row(row: &Row) -> Outcome {
@@ -201,7 +228,7 @@ fn check_row(row: &Row) -> Outcome {
     let fail = |msg: String| Outcome::Fail(msg);
     match row.check {
         "number" | "number_or_error" => match result {
-            Err(_) if row.check == "number_or_error" => Outcome::Pass,
+            Err(_) if row.check == "number_or_error" => Outcome::Refused,
             Err(e) => fail(format!("Fehler: {e}")),
             Ok(out) => match number_problem(&out, row.expected.parse().unwrap(), row.abs_tol, row.rel_tol) {
                 None => Outcome::Pass,
@@ -213,10 +240,10 @@ fn check_row(row: &Row) -> Outcome {
             Ok(out) => fail(format!("Fehlermeldung erwartet, erhalten {}", out.decimal_text)),
         },
         "integral" => match result {
-            Err(_) => Outcome::Pass,
+            Err(_) => Outcome::Refused,
             Ok(out) => {
                 if out.integration_report.as_ref().is_some_and(|r| !r.converged) {
-                    return Outcome::Pass;
+                    return Outcome::NotConverged;
                 }
                 match number_problem(&out, row.expected.parse().unwrap(), row.abs_tol, row.rel_tol) {
                     None => Outcome::Pass,
@@ -235,7 +262,8 @@ fn check_row(row: &Row) -> Outcome {
                 if compact(&out.exact_text) == row.expected {
                     return Outcome::Pass;
                 }
-                let (n, d) = row.expected.split_once('/').unwrap();
+                // The expected text is a fraction "p/q" or a plain integer.
+                let (n, d) = row.expected.split_once('/').unwrap_or((row.expected, "1"));
                 let expected = n.parse::<f64>().unwrap() / d.parse::<f64>().unwrap();
                 match number_problem(&out, expected, 0.0, row.rel_tol) {
                     None => Outcome::Pass,
@@ -347,6 +375,31 @@ fn check_row(row: &Row) -> Outcome {
                 Outcome::Pass
             }
         },
+        "integral_split" => {
+            // Self-check without a reference: int(f,a,b) = int(f,a,m) + int(f,m,b) within the
+            // reported error estimates. The whole integral is evaluated again on a fresh engine
+            // like the parts, so that all three use the same path.
+            let (first, second) = row.expected.split_once(';').unwrap();
+            let mut parts = Vec::new();
+            for expr in [row.expr, first, second] {
+                match split_part(expr, row.degrees) {
+                    Ok(part) => parts.push(part),
+                    Err(outcome) => return outcome,
+                }
+            }
+            let (whole, d0) = parts[0];
+            let ((left, d1), (right, d2)) = (parts[1], parts[2]);
+            let gap = (whole - left - right).abs();
+            let size = whole.abs().max(left.abs()).max(right.abs());
+            let allowed = SPLIT_DELTA_FACTOR * (d0 + d1 + d2) + row.abs_tol + row.rel_tol * size;
+            if gap > allowed {
+                fail(format!(
+                    "ganz {whole:e} (Δ {d0:.1e}), Teile {left:e} + {right:e} (Δ {d1:.1e}, {d2:.1e}): Abweichung {gap:.2e}"
+                ))
+            } else {
+                Outcome::Pass
+            }
+        }
         other => panic!("unbekannte Prüfung {other}"),
     }
 }
@@ -363,12 +416,14 @@ fn run_table(name: &str, table: &str) {
     let rows = rows(table);
     assert!(!rows.is_empty(), "{name}: keine Fälle");
     let mut failures = Vec::new();
-    let (mut unsupported, mut unchecked) = (0, 0);
+    let (mut unsupported, mut unchecked, mut refused, mut not_converged) = (0, 0, 0, 0);
     for row in &rows {
         match check_row(row) {
             Outcome::Pass => {}
             Outcome::Unsupported => unsupported += 1,
             Outcome::Unchecked => unchecked += 1,
+            Outcome::Refused => refused += 1,
+            Outcome::NotConverged => not_converged += 1,
             Outcome::Fail(msg) => failures.push(format!("  {} {}: {msg}", row.id, short(row.expr))),
         }
     }
@@ -378,6 +433,12 @@ fn run_table(name: &str, table: &str) {
     }
     if unchecked > 0 {
         summary.push_str(&format!(", {unchecked} ohne prüfbare Stelle"));
+    }
+    if refused > 0 {
+        summary.push_str(&format!(", {refused} mit Fehlermeldung"));
+    }
+    if not_converged > 0 {
+        summary.push_str(&format!(", {not_converged} als nicht konvergiert gemeldet"));
     }
     println!("{summary}");
     if !failures.is_empty() {
@@ -421,4 +482,24 @@ fn generated_antiderivatives() {
 #[test]
 fn generated_polynomials() {
     run_table("generated_polynomials", POLYNOMIALS);
+}
+
+#[test]
+fn generated_integral_families() {
+    run_table("generated_integral_families", INTEGRAL_FAMILIES);
+}
+
+#[test]
+fn generated_derivative_families() {
+    run_table("generated_derivative_families", DERIVATIVE_FAMILIES);
+}
+
+#[test]
+fn generated_determinants() {
+    run_table("generated_determinants", DETERMINANTS);
+}
+
+#[test]
+fn generated_integral_splits() {
+    run_table("generated_integral_splits", INTEGRAL_SPLITS);
 }
