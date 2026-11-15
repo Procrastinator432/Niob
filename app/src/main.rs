@@ -72,6 +72,62 @@ mod state_json {
         out.push('}');
     }
 
+    fn push_matrix_json(mat: &[Vec<Value>], out: &mut String) {
+        out.push('[');
+        for (r_idx, row) in mat.iter().enumerate() {
+            if r_idx > 0 {
+                out.push(',');
+            }
+            out.push('[');
+            for (c_idx, cell) in row.iter().enumerate() {
+                if c_idx > 0 {
+                    out.push(',');
+                }
+                push_value_json(*cell, out);
+            }
+            out.push(']');
+        }
+        out.push(']');
+    }
+
+    fn decode_matrix(jv: &JsonVal) -> Option<Vec<Vec<Value>>> {
+        let JsonVal::Arr(rows) = jv else { return None };
+        if rows.is_empty() {
+            return None;
+        }
+        let mut mat = Vec::with_capacity(rows.len());
+        let mut expected_cols = None;
+        for row_val in rows {
+            let JsonVal::Arr(cols) = row_val else { return None };
+            if cols.is_empty() {
+                return None;
+            }
+            match expected_cols {
+                None => expected_cols = Some(cols.len()),
+                Some(n) if n != cols.len() => return None,
+                _ => {}
+            }
+            let mut row = Vec::with_capacity(cols.len());
+            for cell_val in cols {
+                row.push(decode_value(cell_val)?);
+            }
+            mat.push(row);
+        }
+        Some(mat)
+    }
+
+    fn write_state_json_atomic(path: &std::path::Path, out: &str) {
+        let tmp_path = path.with_extension("json.tmp");
+        if std::fs::write(&tmp_path, out).is_ok() {
+            if std::fs::rename(&tmp_path, path).is_err() {
+                let _ = std::fs::remove_file(&tmp_path);
+                let _ = std::fs::write(path, out);
+            }
+        } else {
+            let _ = std::fs::write(path, out);
+        }
+    }
+
     pub(super) fn save_state_to_disk(engine: &MathEngine, history: &[HistoryItem]) {
         let Some(path) = state_file_path() else {
             return;
@@ -81,6 +137,11 @@ mod state_json {
                 return;
             }
         }
+        let out = serialize_state_json(engine, history);
+        write_state_json_atomic(&path, &out);
+    }
+
+    fn serialize_state_json(engine: &MathEngine, history: &[HistoryItem]) -> String {
         let mut out = String::from("{\n  \"angle_mode\": ");
         json_escape(
             match engine.angle_mode {
@@ -128,8 +189,28 @@ mod state_json {
             out.push_str(if item.is_error { "true" } else { "false" });
             out.push('}');
         }
-        out.push_str("\n  ]\n}\n");
-        let _ = std::fs::write(path, out);
+        out.push_str("\n  ]");
+        out.push_str(",\n  \"ans_matrix\": ");
+        match &engine.matrix_ans {
+            Some(mat) => push_matrix_json(mat, &mut out),
+            None => out.push_str("null"),
+        }
+        out.push_str(",\n  \"matrix_variables\": {");
+        let mut first_mat = true;
+        for &name in &USER_VARIABLES {
+            if let Some(mat) = engine.matrix_variables.get(name) {
+                if !first_mat {
+                    out.push(',');
+                }
+                first_mat = false;
+                out.push_str("\n    ");
+                json_escape(name, &mut out);
+                out.push_str(": ");
+                push_matrix_json(mat, &mut out);
+            }
+        }
+        out.push_str("\n  }\n}\n");
+        out
     }
 
     enum JsonVal {
@@ -325,6 +406,10 @@ mod state_json {
         let Ok(raw) = std::fs::read_to_string(path) else {
             return;
         };
+        apply_state_json(&raw, engine, history);
+    }
+
+    fn apply_state_json(raw: &str, engine: &mut MathEngine, history: &mut Vec<HistoryItem>) {
         let mut parser = Parser { bytes: raw.as_bytes(), pos: 0 };
         let Some(root) = parser.parse_value(0) else {
             return;
@@ -349,6 +434,19 @@ mod state_json {
             }
             engine.variables = loaded_vars;
         }
+        engine.matrix_ans = root.get("ans_matrix").and_then(decode_matrix);
+        if let Some(JsonVal::Obj(mvars)) = root.get("matrix_variables") {
+            let mut loaded_mats = std::collections::HashMap::new();
+            for (k, v) in mvars {
+                if USER_VARIABLES.contains(&k.as_str()) {
+                    if let Some(mat) = decode_matrix(v) {
+                        engine.variables.remove(k.as_str());
+                        loaded_mats.insert(k.clone(), mat);
+                    }
+                }
+            }
+            engine.matrix_variables = loaded_mats;
+        }
         if let Some(JsonVal::Arr(items)) = root.get("history") {
             history.clear();
             for entry in items {
@@ -370,6 +468,52 @@ mod state_json {
                     integration_report: None,
                 });
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn atomic_state_json_persists_matrices_and_removes_tmp() {
+            let mut engine = MathEngine::default();
+            engine.evaluate_and_commit("m := [[1, 2], [3, 4]]").unwrap();
+            engine.evaluate_and_commit("inv([[1, 2], [3, 4]])").unwrap();
+            let history = vec![HistoryItem {
+                raw_input: "inv([[1, 2], [3, 4]])".to_string(),
+                exact_result: "[[-2, 1], [3/2, -1/2]]".to_string(),
+                decimal_result: "[[-2, 1], [1.5, -0.5]]".to_string(),
+                reusable_result: "[[-2, 1], [3/2, -1/2]]".to_string(),
+                has_distinct_exact: true,
+                showing_exact: true,
+                is_error: false,
+                integration_report: None,
+            }];
+
+            let json = serialize_state_json(&engine, &history);
+            let dir = std::env::temp_dir().join(format!("niob_state_test_{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let state_path = dir.join("state.json");
+            let tmp_path = state_path.with_extension("json.tmp");
+
+            write_state_json_atomic(&state_path, &json);
+            assert!(state_path.exists());
+            assert!(!tmp_path.exists(), "temporary file must not remain after rename");
+
+            let raw = std::fs::read_to_string(&state_path).unwrap();
+            let mut restored = MathEngine::default();
+            let mut restored_history = Vec::new();
+            apply_state_json(&raw, &mut restored, &mut restored_history);
+
+            let det_ans = restored.evaluate_preview("det(ans)", false).unwrap();
+            assert!((det_ans.numeric_value.unwrap().re - (-0.5)).abs() < 1e-12);
+            let det_m = restored.evaluate_preview("det(m)", false).unwrap();
+            assert!((det_m.numeric_value.unwrap().re - (-2.0)).abs() < 1e-12);
+            assert!(restored.variables.get("m").is_none());
+            assert_eq!(restored_history.len(), 1);
+
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 }

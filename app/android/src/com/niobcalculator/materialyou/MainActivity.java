@@ -68,6 +68,7 @@ public class MainActivity extends Activity {
     private final CalculatorEngine engine = new CalculatorEngine();
     private static final ExecutorService RESULT_WRITER = Executors.newSingleThreadExecutor();
     private final ExecutorService previewExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService evalExecutor = Executors.newSingleThreadExecutor();
     private final AtomicLong previewGeneration = new AtomicLong(0);
     private Future<?> pendingPreview;
     private boolean resultWritePending;
@@ -160,6 +161,10 @@ public class MainActivity extends Activity {
         if (ansValStr != null) {
             engine.setLastAns(engine.deserializeValue(ansValStr));
         }
+        String ansMatStr = prefs.getString("ans_matrix", null);
+        if (ansMatStr != null) {
+            engine.setLastMatrixAns(engine.deserializeMatrix(ansMatStr));
+        }
 
         for (String varName : CalculatorEngine.USER_VARIABLES) {
             String vStr = prefs.getString("var_" + varName, null);
@@ -167,6 +172,13 @@ public class MainActivity extends Activity {
                 engine.unsetVariable(varName);
             } else if (vStr != null) {
                 engine.setUserVariable(varName, engine.deserializeValue(vStr));
+            }
+            String mvStr = prefs.getString("mat_var_" + varName, null);
+            if (mvStr != null) {
+                double[][] matVal = engine.deserializeMatrix(mvStr);
+                if (matVal != null) {
+                    engine.setMatrixVariable(varName, matVal);
+                }
             }
         }
 
@@ -284,18 +296,35 @@ public class MainActivity extends Activity {
 
     private void writeVarsAndAnsToEditor(SharedPreferences.Editor ed) {
         ed.putString("ans_value", engine.serializeValue(engine.getLastAns()));
+        String serializedMatAns = engine.serializeMatrix(engine.getLastMatrixAns());
+        if (serializedMatAns != null) {
+            ed.putString("ans_matrix", serializedMatAns);
+        } else {
+            ed.remove("ans_matrix");
+        }
         Map<String, CalculatorEngine.Value> userVars = engine.getUserVariables();
         for (String varName : CalculatorEngine.USER_VARIABLES) {
-            if (userVars.containsKey(varName)) {
-                ed.putString("var_" + varName, engine.serializeValue(userVars.get(varName)));
-            } else {
+            double[][] matVar = engine.getMatrixVariable(varName);
+            String serializedMatVar = engine.serializeMatrix(matVar);
+            if (serializedMatVar != null) {
+                ed.putString("mat_var_" + varName, serializedMatVar);
                 ed.putString("var_" + varName, "__UNSET__");
+            } else {
+                ed.remove("mat_var_" + varName);
+                if (userVars.containsKey(varName)) {
+                    ed.putString("var_" + varName, engine.serializeValue(userVars.get(varName)));
+                } else {
+                    ed.putString("var_" + varName, "__UNSET__");
+                }
             }
         }
     }
 
     private void persistResult(HistoryEntry entry, CalculatorEngine.Value previousAns,
-                               Map<String, CalculatorEngine.Value> previousVariables) {
+                               double[][] previousMatrixAns,
+                               Map<String, CalculatorEngine.Value> previousVariables,
+                               Map<String, double[][]> previousMatrixVariables,
+                               long submittedDraft) {
         SharedPreferences prefs = getSharedPreferences("niob_calculator", MODE_PRIVATE);
         long previousCommittedDraft = prefs.getLong("committed_draft_revision", -1);
         SharedPreferences.Editor ed = prefs.edit();
@@ -303,7 +332,6 @@ public class MainActivity extends Activity {
         writeHistoryEntry(ed, history.size(), entry);
         ed.putInt("history_count", history.size() + 1);
         // A process stop before the editor clears the draft must not restore this input.
-        long submittedDraft = draftRevision;
         ed.putLong("committed_draft_revision", submittedDraft);
         resultWritePending = true;
         RESULT_WRITER.execute(() -> {
@@ -321,10 +349,13 @@ public class MainActivity extends Activity {
                     refreshHistoryViews(true);
                 } else {
                     engine.setLastAns(previousAns);
+                    engine.setLastMatrixAns(previousMatrixAns);
                     for (String name : CalculatorEngine.USER_VARIABLES) {
+                        double[][] prevMat = previousMatrixVariables.get(name);
                         CalculatorEngine.Value value = previousVariables.get(name);
-                        if (value == null) engine.unsetVariable(name);
-                        else engine.setUserVariable(name, value);
+                        if (prevMat != null) engine.setMatrixVariable(name, prevMat);
+                        else if (value != null) engine.setUserVariable(name, value);
+                        else engine.unsetVariable(name);
                     }
                     prefs.edit().putLong("committed_draft_revision", previousCommittedDraft).apply();
                     saveState();
@@ -370,6 +401,7 @@ public class MainActivity extends Activity {
             pendingPreview = null;
         }
         previewExecutor.shutdownNow();
+        evalExecutor.shutdownNow();
         super.onDestroy();
     }
 
@@ -395,8 +427,12 @@ public class MainActivity extends Activity {
     }
 
     private String getIntegrationReportText(String expr) {
+        return getIntegrationReportText(engine, expr);
+    }
+
+    private static String getIntegrationReportText(CalculatorEngine targetEngine, String expr) {
         if (expr != null && (expr.contains("int(") || expr.contains("defint("))) {
-            CalculatorEngine.IntegrationReport r = engine.getLastIntegrationReport();
+            CalculatorEngine.IntegrationReport r = targetEngine.getLastIntegrationReport();
             if (r != null) {
                 String badge = r.converged ? "konvergiert" : "langsame Konv.";
                 return String.format(java.util.Locale.US, "%s  •  Δ ≈ %.1e  •  n = %d", badge, r.absErr, r.subintervals);
@@ -1938,31 +1974,57 @@ private static class FilledBackspaceDrawable extends Drawable {
                 formula.performHapticFeedback(HapticFeedbackConstants.REJECT);
                 return;
             }
-            String expression = formula.expression();
+            final String expression = formula.expression();
             if (!expression.trim().isEmpty()) {
-                try {
-                    CalculatorEngine.Value previousAns = engine.getLastAns();
-                    Map<String, CalculatorEngine.Value> previousVariables = engine.getUserVariables();
-                    CalculatorEngine.Result result = engine.evaluateAndCommitWithTimeout(expression, 4000);
-                    String rep = getIntegrationReportText(expression);
-                    HistoryEntry entry = new HistoryEntry(expression, result.exactText, result.decimalText,
-                            result.reusableText, rep, showExactFirst);
-                    entry.formulaLayout = formula.layoutState();
-                    persistResult(entry, previousAns, previousVariables);
-                } catch (Exception e) {
-                    formula.performHapticFeedback(HapticFeedbackConstants.REJECT);
-                    String msg = e.getMessage() != null ? e.getMessage() : "";
-                    if (msg.contains("Zeitlimit") || msg.contains("Zeitüberschreitung") || msg.contains("Time limit")) {
-                        if (previewDisplayView != null) {
-                            previewDisplayView.setVisibility(View.VISIBLE);
-                            previewMatrix.setVisibility(View.GONE);
-                            previewDisplayView.setText("⚠ Zeitlimit überschritten");
-                            previewDisplayView.setTextColor(0xFFFFB4AB);
-                        }
-                    } else {
-                        updatePreviewOnly();
-                    }
+                previewGeneration.incrementAndGet();
+                if (pendingPreview != null) {
+                    pendingPreview.cancel(true);
+                    pendingPreview = null;
                 }
+                final String layoutState = formula.layoutState();
+                final long submittedDraft = draftRevision;
+                final CalculatorEngine snapshot = new CalculatorEngine(engine);
+                resultWritePending = true;
+                evalExecutor.execute(() -> {
+                    try {
+                        final CalculatorEngine.Result result = snapshot.evaluateAndCommitWithTimeout(expression, 4000);
+                        final String rep = getIntegrationReportText(snapshot, expression);
+                        runOnUiThread(() -> {
+                            if (isFinishing() || isDestroyed()) {
+                                resultWritePending = false;
+                                return;
+                            }
+                            CalculatorEngine.Value previousAns = engine.getLastAns();
+                            double[][] previousMatrixAns = engine.getLastMatrixAns();
+                            Map<String, CalculatorEngine.Value> previousVariables = engine.getUserVariables();
+                            Map<String, double[][]> previousMatrixVariables = engine.getMatrixVariables();
+                            engine.copyEvaluatedStateFrom(snapshot);
+                            HistoryEntry entry = new HistoryEntry(expression, result.exactText, result.decimalText,
+                                    result.reusableText, rep, showExactFirst);
+                            entry.formulaLayout = layoutState;
+                            persistResult(entry, previousAns, previousMatrixAns, previousVariables, previousMatrixVariables, submittedDraft);
+                        });
+                    } catch (Exception e) {
+                        final String msg = e.getMessage() != null ? e.getMessage() : "";
+                        runOnUiThread(() -> {
+                            resultWritePending = false;
+                            if (isFinishing() || isDestroyed()) {
+                                return;
+                            }
+                            formula.performHapticFeedback(HapticFeedbackConstants.REJECT);
+                            if (msg.contains("Zeitlimit") || msg.contains("Zeitüberschreitung") || msg.contains("Time limit")) {
+                                if (previewDisplayView != null) {
+                                    previewDisplayView.setVisibility(View.VISIBLE);
+                                    previewMatrix.setVisibility(View.GONE);
+                                    previewDisplayView.setText("⚠ Zeitlimit überschritten");
+                                    previewDisplayView.setTextColor(0xFFFFB4AB);
+                                }
+                            } else {
+                                updatePreviewOnly();
+                            }
+                        });
+                    }
+                });
             }
         } else if (key.equals("DEL")) {
             formula.backspace();

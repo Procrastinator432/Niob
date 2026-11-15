@@ -53,8 +53,10 @@ fn displayed_number(text: &str) -> f64 {
                 other => other,
             })
             .collect();
-        return mantissa.parse::<f64>().expect("numeric mantissa")
-            * 10_f64.powi(exponent.parse().expect("numeric exponent"));
+        let exp_i: i32 = exponent.parse().expect("numeric exponent");
+        return format!("{mantissa}e{exp_i}")
+            .parse::<f64>()
+            .expect("scientific notation number");
     }
     text.parse()
         .unwrap_or_else(|_| panic!("decimal display is not a number: {text}"))
@@ -272,7 +274,16 @@ cases!(
     symbolic_int_sin_sq,
     symbolic_int_x_exp_x,
     poly_const_fold_2y3,
-    poly_cancel_y_div_y
+    poly_cancel_y_div_y,
+    hilbert_4x4_inverse,
+    tanh_800,
+    integral_deriv_sin_0_1,
+    integral_inv_sqrt_singularity,
+    integral_weak_singularity_099,
+    matrix_scaled_extreme_det,
+    matrix_scaled_small_det,
+    poly_single_3y,
+    poly_single_y2
 );
 
 #[test]
@@ -918,4 +929,65 @@ fn self_checking_nesting_depth_64_and_unset() {
     assert!(unset_out.exact_text.contains("k"), "unexpected unset text: {}", unset_out.exact_text);
     let sym = engine.evaluate_preview("k+k", false).unwrap();
     assert_eq!(normalized(&sym.exact_text), "2*k");
+}
+
+#[test]
+fn subnormal_pow2_neg1074_displays_without_inf() {
+    let mut engine = new_engine();
+    let out = engine
+        .evaluate_preview("2^-1074", false)
+        .expect("subnormal power must succeed");
+    let expected = 2.0_f64.powi(-1074);
+    let val = out.numeric_value.expect("numeric value expected");
+    assert!(val.re > 0.0 && val.re.is_finite(), "expected finite positive, got {}", val.re);
+    close(val.re, expected, 0.0, 1e-12);
+    close(val.im, 0.0, 1e-12, 0.0);
+    assert!(
+        !out.decimal_text.to_ascii_lowercase().contains("inf")
+            && !out.exact_text.to_ascii_lowercase().contains("inf"),
+        "subnormal display must not contain inf: decimal={}, exact={}",
+        out.decimal_text,
+        out.exact_text
+    );
+    close(displayed_number(&out.decimal_text), expected, 0.0, 1e-12);
+}
+
+#[test]
+fn symbolic_antiderivatives_no_double_minus_and_derivative_match() {
+    let mut engine = new_engine();
+    let integrands = [
+        "(2*x+1)*sin(x)",
+        "(x+1)*cos(2*x)",
+        "1/(x^2+1)",
+        "1/(4*x^2+9)",
+        "1/(-2*x)",
+        "1/(3*x^2)",
+    ];
+    let xs = [0.65_f64, 1.35_f64];
+    let h = 1e-6_f64;
+    for expr in integrands {
+        let query = format!("integral({expr},x)");
+        let out = engine
+            .evaluate_preview(&query, false)
+            .unwrap_or_else(|e| panic!("{query}: {e}"));
+        let compact = normalized(&out.exact_text);
+        assert!(
+            !compact.contains("--") && !compact.contains("+-") && !compact.contains("-+"),
+            "{query}: unexpected doubled sign in {}",
+            out.exact_text
+        );
+        for &x in &xs {
+            let f_plus = engine
+                .eval_for_x(&out.exact_text, x + h)
+                .unwrap_or_else(|| panic!("{query}: cannot eval {} at {}", out.exact_text, x + h));
+            let f_minus = engine
+                .eval_for_x(&out.exact_text, x - h)
+                .unwrap_or_else(|| panic!("{query}: cannot eval {} at {}", out.exact_text, x - h));
+            let deriv_est = (f_plus - f_minus) / (2.0 * h);
+            let target = engine
+                .eval_for_x(expr, x)
+                .unwrap_or_else(|| panic!("cannot eval integrand {expr} at {x}"));
+            close(deriv_est, target, 1e-6, 1e-6);
+        }
+    }
 }

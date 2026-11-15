@@ -407,6 +407,36 @@ public final class CalculatorRegressionTest {
             source.evaluateAndCommit("m:=3+4*i");
             number(restoreVariables(source).evaluate("(m-3)^2"), -16, 1e-10, 0);
         });
+        add("persistence_matrix_ans_and_variables", () -> {
+            CalculatorEngine source = new CalculatorEngine();
+            source.evaluateAndCommit("m:=[[5,6],[7,8]]");
+            double[][] origAns = source.getLastMatrixAns();
+            double[][] origVar = source.getMatrixVariable("m");
+            require(origAns != null && origVar != null, "matrix ans and variable must be stored");
+
+            String encAns = source.serializeMatrix(origAns);
+            String encVar = source.serializeMatrix(origVar);
+            require(encAns != null && encVar != null, "serializeMatrix must produce non-null strings");
+
+            CalculatorEngine restored = new CalculatorEngine();
+            restored.setLastMatrixAns(restored.deserializeMatrix(encAns));
+            for (String name : source.getMatrixVariableNames()) {
+                restored.setMatrixVariable(name,
+                        restored.deserializeMatrix(source.serializeMatrix(source.getMatrixVariable(name))));
+            }
+            require(restored.getMatrixVariableNames().contains("m"), "restored matrix variables must include m");
+            number(restored.evaluate("det(m)"), -2.0, 1e-12, 0);
+            String reusable = restored.formatMatrixReusable(restored.getLastMatrixAns());
+            require(reusable != null && normalized(reusable).equals("[[5.0,6.0],[7.0,8.0]]"),
+                    "unexpected reusable matrix format: " + reusable);
+
+            CalculatorEngine copied = new CalculatorEngine();
+            copied.copyEvaluatedStateFrom(source);
+            double[][] copiedAns = copied.getLastMatrixAns();
+            require(copiedAns != null && copiedAns.length == 2 && copiedAns[0][0] == 5.0 && copiedAns[1][1] == 8.0,
+                    "copyEvaluatedStateFrom must copy lastMatrixAns");
+            number(copied.evaluate("det(m)"), -2.0, 1e-12, 0);
+        });
         add("plot_compile_mod_large_int", () -> {
             CalculatorEngine engine = new CalculatorEngine();
             CalculatorEngine.PlotFunction fn = engine.compilePlotFunction("mod(9007199254740993,2)+x");
@@ -677,6 +707,44 @@ public final class CalculatorRegressionTest {
             require(unsetOut.exactText.contains("k"), "unset message must reference k: " + unsetOut.exactText);
             require(normalized(engine.evaluate("k+k").exactText).equals("2*k"), "unset k must evaluate symbolically");
         });
+        add("subnormal_pow2_neg1074_no_inf", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            CalculatorEngine.Result res = engine.evaluate("2^-1074");
+            double expected = Math.scalb(1.0, -1074);
+            require(Double.isFinite(res.value) && res.value > 0.0, "expected finite positive, got " + res.value);
+            close(res.value, expected, 0.0, 1e-12);
+            require(!res.decimalText.toLowerCase().contains("inf")
+                    && !res.exactText.toLowerCase().contains("inf"),
+                    "subnormal display must not contain inf: " + res.decimalText + " / " + res.exactText);
+            close(displayedNumber(res.decimalText), expected, 0.0, 1e-12);
+        });
+        add("symbolic_antiderivatives_no_double_minus_and_derivative_match", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            String[] integrands = {
+                "(2*x+1)*sin(x)",
+                "(x+1)*cos(2*x)",
+                "1/(x^2+1)",
+                "1/(4*x^2+9)",
+                "1/(-2*x)",
+                "1/(3*x^2)"
+            };
+            double[] xs = {0.65, 1.35};
+            double h = 1e-6;
+            for (String expr : integrands) {
+                String query = "integral(" + expr + ",x)";
+                CalculatorEngine.Result out = engine.evaluate(query);
+                String compact = normalized(out.exactText);
+                require(!compact.contains("--") && !compact.contains("+-") && !compact.contains("-+"),
+                        query + ": unexpected doubled sign in " + out.exactText);
+                for (double xVal : xs) {
+                    double fPlus = engine.evaluateForX(out.exactText, xVal + h);
+                    double fMinus = engine.evaluateForX(out.exactText, xVal - h);
+                    double derivEst = (fPlus - fMinus) / (2.0 * h);
+                    double target = engine.evaluateForX(expr, xVal);
+                    close(derivEst, target, 1e-6, 1e-6);
+                }
+            }
+        });
     }
 
     public static void main(String[] args) throws Exception {
@@ -692,6 +760,12 @@ public final class CalculatorRegressionTest {
         stateTests();
         structuralTests();
         persistenceTests();
+        // Generated cases with independent references; same files as app/tests/generated.rs.
+        Path generated = Paths.get(args[0]).toAbsolutePath().getParent().resolve("generated");
+        for (Map.Entry<String, GeneratedCases.Check> entry : GeneratedCases.load(generated).entrySet()) {
+            final GeneratedCases.Check generatedCheck = entry.getValue();
+            add(entry.getKey(), generatedCheck::run);
+        }
 
         Document document = DocumentBuilderFactory.newInstance().newDocumentBuilder().newDocument();
         Element suite = document.createElement("testsuite");

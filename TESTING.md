@@ -14,7 +14,7 @@ test.bat
 
 Der Aufruf führt die Rust-Tests und die Tests des Android-Rechenkerns aus. Alle ausgewählten Tests müssen bestehen, damit der Befehl Exitcode 0 liefert. Fehler sind normale fehlgeschlagene Tests: Sie sind weder ignoriert noch als erwartete Fehlschläge versteckt.
 
-Beim Prüfstand vom 15.11.2026 bestanden **340 Tests** (160 Rust und 180 Android/JVM). Die Ergebnisse der vorangegangenen Emulatorprüfungen stehen in der [Nachprüfung](CODE-SMELL-NACHPRUEFUNG.md); die Befunde und Nachprüfungen zu den Rechenkernen, Desktop-Persistenz und Release-Konfiguration sind in [BEWERTUNG-2026-11-15-2.md](BEWERTUNG-2026-11-15-2.md) dokumentiert.
+Beim aktuellen Prüfstand vom 15.11.2026 bestanden **376 Tests** (178 Rust und 198 Android/JVM, 0 Fehler, inkl. `NIOB_GENERATED_ALL='1'` über alle 6 generierten Testsuiten mit 2 692 Fällen pro Kern). Die Ergebnisse der vorangegangenen Emulatorprüfungen stehen in der [Nachprüfung](CODE-SMELL-NACHPRUEFUNG.md); die Befunde und Nachprüfungen zu den Rechenkernen, Desktop-Persistenz und Release-Konfiguration sind in [BEWERTUNG-2026-11-15-2.md](BEWERTUNG-2026-11-15-2.md) dokumentiert.
 
 ## Einen Fix gezielt ausprobieren
 
@@ -33,6 +33,9 @@ Beim Prüfstand vom 15.11.2026 bestanden **340 Tests** (160 Rust und 180 Android
 
 # Neue Persistenz-Gegenproben (ANS und Variablen)
 .\test.ps1 -Target Android -Filter persistence
+
+# Nur die generierten Matrixfälle
+.\test.ps1 -Filter generated_matrices
 ```
 
 `-Filter` sucht nach einem Teil des Testnamens und unterscheidet Groß-/Kleinschreibung. Ein Filter ohne Treffer liefert einen Fehler statt eines scheinbar erfolgreichen Laufs. Für einen bereits grünen Kontrollfall eignet sich `-Filter basic`.
@@ -56,7 +59,7 @@ Das Buildskript benötigt zusätzlich das lokal konfigurierte Android SDK. Der R
 
 ## Was getestet wird
 
-Die gemeinsame Tabelle `app/tests/data/regressions.tsv` enthält 117 Fälle aus Bewertung und Nachprüfung. Sie beschreibt **korrektes Sollverhalten**, nicht die früher beobachteten falschen Werte. Android und Rust verwenden dieselben Sollwerte, mit getrennten Eingabeausdrücken für notwendige Syntax-Aliase.
+Die gemeinsame Tabelle `app/tests/data/regressions.tsv` enthält 126 Fälle aus Bewertung und Nachprüfung. Sie beschreibt **korrektes Sollverhalten**, nicht die früher beobachteten falschen Werte. Android und Rust verwenden dieselben Sollwerte, mit getrennten Eingabeausdrücken für notwendige Syntax-Aliase.
 
 Zahlentests prüfen sowohl den internen Wert als auch die sichtbare Dezimalausgabe. Für kleine Zahlen gilt eine relative Toleranz ohne absoluten Sockel: `6.6261e-34` darf dadurch nicht als `0` durchgehen. Exakttests erlauben dokumentierte Schreibvarianten, aber keine nur näherungsweise gleichen Brüche. Fehlerfälle müssen einen ausdrücklichen Rechenfehler liefern; `NaN` oder `Infinity` als erfolgreicher Wert reichen nicht aus.
 
@@ -73,12 +76,57 @@ Baseline nach Einbau der Tests, vor mathematischen Fixes:
 
 Die Tests decken Rechenkern und Zahlenausgabe ab. Sie ersetzen keine Tests für Android-Oberfläche, Persistenz, Activity-Neustart oder Bedienhilfen. Der komplette Testprozess wird bei Überschreiten des Zeitlimits beendet; damit kann ein später eingeführter Endloslauf den Aufruf nicht unbegrenzt blockieren.
 
+## Generierte Fälle
+
+Zusätzlich zu den Einzelfällen prüfen sechs Tests je Implementierung zusammen rund 2 700 erzeugte Fälle mit unabhängig berechneten Sollwerten:
+
+| Test | Fälle | Inhalt |
+|---|---:|---|
+| `generated_derivatives` | 836 | Ableitungen von 36 Funktionen an Stellen von 10⁻⁹ bis 10⁶, nahe Polstellen sowie an Sprung- und Knickstellen |
+| `generated_integrals` | 286 | Bestimmte Integrale mit geschlossener oder hochgenauer Lösung: schmale Spitzen, Schwingungen, Knicke, Endpunkt-Singularitäten, kurze Intervalle |
+| `generated_matrices` | 600 | Inverse, Determinante, Produkt und A·inv(A) für 2×2- bis 4×4-Matrizen mit Einträgen von 10⁻²⁰ bis 10²⁰ |
+| `generated_exact_numbers` | 400 | Ganzzahl- und Bruchrechnung bis 300 Stellen, einschließlich `mod` und Fakultät |
+| `generated_antiderivatives` | 370 | Symbolische Stammfunktionen, RAD und DEG; Gegenprobe durch Ableiten an Stützstellen |
+| `generated_polynomials` | 200 | Ausmultiplizieren von Produkten und Potenzen linearer Terme in `y`, `z`, `w` |
+
+Die Fälle liegen in `app/tests/data/generated/`. Rust (`app/tests/generated.rs`) und Android (`GeneratedCases.java`) lesen dieselben Dateien; beide Rechenkerne werden also gegen dieselben Sollwerte geprüft. Die Sollwerte stammen nicht aus einem der beiden Kerne, sondern aus sympy, mpmath und exakter Python-Arithmetik. Für den Testlauf ist kein Python nötig.
+
+Grundsatz: Ein korrektes Ergebnis oder eine ausdrückliche Fehlermeldung ist in Ordnung, ein falsches Ergebnis nicht. Wo Gleitkomma an seine Grenzen kommt (nahe Polstellen, starke Auslöschung), ist deshalb auch eine Fehlermeldung zulässig; bei Integralen zusätzlich ein Ergebnis, das als nicht konvergiert gekennzeichnet ist. Die Prüfungen sind in [app/tests/data/generated/README.md](app/tests/data/generated/README.md) beschrieben.
+
+Jeder der sechs Tests meldet im Fehlerfall die Anzahl falscher Fälle und die ersten 30 davon. Alle Fehlschläge zeigt:
+
+```powershell
+$env:NIOB_GENERATED_ALL = '1'; .\test.ps1 -Filter generated_; Remove-Item Env:NIOB_GENERATED_ALL
+```
+
+Beim Einbau am 15.11.2026 schlugen diese Tests fehl (Rust 5 von 6, Android 3 von 6):
+
+| Test | Rust falsch | Android falsch |
+|---|---:|---:|
+| `generated_derivatives` | 55 | 55 |
+| `generated_integrals` | 8 | 8 |
+| `generated_matrices` | 64 | 0 |
+| `generated_exact_numbers` | 131 | 0 |
+| `generated_antiderivatives` | 0 (56 nicht unterstützt) | 0 (56 nicht unterstützt) |
+| `generated_polynomials` | 8 | 8 |
+
+Die erzeugten Integrale brauchen in einem Rust-Debug-Build einige Sekunden; das Standard-Zeitlimit von `test.ps1` beträgt deshalb 300 Sekunden.
+
+Neue Fälle entstehen nicht von Hand, sondern im Generator `tools/generate_test_cases.py` (benötigt Python 3.9 oder neuer sowie `pip install sympy mpmath`):
+
+```powershell
+python .\tools\generate_test_cases.py
+```
+
+Die Zufallsfolgen sind fest; ein erneuter Aufruf erzeugt dieselben Dateien. Sollwerte ändern sich nur, wenn sich das Skript ändert.
+
 ## Wo die Fixes hingehören
 
 - Android: `app/android/src/com/niobcalculator/materialyou/CalculatorEngine.java`. Die Activity und die JVM-Tests verwenden direkt diese Klasse. Der vorhandene APK-Build sammelt sie automatisch zusammen mit den übrigen Produktionsquellen ein. Es wird kein Rechenkern aus Quelltextausschnitten nachgebaut.
 - Rust: `app/src/engine.rs`, gegebenenfalls `app/src/constants.rs`. `app/tests/regressions.rs` bindet die tatsächlichen Produktionsmodule ein und wird von `cargo test` automatisch gefunden.
 - Android-Testadapter: `app/android/tests/com/niobcalculator/materialyou/CalculatorRegressionTest.java`. Testquellen liegen außerhalb von `android/src` und gelangen nicht in die APK.
 - Gemeinsame Sollwerte und Syntax-Aliase: `app/tests/data/regressions.tsv`.
+- Generierte Fälle: `app/tests/data/generated/*.tsv`, erzeugt von `tools/generate_test_cases.py`; Testadapter `app/tests/generated.rs` und `app/android/tests/com/niobcalculator/materialyou/GeneratedCases.java`.
 
 Für einen neuen Fall eine Zeile in der Tabelle ergänzen und den Namen im Rust-`cases!`-Aufruf aufnehmen. Die Rust-Vollständigkeitsprüfung vergleicht Fallnamen und Anzahl automatisch mit dem Fixture; Java liest alle Zeilen ein und lehnt ein leeres Fixture oder doppelte Namen ab. Zusätzliche zulässige exakte Schreibweisen werden in der Sollwertspalte mit `|` getrennt. Sollwerte nur ändern, wenn sich die fachliche Anforderung ändert.
 

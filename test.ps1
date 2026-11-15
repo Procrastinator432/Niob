@@ -4,7 +4,7 @@ param(
     [string]$Target = 'All',
     [string]$Filter = '',
     [ValidateRange(1, 3600)]
-    [int]$TimeoutSeconds = 120
+    [int]$TimeoutSeconds = 300
 )
 
 $ErrorActionPreference = 'Stop'
@@ -100,7 +100,8 @@ if ($Target -eq 'All' -or $Target -eq 'Android') {
         $compile = Invoke-TestProcess $javac @(
             '--release', '8', '-encoding', 'UTF-8', '-Xlint:-options', '-d', $classes,
             (Join-Path $projectDir 'app\android\src\com\niobcalculator\materialyou\CalculatorEngine.java'),
-            (Join-Path $projectDir 'app\android\tests\com\niobcalculator\materialyou\CalculatorRegressionTest.java')
+            (Join-Path $projectDir 'app\android\tests\com\niobcalculator\materialyou\CalculatorRegressionTest.java'),
+            (Join-Path $projectDir 'app\android\tests\com\niobcalculator\materialyou\GeneratedCases.java')
         ) 'android-compile.log'
         if ($compile.ExitCode -ne 0) { throw 'Android test compilation failed; see android-compile.log.' }
         $xmlPath = Join-Path $runDir 'android-junit.xml'

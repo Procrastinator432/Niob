@@ -325,6 +325,10 @@ mod tests {
         engine.evaluate_and_commit("m := 12.5").unwrap();
         assert_eq!(engine.evaluate_preview("m * 4", false).unwrap().decimal_text, "50");
         engine.evaluate_and_commit("~=m").unwrap();
-        assert!(engine.evaluate_preview("m * 4", false).is_err());
+        assert!(!engine.variables.contains_key("m"));
+        let unset_poly = engine.evaluate_preview("m * 4", false).unwrap();
+        assert_eq!(unset_poly.exact_text.replace(' ', ""), "4*m");
+        assert!(unset_poly.numeric_value.is_none());
+        assert!(engine.evaluate_preview("sin(m)", false).is_err());
     }
 }

@@ -116,3 +116,12 @@ symbolic_int_sin_sq	integral(sin(x)^2,x)	integral(sin(x)^2,x)	exact	x/2-sin(2*x)
 symbolic_int_x_exp_x	integral(x*exp(x),x)	integral(x*exp(x),x)	exact	(x-1)*exp(x)|exp(x)*(x-1)	0	0
 poly_const_fold_2y3	2*y*3	2*y*3	exact	6*y|6y	0	0
 poly_cancel_y_div_y	y/y	y/y	exact	1	0	0
+hilbert_4x4_inverse	inv([[1,1/2,1/3,1/4],[1/2,1/3,1/4,1/5],[1/3,1/4,1/5,1/6],[1/4,1/5,1/6,1/7]])	inv([[1,1/2,1/3,1/4],[1/2,1/3,1/4,1/5],[1/3,1/4,1/5,1/6],[1/4,1/5,1/6,1/7]])	exact	[[16,-120,240,-140],[-120,1200,-2700,1680],[240,-2700,6480,-4200],[-140,1680,-4200,2800]]	0	0
+tanh_800	tanh(800)	tanh(800)	number	1	1e-12	1e-10
+integral_deriv_sin_0_1	int(deriv(sin(x),x),x,0,1)	defint(d(sin(x),x),x,0,1)	number	0.8414709848078965	1e-8	1e-8
+integral_inv_sqrt_singularity	int(1/sqrt(1-x^2),x,-1,1)	defint(1/sqrt(1-x^2),x,-1,1)	number	3.141592653589793	1e-5	1e-5
+integral_weak_singularity_099	int(x^(-0.99),x,0,1)	defint(x^(-0.99),x,0,1)	number	100	1e-4	1e-5
+matrix_scaled_extreme_det	det([[7,4.55e20],[-8.88e-20,6]])	det([[7,4.55e20],[-8.88e-20,6]])	number	82.404	1e-8	1e-8
+matrix_scaled_small_det	det([[-5,5/9],[5/7,-5.66e-15]]*inv([[-5,5/9],[5/7,-5.66e-15]]))	det([[-5,5/9],[5/7,-5.66e-15]]*inv([[-5,5/9],[5/7,-5.66e-15]]))	number	1	1e-9	1e-9
+poly_single_3y	3*y	3*y	exact	3*y|3y	0	0
+poly_single_y2	y^2	y^2	exact	y^2	0	0
