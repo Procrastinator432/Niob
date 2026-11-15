@@ -71,3 +71,26 @@ sum_non_integer_bound	sum(k,k,1,2.5)	sum(k,k,1,2.5)	error	Non-integer sum bounds
 deriv_domain_boundary	deriv(sqrt(x),x,0)	d(sqrt(x),x,0)	error	Derivative at domain boundary must be rejected	0	0
 multivar_poly_expand	(y+1)^2	(y+1)^2	exact	y^2+2*y+1|1+2*y+y^2|y^2+2y+1	0	0
 proton_less_than_neutron	m_n-m_p	m_n-m_p	number	2.3e-30	1e-35	1e-6
+integral_wide_exp	int(exp(-x),x,0,10000)	defint(exp(-x),x,0,10000)	number	1	1e-8	1e-8
+integral_very_wide_exp	int(exp(-x),x,0,1000000)	defint(exp(-x),x,0,1000000)	number	1	1e-8	1e-8
+integral_gaussian_wide	int(exp(-x^2),x,-1000,1000)	defint(exp(-x^2),x,-1000,1000)	number	1.772453850905516	1e-8	1e-8
+integral_steep_exp	int(exp(-100*x),x,0,100)	defint(exp(-100*x),x,0,100)	number	0.01	1e-9	1e-8
+integral_abs_exp	int(exp(-abs(x)),x,-5000,5000)	defint(exp(-abs(x)),x,-5000,5000)	number	2	1e-8	1e-8
+integral_narrow_gaussian	int(exp(-(x-0.5)^2*100000000),x,0,1)	defint(exp(-(x-0.5)^2*100000000),x,0,1)	number	0.0001772453850905516	1e-10	1e-6
+integral_abs_sin_100	int(abs(sin(x)),x,0,100)	defint(abs(sin(x)),x,0,100)	number	63.862318872287684	1e-6	1e-6
+symbolic_reciprocal_square_integral	integral(1/x^2,x)	integral(1/x^2,x)	exact	-1/x|-x^-1|-(1/x)	0	0
+symbolic_linear_denom_integral	integral(1/(2*x+1),x)	integral(1/(2*x+1),x)	exact	ln(2*x+1)/2|1/2*ln(2*x+1)|0.5*ln(2*x+1)|ln(abs(2*x+1))/2|(ln(2*x+1))/2	0	0
+symbolic_ln_integral	integral(ln(x),x)	integral(ln(x),x)	exact	x*ln(x)-x|ln(x)*x-x	0	0
+symbolic_exp_neg_x_integral	integral(exp(-x),x)	integral(exp(-x),x)	exact	-exp(-x)|-e^(-x)|-exp(-1*x)	0	0
+symbolic_half_x_integral	integral(x/2,x)	integral(x/2,x)	exact	x^2/4|1/4*x^2|0.25*x^2|(1/4)*x^2	0	0
+poly_expand_deg9	(y+1)^9	(y+1)^9	exact	y^9+9*y^8+36*y^7+84*y^6+126*y^5+126*y^4+84*y^3+36*y^2+9*y+1|1+9*y+36*y^2+84*y^3+126*y^4+126*y^5+84*y^6+36*y^7+9*y^8+y^9	0	0
+poly_expand_half_sq	(y+0.5)^2	(y+0.5)^2	exact	y^2+y+1/4|y^2+y+0.25|1/4+y+y^2|0.25+y+y^2	0	0
+poly_mul_powers	y^2*y^3	y^2*y^3	exact	y^5	0	0
+round_half_neg	round(-2.5)	round(-2.5)	number	-3	0	0
+floor_huge	floor(1e30)	floor(1e30)	number	1e30	0	1e-12
+huge_pow2_cancel	2^127+1-2^127	2^127+1-2^127	number	1	0	0
+factorial_ratio_100_98	100!/98!	100!/98!	number	9900	0	0
+codata_c0_mu0_eps0	c0^2*mu0*eps0	c0^2*mu0*eps0	number	1	1e-10	1e-10
+deriv_sqrt_tiny	deriv(sqrt(x),x,0.0001)	d(sqrt(x),x,0.0001)	number	50	1e-6	1e-6
+deriv_sqrt_small	deriv(sqrt(x),x,0.001)	d(sqrt(x),x,0.001)	number	15.811388300841896	1e-6	1e-6
+matrix_power_10	[[1,1],[1,0]]^10	[[1,1],[1,0]]^10	exact	[[89,55],[55,34]]	0	0

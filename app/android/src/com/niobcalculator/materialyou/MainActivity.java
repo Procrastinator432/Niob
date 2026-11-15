@@ -1348,7 +1348,7 @@ private static class FilledBackspaceDrawable extends Drawable {
         if (cur.isEmpty()) {
             String ansStr = engine.formatAns(false);
             if (ansStr != null && !ansStr.isEmpty() && !ansStr.equals("0")) {
-                previewDisplayView.setText("ANS = " + ansStr);
+                previewDisplayView.setText("ANS = " + formatDisplayNumber(ansStr));
             } else {
                 previewDisplayView.setText("ANS = 0");
             }
@@ -1379,7 +1379,7 @@ private static class FilledBackspaceDrawable extends Drawable {
             if (msg.contains("Division durch Null") || msg.contains("Division by zero")) {
                 previewDisplayView.setText("⚠ Division durch Null");
                 previewDisplayView.setTextColor(0xFFFFB4AB);
-            } else if (msg.contains("Zeitlimit") || msg.contains("Time limit")) {
+            } else if (msg.contains("Zeitlimit") || msg.contains("Zeitüberschreitung") || msg.contains("Time limit")) {
                 previewDisplayView.setText("…");
                 previewDisplayView.setTextColor(colOnSurfaceVariant);
             } else {
@@ -1891,7 +1891,7 @@ private static class FilledBackspaceDrawable extends Drawable {
                 } catch (Exception e) {
                     formula.performHapticFeedback(HapticFeedbackConstants.REJECT);
                     String msg = e.getMessage() != null ? e.getMessage() : "";
-                    if (msg.contains("Zeitlimit") || msg.contains("Time limit")) {
+                    if (msg.contains("Zeitlimit") || msg.contains("Zeitüberschreitung") || msg.contains("Time limit")) {
                         if (previewDisplayView != null) {
                             previewDisplayView.setVisibility(View.VISIBLE);
                             previewMatrix.setVisibility(View.GONE);

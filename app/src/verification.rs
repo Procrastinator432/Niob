@@ -58,7 +58,7 @@ pub fn run_all_verification_checks() -> Vec<VerificationCheck> {
         let trig_alias = engine.evaluate_preview("arcsin(0.5)", false).unwrap();
         let trans_alias = engine.evaluate_preview("transpose([[1, 2], [3, 4]])", false).unwrap();
         let term_alias = engine
-            .evaluate_preview("multiplication(2.9979, power(10, 8))", false)
+            .evaluate_preview("multiplication(2.99792458, power(10, 8))", false)
             .unwrap();
         let ok = unset_res
             && trig_alias.exact_text == "π / 6"
@@ -215,7 +215,7 @@ pub fn run_all_verification_checks() -> Vec<VerificationCheck> {
     {
         let const_count = SCIENTIFIC_CONSTANTS.len();
         let ok = const_count == 32
-            && (SPEED_OF_LIGHT - 299790000.0).abs() < 1e-3
+            && (SPEED_OF_LIGHT - 299792458.0).abs() < 1e-3
             && (GRAVITATION_CONST - 6.6738e-11).abs() < 1e-16
             && (PLANCK_CONSTANT - 6.6261e-34).abs() < 1e-40
             && (BOLTZMANN_CONST - 1.3806e-23).abs() < 1e-29

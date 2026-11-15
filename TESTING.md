@@ -14,7 +14,7 @@ test.bat
 
 Der Aufruf führt die Rust-Tests und die Tests des Android-Rechenkerns aus. Alle ausgewählten Tests müssen bestehen, damit der Befehl Exitcode 0 liefert. Fehler sind normale fehlgeschlagene Tests: Sie sind weder ignoriert noch als erwartete Fehlschläge versteckt.
 
-Beim Prüfstand vom 12.11.2026 bestanden **202 Tests** (91 Rust und 111 Android/JVM). Die Ergebnisse der zusätzlichen Emulatorprüfungen stehen in der [Nachprüfung](CODE-SMELL-NACHPRUEFUNG.md).
+Beim Prüfstand vom 15.11.2026 bestanden **288 Tests** (134 Rust und 154 Android/JVM). Die Ergebnisse der zusätzlichen Emulatorprüfungen stehen in der [Nachprüfung](CODE-SMELL-NACHPRUEFUNG.md).
 
 ## Einen Fix gezielt ausprobieren
 
@@ -56,7 +56,7 @@ Das Buildskript benötigt zusätzlich das lokal konfigurierte Android SDK. Der R
 
 ## Was getestet wird
 
-Die gemeinsame Tabelle `app/tests/data/regressions.tsv` enthält 61 Fälle aus Bewertung und Nachprüfung. Sie beschreibt **korrektes Sollverhalten**, nicht die früher beobachteten falschen Werte. Android und Rust verwenden dieselben Sollwerte, mit getrennten Eingabeausdrücken für notwendige Syntax-Aliase.
+Die gemeinsame Tabelle `app/tests/data/regressions.tsv` enthält 95 Fälle aus Bewertung und Nachprüfung. Sie beschreibt **korrektes Sollverhalten**, nicht die früher beobachteten falschen Werte. Android und Rust verwenden dieselben Sollwerte, mit getrennten Eingabeausdrücken für notwendige Syntax-Aliase.
 
 Zahlentests prüfen sowohl den internen Wert als auch die sichtbare Dezimalausgabe. Für kleine Zahlen gilt eine relative Toleranz ohne absoluten Sockel: `6.6261e-34` darf dadurch nicht als `0` durchgehen. Exakttests erlauben dokumentierte Schreibvarianten, aber keine nur näherungsweise gleichen Brüche. Fehlerfälle müssen einen ausdrücklichen Rechenfehler liefern; `NaN` oder `Infinity` als erfolgreicher Wert reichen nicht aus.
 

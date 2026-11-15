@@ -227,7 +227,30 @@ cases!(
     sum_non_integer_bound,
     deriv_domain_boundary,
     multivar_poly_expand,
-    proton_less_than_neutron
+    proton_less_than_neutron,
+    integral_wide_exp,
+    integral_very_wide_exp,
+    integral_gaussian_wide,
+    integral_steep_exp,
+    integral_abs_exp,
+    integral_narrow_gaussian,
+    integral_abs_sin_100,
+    symbolic_reciprocal_square_integral,
+    symbolic_linear_denom_integral,
+    symbolic_ln_integral,
+    symbolic_exp_neg_x_integral,
+    symbolic_half_x_integral,
+    poly_expand_deg9,
+    poly_expand_half_sq,
+    poly_mul_powers,
+    round_half_neg,
+    floor_huge,
+    huge_pow2_cancel,
+    factorial_ratio_100_98,
+    codata_c0_mu0_eps0,
+    deriv_sqrt_tiny,
+    deriv_sqrt_small,
+    matrix_power_10
 );
 
 #[test]
@@ -663,4 +686,67 @@ fn degrees_symbolic_derivative_scales_by_pi_over_180() {
     );
     let val = engine.eval_for_x(&out.exact_text, 0.0).unwrap();
     close(val, std::f64::consts::PI / 180.0, 1e-12, 1e-12);
+}
+
+#[test]
+fn degrees_symbolic_integral_scales_by_180_over_pi() {
+    let mut engine = new_engine();
+    engine.angle_mode = AngleMode::Degrees;
+    let out = engine.evaluate_preview("integral(sin(x),x)", false).unwrap();
+    let norm = normalized(&out.exact_text);
+    assert!(
+        norm.starts_with('-') && norm.contains("180") && norm.contains("pi") && norm.contains("cos(x)"),
+        "expected -180/pi*cos(x) in DEG mode, got {}",
+        out.exact_text
+    );
+    let h = 1e-5;
+    let f1 = engine.eval_for_x(&out.exact_text, 30.0 + h).unwrap();
+    let f0 = engine.eval_for_x(&out.exact_text, 30.0 - h).unwrap();
+    close((f1 - f0) / (2.0 * h), 0.5, 1e-6, 1e-6);
+}
+
+#[test]
+fn large_negative_odd_power_remains_real() {
+    let mut engine = new_engine();
+    let out = engine.evaluate_preview("(-2)^1001", false).unwrap();
+    let val = out.numeric_value.expect("numeric value expected");
+    assert_eq!(val.im, 0.0, "(-2)^1001 must have zero imaginary part");
+    assert!(!out.decimal_text.contains('i'), "decimal_text must not contain i: {}", out.decimal_text);
+    close(val.re, -2.14301721437253e301, 0.0, 1e-10);
+}
+
+#[test]
+fn matrix_inverse_avoids_float_noise() {
+    let mut engine = new_engine();
+    let inv_out = engine.evaluate_preview("inv([[1,2],[3,4]])", false).unwrap();
+    assert!(!inv_out.exact_text.contains("e-"), "unexpected scientific noise in inv: {}", inv_out.exact_text);
+    let prod = engine.evaluate_preview("[[1,2],[3,4]]*inv([[1,2],[3,4]])", false).unwrap();
+    assert_eq!(normalized(&prod.exact_text), "[[1,0],[0,1]]");
+}
+
+#[test]
+fn watchdog_timeout_returns_zeitlimit() {
+    let mut engine = new_engine();
+    let err = engine
+        .evaluate_with_timeout("sum(sum(sin(j+k),j,1,1000),k,1,1000)", false, 10)
+        .expect_err("slow nested sum should time out");
+    assert!(
+        err.contains("Zeitlimit") || err.contains("Zeitüberschreitung"),
+        "expected Zeitlimit error, got {err}"
+    );
+}
+
+#[test]
+fn deep_nesting_returns_error_without_overflow() {
+    let mut engine = new_engine();
+    let parens = format!("{}1{}", "(".repeat(2000), ")".repeat(2000));
+    assert!(
+        engine.evaluate_preview(&parens, false).is_err(),
+        "2000 nested parens must return error cleanly"
+    );
+    let sins = format!("{}0{}", "sin(".repeat(300), ")".repeat(300));
+    assert!(
+        engine.evaluate_preview(&sins, false).is_err(),
+        "300 nested sin() calls must return error cleanly"
+    );
 }

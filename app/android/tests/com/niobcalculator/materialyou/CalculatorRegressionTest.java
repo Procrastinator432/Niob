@@ -514,6 +514,62 @@ public final class CalculatorRegressionTest {
                     "diagonal 3x3 A*inv(A) must be identity: " + exactInvProd.exactText);
             number(engine.evaluate("det([[1,2,3],[0,1,4],[5,6,0]]*inv([[1,2,3],[0,1,4],[5,6,0]]))"), 1.0, 1e-10, 1e-10);
         });
+        add("degrees_symbolic_integral", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            engine.setRadiansMode(false);
+            CalculatorEngine.Result res = engine.evaluate("integral(sin(x),x)");
+            String norm = normalized(res.exactText);
+            require(norm.startsWith("-") && norm.contains("180") && norm.contains("pi") && norm.contains("cos(x)"),
+                    "expected -180/pi*cos(x) in DEG mode, got " + res.exactText);
+            double h = 1e-5;
+            double f1 = engine.evaluateForX(res.exactText, 30.0 + h);
+            double f0 = engine.evaluateForX(res.exactText, 30.0 - h);
+            close((f1 - f0) / (2.0 * h), 0.5, 1e-6, 1e-6);
+        });
+        add("large_negative_odd_power_remains_real", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            CalculatorEngine.Result res = engine.evaluate("(-2)^1001");
+            require(!res.decimalText.contains("i") && !res.exactText.contains("i"),
+                    "(-2)^1001 must remain real without i: " + res.decimalText);
+            close(res.value, -2.14301721437253e301, 0, 1e-10);
+        });
+        add("matrix_inverse_clean_no_float_noise", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            CalculatorEngine.Result inv = engine.evaluate("inv([[1,2],[3,4]])");
+            require(!inv.exactText.contains("e-") && !inv.decimalText.contains("e-"),
+                    "inv([[1,2],[3,4]]) must not contain float noise: " + inv.exactText);
+            CalculatorEngine.Result prod = engine.evaluate("[[1,2],[3,4]]*inv([[1,2],[3,4]])");
+            require(normalized(prod.exactText).equals("[[1,0],[0,1]]"),
+                    "A*inv(A) must equal exact identity, got " + prod.exactText);
+        });
+        add("watchdog_timeout_returns_zeitlimit", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            String msg = "";
+            try {
+                engine.evaluateWithTimeout("sum(sum(sin(j+k),j,1,1000),k,1,1000)", 10L);
+            } catch (RuntimeException expected) {
+                msg = expected.getMessage() != null ? expected.getMessage() : "";
+            }
+            require(msg.contains("Zeitlimit") || msg.contains("Zeitüberschreitung"),
+                    "expected Zeitlimit timeout message, got: " + msg);
+        });
+        add("deep_nesting_no_stack_overflow", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            StringBuilder lp = new StringBuilder();
+            StringBuilder rp = new StringBuilder();
+            for (int i = 0; i < 2000; i++) {
+                lp.append('(');
+                rp.append(')');
+            }
+            rejects(() -> engine.evaluate(lp.toString() + "1" + rp.toString()));
+            StringBuilder ls = new StringBuilder();
+            StringBuilder rs = new StringBuilder();
+            for (int i = 0; i < 300; i++) {
+                ls.append("sin(");
+                rs.append(')');
+            }
+            rejects(() -> engine.evaluate(ls.toString() + "0" + rs.toString()));
+        });
     }
 
     public static void main(String[] args) throws Exception {

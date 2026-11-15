@@ -7,8 +7,487 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::ops::Deref;
 
+const MAX_NESTING_DEPTH: usize = 64;
+
 thread_local! {
     static INTEGRATION_DEPTH: Cell<usize> = const { Cell::new(0) };
+    static EVAL_DEADLINE: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
+    static EVAL_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+fn check_eval_deadline() -> Result<(), String> {
+    if let Some(deadline) = EVAL_DEADLINE.with(|d| d.get()) {
+        if std::time::Instant::now() > deadline {
+            return Err("Zeitlimit überschritten".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn check_bracket_depth(input: &str) -> Result<(), String> {
+    let mut depth = 0usize;
+    for ch in input.chars() {
+        match ch {
+            '(' | '[' => {
+                depth += 1;
+                if depth > MAX_NESTING_DEPTH {
+                    return Err("Maximale Verschachtelungstiefe überschritten".to_string());
+                }
+            }
+            ')' | ']' => {
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn decimal_to_exact_rat(v: f64) -> Option<ExactRat> {
+    if !v.is_finite() || v.abs() > 1e15 {
+        return None;
+    }
+    if (v - v.trunc()).abs() == 0.0 {
+        return Some(ExactRat::from_int(v.trunc() as i128));
+    }
+    let mut ten_k: i128 = 1;
+    for _ in 1..=8 {
+        ten_k *= 10;
+        let scaled = (v * (ten_k as f64)).round();
+        if scaled.is_finite() && (scaled / (ten_k as f64) - v).abs() == 0.0 && scaled.abs() < 1e18 {
+            return ExactRat::new(scaled as i128, ten_k);
+        }
+    }
+    None
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BigUInt {
+    limbs: Vec<u32>,
+}
+
+#[allow(dead_code)]
+impl BigUInt {
+    fn zero() -> Self {
+        Self { limbs: Vec::new() }
+    }
+
+    fn one() -> Self {
+        Self { limbs: vec![1] }
+    }
+
+    fn trim(&mut self) {
+        while matches!(self.limbs.last(), Some(&0)) {
+            self.limbs.pop();
+        }
+    }
+
+    fn is_zero(&self) -> bool {
+        self.limbs.is_empty()
+    }
+
+    fn is_one(&self) -> bool {
+        self.limbs.len() == 1 && self.limbs[0] == 1
+    }
+
+    fn from_u128(mut v: u128) -> Self {
+        let mut limbs = Vec::new();
+        while v > 0 {
+            limbs.push((v & 0xFFFF_FFFF) as u32);
+            v >>= 32;
+        }
+        Self { limbs }
+    }
+
+    fn to_u128(&self) -> Option<u128> {
+        if self.limbs.len() > 4 {
+            return None;
+        }
+        let mut v = 0u128;
+        for (i, &limb) in self.limbs.iter().enumerate() {
+            v |= u128::from(limb) << (i * 32);
+        }
+        Some(v)
+    }
+
+    fn bit_len(&self) -> usize {
+        if let Some(&top) = self.limbs.last() {
+            (self.limbs.len() - 1) * 32 + (32 - top.leading_zeros() as usize)
+        } else {
+            0
+        }
+    }
+
+    fn cmp_mag(&self, other: &Self) -> std::cmp::Ordering {
+        self.limbs.len().cmp(&other.limbs.len()).then_with(|| {
+            for i in (0..self.limbs.len()).rev() {
+                let ord = self.limbs[i].cmp(&other.limbs[i]);
+                if ord != std::cmp::Ordering::Equal {
+                    return ord;
+                }
+            }
+            std::cmp::Ordering::Equal
+        })
+    }
+
+    fn add(&self, other: &Self) -> Self {
+        let n = self.limbs.len().max(other.limbs.len());
+        let mut out = Vec::with_capacity(n + 1);
+        let mut carry = 0u64;
+        for i in 0..n {
+            let a = u64::from(*self.limbs.get(i).unwrap_or(&0));
+            let b = u64::from(*other.limbs.get(i).unwrap_or(&0));
+            let sum = a + b + carry;
+            out.push((sum & 0xFFFF_FFFF) as u32);
+            carry = sum >> 32;
+        }
+        if carry > 0 {
+            out.push(carry as u32);
+        }
+        let mut res = Self { limbs: out };
+        res.trim();
+        res
+    }
+
+    fn sub(&self, other: &Self) -> Self {
+        let mut out = Vec::with_capacity(self.limbs.len());
+        let mut borrow = 0i64;
+        for i in 0..self.limbs.len() {
+            let a = i64::from(self.limbs[i]);
+            let b = i64::from(*other.limbs.get(i).unwrap_or(&0));
+            let mut diff = a - b - borrow;
+            if diff < 0 {
+                diff += 1i64 << 32;
+                borrow = 1;
+            } else {
+                borrow = 0;
+            }
+            out.push(diff as u32);
+        }
+        let mut res = Self { limbs: out };
+        res.trim();
+        res
+    }
+
+    fn mul(&self, other: &Self) -> Self {
+        if self.is_zero() || other.is_zero() {
+            return Self::zero();
+        }
+        let mut out = vec![0u32; self.limbs.len() + other.limbs.len()];
+        for (i, &a) in self.limbs.iter().enumerate() {
+            let mut carry = 0u64;
+            for (j, &b) in other.limbs.iter().enumerate() {
+                let prod = u64::from(a) * u64::from(b) + u64::from(out[i + j]) + carry;
+                out[i + j] = (prod & 0xFFFF_FFFF) as u32;
+                carry = prod >> 32;
+            }
+            if carry > 0 {
+                out[i + other.limbs.len()] = carry as u32;
+            }
+        }
+        let mut res = Self { limbs: out };
+        res.trim();
+        res
+    }
+
+    fn shl1_set_lsb(&mut self, bit: u32) {
+        let mut carry = bit & 1;
+        for limb in &mut self.limbs {
+            let next_carry = *limb >> 31;
+            *limb = (*limb << 1) | carry;
+            carry = next_carry;
+        }
+        if carry != 0 {
+            self.limbs.push(carry);
+        }
+    }
+
+    fn div_rem(&self, d: &Self) -> (Self, Self) {
+        if self.cmp_mag(d) == std::cmp::Ordering::Less {
+            return (Self::zero(), self.clone());
+        }
+        if d.is_one() {
+            return (self.clone(), Self::zero());
+        }
+        let mut q = vec![0u32; self.limbs.len()];
+        let mut r = Self::zero();
+        for bit in (0..self.bit_len()).rev() {
+            let bit_val = (self.limbs[bit / 32] >> (bit % 32)) & 1;
+            r.shl1_set_lsb(bit_val);
+            if r.cmp_mag(d) != std::cmp::Ordering::Less {
+                r = r.sub(d);
+                q[bit / 32] |= 1u32 << (bit % 32);
+            }
+        }
+        let mut q_res = Self { limbs: q };
+        q_res.trim();
+        (q_res, r)
+    }
+
+    fn gcd(mut a: Self, mut b: Self) -> Self {
+        while !b.is_zero() {
+            let (_, r) = a.div_rem(&b);
+            a = b;
+            b = r;
+        }
+        a
+    }
+
+    fn pow_u32(&self, mut exp: u32) -> Self {
+        let mut res = Self::one();
+        let mut base = self.clone();
+        while exp > 0 {
+            if (exp & 1) != 0 {
+                res = res.mul(&base);
+            }
+            exp >>= 1;
+            if exp > 0 {
+                base = base.mul(&base);
+            }
+        }
+        res
+    }
+
+    fn to_f64(&self) -> f64 {
+        if self.is_zero() {
+            return 0.0;
+        }
+        let start = self.limbs.len().saturating_sub(3);
+        let mut acc = 0.0f64;
+        for &limb in self.limbs[start..].iter().rev() {
+            acc = acc * 4294967296.0 + f64::from(limb);
+        }
+        acc * 2.0f64.powi((start * 32) as i32)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BigInt {
+    neg: bool,
+    mag: BigUInt,
+}
+
+#[allow(dead_code)]
+impl BigInt {
+    fn from_i128(v: i128) -> Self {
+        if v == 0 {
+            Self { neg: false, mag: BigUInt::zero() }
+        } else {
+            Self { neg: v < 0, mag: BigUInt::from_u128(v.unsigned_abs()) }
+        }
+    }
+
+    fn from_u32_parts(neg: bool, mag: BigUInt) -> Self {
+        if mag.is_zero() {
+            Self { neg: false, mag }
+        } else {
+            Self { neg, mag }
+        }
+    }
+
+    fn negate(&self) -> Self {
+        Self::from_u32_parts(!self.neg, self.mag.clone())
+    }
+
+    fn add(&self, o: &Self) -> Self {
+        if self.neg == o.neg {
+            Self::from_u32_parts(self.neg, self.mag.add(&o.mag))
+        } else {
+            match self.mag.cmp_mag(&o.mag) {
+                std::cmp::Ordering::Equal => Self::from_i128(0),
+                std::cmp::Ordering::Greater => Self::from_u32_parts(self.neg, self.mag.sub(&o.mag)),
+                std::cmp::Ordering::Less => Self::from_u32_parts(o.neg, o.mag.sub(&self.mag)),
+            }
+        }
+    }
+
+    fn sub(&self, o: &Self) -> Self {
+        self.add(&o.negate())
+    }
+
+    fn mul(&self, o: &Self) -> Self {
+        Self::from_u32_parts(self.neg ^ o.neg, self.mag.mul(&o.mag))
+    }
+
+    fn to_i128(&self) -> Option<i128> {
+        let u = self.mag.to_u128()?;
+        if self.neg {
+            if u == (1u128 << 127) {
+                Some(i128::MIN)
+            } else if u < (1u128 << 127) {
+                Some(-(u as i128))
+            } else {
+                None
+            }
+        } else {
+            i128::try_from(u).ok()
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BigRat {
+    num: BigInt,
+    den: BigUInt,
+}
+
+impl BigRat {
+    fn from_exact_rat(r: ExactRat) -> Self {
+        Self {
+            num: BigInt::from_i128(r.num),
+            den: BigUInt::from_u128(r.den.unsigned_abs()),
+        }
+    }
+
+    fn reduce(num: BigInt, den: BigUInt) -> Result<Self, String> {
+        if den.is_zero() {
+            return Err("Division durch Null".to_string());
+        }
+        if num.mag.is_zero() {
+            return Ok(Self {
+                num: BigInt::from_i128(0),
+                den: BigUInt::one(),
+            });
+        }
+        let g = BigUInt::gcd(num.mag.clone(), den.clone());
+        if g.is_one() {
+            Ok(Self { num, den })
+        } else {
+            let (qn, _) = num.mag.div_rem(&g);
+            let (qd, _) = den.div_rem(&g);
+            Ok(Self {
+                num: BigInt::from_u32_parts(num.neg, qn),
+                den: qd,
+            })
+        }
+    }
+
+    fn negate(&self) -> Self {
+        Self { num: self.num.negate(), den: self.den.clone() }
+    }
+
+    fn add(&self, o: &Self) -> Result<Self, String> {
+        let num = self.num.mul(&BigInt::from_u32_parts(false, o.den.clone()))
+            .add(&o.num.mul(&BigInt::from_u32_parts(false, self.den.clone())));
+        let den = self.den.mul(&o.den);
+        Self::reduce(num, den)
+    }
+
+    fn sub(&self, o: &Self) -> Result<Self, String> {
+        self.add(&o.negate())
+    }
+
+    fn mul(&self, o: &Self) -> Result<Self, String> {
+        Self::reduce(self.num.mul(&o.num), self.den.mul(&o.den))
+    }
+
+    fn div(&self, o: &Self) -> Result<Self, String> {
+        if o.num.mag.is_zero() {
+            return Err("Division durch Null".to_string());
+        }
+        let neg = self.num.neg ^ o.num.neg;
+        Self::reduce(
+            BigInt::from_u32_parts(neg, self.num.mag.mul(&o.den)),
+            self.den.mul(&o.num.mag),
+        )
+    }
+
+    fn pow(&self, p: i32) -> Result<Self, String> {
+        if p == 0 {
+            return Ok(Self { num: BigInt::from_i128(1), den: BigUInt::one() });
+        }
+        if p < 0 {
+            if self.num.mag.is_zero() {
+                return Err("Division durch Null".to_string());
+            }
+            let ap = p.unsigned_abs();
+            let neg = self.num.neg && (ap % 2 == 1);
+            let num = BigInt::from_u32_parts(neg, self.den.pow_u32(ap));
+            let den = self.num.mag.pow_u32(ap);
+            return Self::reduce(num, den);
+        }
+        let ap = p as u32;
+        let neg = self.num.neg && (ap % 2 == 1);
+        let num = BigInt::from_u32_parts(neg, self.num.mag.pow_u32(ap));
+        let den = self.den.pow_u32(ap);
+        Self::reduce(num, den)
+    }
+
+    fn to_exact_rat(&self) -> Option<ExactRat> {
+        let num = self.num.to_i128()?;
+        let den = BigInt::from_u32_parts(false, self.den.clone()).to_i128()?;
+        ExactRat::new(num, den)
+    }
+}
+
+fn try_eval_bigrat_ast(node: &AstNode, engine: &MathEngine) -> Result<Option<BigRat>, String> {
+    check_eval_deadline()?;
+    match node {
+        AstNode::Num(v) => Ok(v.rat.map(BigRat::from_exact_rat)),
+        AstNode::Var(name) => {
+            if name == "ans" || name == "ANS" {
+                Ok(engine.ans.rat.map(BigRat::from_exact_rat))
+            } else if USER_VARIABLES.contains(&name.as_str()) {
+                Ok(engine.variables.get(name).and_then(|v| v.rat).map(BigRat::from_exact_rat))
+            } else {
+                Ok(None)
+            }
+        }
+        AstNode::Neg(inner) => Ok(try_eval_bigrat_ast(inner, engine)?.map(|r| r.negate())),
+        AstNode::Add(l, r) => match (try_eval_bigrat_ast(l, engine)?, try_eval_bigrat_ast(r, engine)?) {
+            (Some(a), Some(b)) => Ok(Some(a.add(&b)?)),
+            _ => Ok(None),
+        },
+        AstNode::Sub(l, r) => match (try_eval_bigrat_ast(l, engine)?, try_eval_bigrat_ast(r, engine)?) {
+            (Some(a), Some(b)) => Ok(Some(a.sub(&b)?)),
+            _ => Ok(None),
+        },
+        AstNode::Mul(l, r) => match (try_eval_bigrat_ast(l, engine)?, try_eval_bigrat_ast(r, engine)?) {
+            (Some(a), Some(b)) => Ok(Some(a.mul(&b)?)),
+            _ => Ok(None),
+        },
+        AstNode::Div(l, r) => match (try_eval_bigrat_ast(l, engine)?, try_eval_bigrat_ast(r, engine)?) {
+            (Some(a), Some(b)) => Ok(Some(a.div(&b)?)),
+            _ => Ok(None),
+        },
+        AstNode::Pow(base, exp) => match (try_eval_bigrat_ast(base, engine)?, try_eval_bigrat_ast(exp, engine)?) {
+            (Some(b), Some(e)) if e.den.is_one() => {
+                let Some(p) = e.num.to_i128() else { return Ok(None); };
+                let ap = p.unsigned_abs();
+                if ap > 1000 {
+                    return Ok(None);
+                }
+                let est_bits = b.num.mag.bit_len().max(b.den.bit_len()).saturating_mul(ap as usize);
+                let max_bits = if b.den.is_one() { 16384 } else { 4096 };
+                if est_bits <= max_bits {
+                    Ok(Some(b.pow(p as i32)?))
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => Ok(None),
+        },
+        AstNode::Func(name, args) if (name == "factorial" || name == "fact") && args.len() == 1 => {
+            if let Some(arg) = try_eval_bigrat_ast(&args[0], engine)? {
+                if arg.den.is_one() && !arg.num.neg {
+                    if let Some(k) = arg.num.to_i128() {
+                        if k <= 170 {
+                            let mut prod = BigUInt::one();
+                            for i in 2..=(k as u128) {
+                                prod = prod.mul(&BigUInt::from_u128(i));
+                            }
+                            return Ok(Some(BigRat {
+                                num: BigInt::from_u32_parts(false, prod),
+                                den: BigUInt::one(),
+                            }));
+                        }
+                    }
+                }
+            }
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
 }
 use crate::constants::{
     SCIENTIFIC_CONSTANTS, USER_VARIABLES,
@@ -379,11 +858,18 @@ impl Complex {
     }
 
     pub fn div(self, o: Self) -> Self {
-        let denom = o.re * o.re + o.im * o.im;
-        Self::new(
-            (self.re * o.re + self.im * o.im) / denom,
-            (self.im * o.re - self.re * o.im) / denom,
-        )
+        if o.re == 0.0 && o.im == 0.0 {
+            return Self::real(f64::NAN);
+        }
+        if o.re.abs() >= o.im.abs() {
+            let r = o.im / o.re;
+            let den = o.re + o.im * r;
+            Self::new((self.re + self.im * r) / den, (self.im - self.re * r) / den)
+        } else {
+            let r = o.re / o.im;
+            let den = o.re * r + o.im;
+            Self::new((self.re * r + self.im) / den, (self.im * r - self.re) / den)
+        }
     }
 
     pub fn exp(self) -> Self {
@@ -747,12 +1233,47 @@ impl MathEngine {
         Ok(res)
     }
 
+    #[allow(dead_code)]
+    pub fn evaluate_with_timeout(&mut self, raw_input: &str, allow_mutation: bool, timeout_ms: u64) -> Result<EvalOutput, String> {
+        let prev = EVAL_DEADLINE.with(|d| {
+            let old = d.get();
+            d.set(Some(std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms)));
+            old
+        });
+        struct DeadlineGuard(Option<std::time::Instant>);
+        impl Drop for DeadlineGuard {
+            fn drop(&mut self) {
+                EVAL_DEADLINE.with(|d| d.set(self.0));
+            }
+        }
+        let _guard = DeadlineGuard(prev);
+        self.evaluate_preview(raw_input, allow_mutation)
+    }
+
     pub fn evaluate_preview(&mut self, raw_input: &str, allow_mutation: bool) -> Result<EvalOutput, String> {
+        let prev_deadline = EVAL_DEADLINE.with(|d| d.get());
+        struct DefaultDeadlineGuard(Option<std::time::Instant>, bool);
+        impl Drop for DefaultDeadlineGuard {
+            fn drop(&mut self) {
+                if self.1 {
+                    EVAL_DEADLINE.with(|d| d.set(self.0));
+                }
+            }
+        }
+        let installed = prev_deadline.is_none();
+        if installed {
+            let ms = crate::constants::SYMBOLIC_WATCHDOG_TIMEOUT_MS as u64;
+            EVAL_DEADLINE.with(|d| {
+                d.set(Some(std::time::Instant::now() + std::time::Duration::from_millis(ms)));
+            });
+        }
+        let _deadline_guard = DefaultDeadlineGuard(prev_deadline, installed);
         self.last_integration_report.replace(None);
         let trimmed = raw_input.trim();
         if trimmed.is_empty() {
             return Err("Leerer Ausdruck".to_string());
         }
+        check_bracket_depth(trimmed)?;
 
         // Check `unset(var)` or original Algebrite `~=var` / `var~=` (`Lc/a/a/e/d;->a` line 672)
         let unset_candidate = trimmed
@@ -827,6 +1348,35 @@ impl MathEngine {
             }
         }
 
+        // Exact arbitrary-precision rational evaluation fallback (handles e.g. 2^127+1-2^127 and 100!/98!)
+        if let Some(ref ast) = parsed_ast {
+            if let Some(br) = try_eval_bigrat_ast(ast, self)? {
+                if let Some(er) = br.to_exact_rat() {
+                    let val = Value {
+                        c: Complex::real(er.to_f64()),
+                        rat: Some(er),
+                    };
+                    if val.c.re.is_finite() {
+                        let dec_str = self.format_value_decimal(val);
+                        let exact_opt = self.try_format_exact_val(trimmed, val);
+                        let (exact_text, has_distinct_exact) = match exact_opt {
+                            Some(ex) if ex != dec_str => (ex, true),
+                            _ => (dec_str.clone(), false),
+                        };
+                        return Ok(EvalOutput {
+                            exact_text,
+                            decimal_text: dec_str,
+                            has_distinct_exact,
+                            numeric_value: Some(val.c),
+                            val: Some(val),
+                            integration_report: None,
+                            matrix_expression: None,
+                        });
+                    }
+                }
+            }
+        }
+
         // Evaluate via recursive descent parser
         let mut parser = ExprParser::new(trimmed, self, None);
         let parse_res = parser.parse_expr();
@@ -896,7 +1446,7 @@ impl MathEngine {
         match ast {
             AstNode::Func(name, args) if (name == "integral" || name == "int") && args.len() == 2 => {
                 if let AstNode::Var(var) = &args[1] {
-                    if let Some(res_ast) = args[0].integrate(var) {
+                    if let Some(res_ast) = args[0].integrate_with_mode(var, self.angle_mode) {
                         let res = res_ast.simplify().to_display_string();
                         return Some(EvalOutput {
                             exact_text: res.clone(),
@@ -1312,6 +1862,15 @@ impl MathEngine {
                 (MatrixOrScalar::Scalar(a), MatrixOrScalar::Scalar(b)) => Ok(MatrixOrScalar::Scalar(a.div(b)?)),
                 _ => Err("Ungültige Matrixdivision".to_string()),
             },
+            AstNode::Pow(l, r) => match (self.eval_matrix_or_scalar_ast(l)?, self.eval_matrix_or_scalar_ast(r)?) {
+                (MatrixOrScalar::Matrix(m), MatrixOrScalar::Scalar(s)) => {
+                    Ok(MatrixOrScalar::Matrix(matrix_pow(&m, s)?))
+                }
+                (MatrixOrScalar::Scalar(a), MatrixOrScalar::Scalar(b)) => {
+                    Ok(MatrixOrScalar::Scalar(a.pow(b)))
+                }
+                _ => Err("Ungültige Matrixpotenz".to_string()),
+            },
             AstNode::Func(name, args) if name == "inv" && args.len() == 1 => {
                 let mat = self.eval_matrix_ast(&args[0])?;
                 Ok(MatrixOrScalar::Matrix(matrix_inv(&mat)?))
@@ -1688,10 +2247,75 @@ fn matrix_inv(m: &[Vec<Value>]) -> Result<Vec<Vec<Value>>, String> {
         }
     }
     let mut inv = vec![vec![zero; n]; n];
+    let mut max_inv_abs = 0.0_f64;
     for i in 0..n {
         inv[i].copy_from_slice(&aug[i][n..(2 * n)]);
+        for cell in &inv[i] {
+            let av = cell.c.re.abs();
+            if av > max_inv_abs {
+                max_inv_abs = av;
+            }
+        }
+    }
+    let zero_tol = 1e-13 * max_inv_abs.max(1e-30);
+    for row in &mut inv {
+        for cell in row.iter_mut() {
+            if cell.rat.is_none() && cell.c.is_real() && cell.c.re.is_finite() {
+                let v = cell.c.re;
+                if v.abs() <= zero_tol {
+                    *cell = Value::from_int(0);
+                } else {
+                    let nearest = v.round();
+                    if (v - nearest).abs() <= 1e-13 * nearest.abs().max(1.0) && nearest.abs() <= 1e15 {
+                        *cell = Value::from_int(nearest as i128);
+                    }
+                }
+            }
+        }
     }
     Ok(inv)
+}
+
+fn matrix_pow(m: &[Vec<Value>], exp_val: Value) -> Result<Vec<Vec<Value>>, String> {
+    let n = m.len();
+    if n == 0 || m[0].len() != n {
+        return Err("Matrixpotenz erfordert quadratische Matrix".to_string());
+    }
+    let exp: i32 = if let Some(r) = exp_val.rat {
+        if r.den != 1 || r.num.abs() > 1000 {
+            return Err("Matrixexponent muss eine ganze Zahl zwischen -1000 und 1000 sein".to_string());
+        }
+        r.num as i32
+    } else {
+        if !exp_val.c.is_real()
+            || !exp_val.c.re.is_finite()
+            || (exp_val.c.re - exp_val.c.re.round()).abs() > 1e-12
+            || exp_val.c.re.abs() > 1000.0
+        {
+            return Err("Matrixexponent muss eine ganze Zahl zwischen -1000 und 1000 sein".to_string());
+        }
+        exp_val.c.re.round() as i32
+    };
+    let mut res = vec![vec![Value::from_int(0); n]; n];
+    for i in 0..n {
+        res[i][i] = Value::from_int(1);
+    }
+    if exp == 0 {
+        return Ok(res);
+    }
+    let mut base = if exp < 0 { matrix_inv(m)? } else { m.to_vec() };
+    let mut p = exp.unsigned_abs();
+    while p > 0 {
+        check_eval_deadline()?;
+        if (p & 1) != 0 {
+            res = multiply_matrices(&res, &base)?;
+        }
+        p >>= 1;
+        if p > 0 {
+            base = multiply_matrices(&base, &base)?;
+        }
+    }
+    Ok(res)
 }
 
 // --- Adaptive Gauss-Legendre Quadrature with Error Control & Convergence Assertion ---
@@ -1741,6 +2365,7 @@ where
     }
 
     let eval_sub = |ia: f64, ib: f64| -> Result<Subinterval, String> {
+        check_eval_deadline()?;
         let h = ib - ia;
         let half_h = h * 0.5;
         let mid = ia + half_h;
@@ -1771,25 +2396,101 @@ where
         Ok(Subinterval { a: ia, b: ib, val5: q5, err })
     };
 
-    let mut intervals = Vec::with_capacity(initial_subintervals * 2);
-    let h = (b - a) / (initial_subintervals as f64);
-    let mut total_val = 0.0;
-    let mut total_err = 0.0;
-
-    for i in 0..initial_subintervals {
-        let ia = a + (i as f64) * h;
-        let ib = if i == initial_subintervals - 1 { b } else { ia + h };
-        let sub = eval_sub(ia, ib)?;
-        total_val += sub.val5;
-        total_err += sub.err;
-        intervals.push(sub);
+    if a == b {
+        return Ok(IntegrationReport {
+            value: 0.0,
+            abs_err: 0.0,
+            converged: true,
+            subintervals: 0,
+            evaluations: 0,
+            message: "Konvergiert: Fehlerabschätzung 0.00e0 <= Toleranz 1.00e-10 (0 Auswertungen)".to_string(),
+        });
     }
 
-    let mut evals = initial_subintervals * 7;
+    let mut intervals = Vec::with_capacity(initial_subintervals * 2 + 128);
+    let mut total_val = 0.0;
+    let mut total_err = 0.0;
+    let mut evals: usize;
+
+    if initial_subintervals >= 500 {
+        let lo = a.min(b);
+        let hi = a.max(b);
+        let span = hi - lo;
+        let step = span / (initial_subintervals as f64);
+        let mut pts = Vec::with_capacity(initial_subintervals + 128);
+        for i in 0..=initial_subintervals {
+            pts.push(if i == initial_subintervals { hi } else { lo + (i as f64) * step });
+        }
+        let mid = 0.5 * (lo + hi);
+        let anchors: Vec<f64> = if lo < 0.0 && hi > 0.0 {
+            vec![lo, 0.0, mid, hi]
+        } else {
+            vec![lo, mid, hi]
+        };
+        let offsets = [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1.0, 4.0, 16.0, 64.0, 256.0, 1024.0];
+        for anchor in anchors {
+            if anchor > lo && anchor < hi {
+                pts.push(anchor);
+            }
+            for &off in &offsets {
+                if off >= span * 0.25 {
+                    break;
+                }
+                if anchor - off > lo {
+                    pts.push(anchor - off);
+                }
+                if anchor + off < hi {
+                    pts.push(anchor + off);
+                }
+            }
+        }
+        pts.sort_by(f64::total_cmp);
+        let mut dedup: Vec<f64> = Vec::with_capacity(pts.len());
+        for p in pts {
+            if let Some(&last) = dedup.last() {
+                if p - last <= 1e-12 * p.abs().max(1.0) {
+                    if p == hi {
+                        *dedup.last_mut().unwrap() = hi;
+                    }
+                    continue;
+                }
+            }
+            dedup.push(p);
+        }
+        if a < b {
+            for w in dedup.windows(2) {
+                let sub = eval_sub(w[0], w[1])?;
+                total_val += sub.val5;
+                total_err += sub.err;
+                intervals.push(sub);
+            }
+        } else {
+            for w in dedup.windows(2).rev() {
+                let sub = eval_sub(w[1], w[0])?;
+                total_val += sub.val5;
+                total_err += sub.err;
+                intervals.push(sub);
+            }
+        }
+        evals = intervals.len() * 7;
+    } else {
+        let h = (b - a) / (initial_subintervals as f64);
+        for i in 0..initial_subintervals {
+            let ia = a + (i as f64) * h;
+            let ib = if i == initial_subintervals - 1 { b } else { ia + h };
+            let sub = eval_sub(ia, ib)?;
+            total_val += sub.val5;
+            total_err += sub.err;
+            intervals.push(sub);
+        }
+        evals = initial_subintervals * 7;
+    }
+
     let max_evals = 100_000;
-    let target_tol = eps_abs.max(eps_rel * total_val.abs());
+    let mut target_tol = eps_abs.max(eps_rel * total_val.abs());
 
     while total_err > target_tol && evals < max_evals {
+        check_eval_deadline()?;
         let mut worst_idx = 0;
         let mut worst_err = intervals[0].err;
         for (idx, iv) in intervals.iter().enumerate().skip(1) {
@@ -1813,6 +2514,7 @@ where
 
         total_val += left.val5 + right.val5;
         total_err += left.err + right.err;
+        target_tol = eps_abs.max(eps_rel * total_val.abs());
 
         intervals.push(left);
         intervals.push(right);
@@ -2327,7 +3029,12 @@ impl AstNode {
         }
     }
 
+    #[allow(dead_code)]
     pub fn integrate(&self, var: &str) -> Option<AstNode> {
+        self.integrate_with_mode(var, AngleMode::Radians)
+    }
+
+    pub fn integrate_with_mode(&self, var: &str, mode: AngleMode) -> Option<AstNode> {
         match self {
             AstNode::Var(v) if v == var => {
                 // \int x dx = x^2 / 2
@@ -2352,77 +3059,174 @@ impl AstNode {
                     Box::new(AstNode::Var(var.to_string())),
                 ))
             }
-            AstNode::Neg(inner) => Some(AstNode::Neg(Box::new(inner.integrate(var)?))),
+            AstNode::Neg(inner) => Some(AstNode::Neg(Box::new(inner.integrate_with_mode(var, mode)?)).simplify()),
             AstNode::Div(a, b) => {
                 if !b.contains_var(var) {
-                    let ia = a.integrate(var)?;
+                    let ia = a.integrate_with_mode(var, mode)?;
                     return Some(AstNode::Div(Box::new(ia), b.clone()).simplify());
                 }
-                if !a.contains_var(var) && **b == AstNode::Var(var.to_string()) {
-                    let ln = AstNode::Func("ln".to_string(), vec![AstNode::Var(var.to_string())]);
-                    return Some(if a.is_one() {
-                        ln
-                    } else {
-                        AstNode::Mul(a.clone(), Box::new(ln))
-                    });
+                if !a.contains_var(var) {
+                    let sb = b.simplify();
+                    if let Some((lin_a, _lin_b)) = sb.match_linear(var) {
+                        if !lin_a.is_zero() {
+                            let ln = AstNode::Func("ln".to_string(), vec![sb]);
+                            let num = if a.is_one() {
+                                ln
+                            } else {
+                                AstNode::Mul(a.clone(), Box::new(ln)).simplify()
+                            };
+                            return Some(if lin_a.is_one() {
+                                num
+                            } else {
+                                AstNode::Div(Box::new(num), Box::new(lin_a)).simplify()
+                            });
+                        }
+                    }
+                    if let AstNode::Pow(base, exp) = &sb {
+                        if !exp.contains_var(var) {
+                            let neg_pow = AstNode::Pow(
+                                base.clone(),
+                                Box::new(AstNode::Neg(exp.clone()).simplify()),
+                            );
+                            if let Some(ip) = neg_pow.integrate_with_mode(var, mode) {
+                                return Some(if a.is_one() {
+                                    ip
+                                } else {
+                                    AstNode::Mul(a.clone(), Box::new(ip)).simplify()
+                                });
+                            }
+                        }
+                    }
                 }
                 None
             }
-            AstNode::Pow(base, exp) if **base == AstNode::Var(var.to_string()) && !exp.contains_var(var) => {
-                if let Some(er) = try_exact_rat_ast(exp) {
+            AstNode::Pow(base, exp) if !exp.contains_var(var) => {
+                let (lin_a, _lin_b) = base.match_linear(var)?;
+                if lin_a.is_zero() {
+                    return None;
+                }
+                let unit_a = lin_a.is_one();
+                if let Some(er) = try_poly_rat_ast(exp) {
                     if er.den == 1 && er.num == -1 {
-                        return Some(AstNode::Func(
-                            "ln".to_string(),
-                            vec![AstNode::Var(var.to_string())],
-                        ));
+                        let ln_node = AstNode::Func("ln".to_string(), vec![(**base).clone()]);
+                        return Some(if unit_a {
+                            ln_node
+                        } else {
+                            AstNode::Div(Box::new(ln_node), Box::new(lin_a)).simplify()
+                        });
                     }
                     let new_exp = er.add(ExactRat::from_int(1))?;
+                    if new_exp.den == 1 && new_exp.num < 0 {
+                        let pos_k = new_exp.num.abs();
+                        let pow_node = if pos_k == 1 {
+                            (**base).clone()
+                        } else {
+                            AstNode::Pow(base.clone(), Box::new(AstNode::Num(Value::from_int(pos_k))))
+                        };
+                        let factor_node = AstNode::Num(Value::from_int(pos_k));
+                        let denom = if pos_k == 1 {
+                            if unit_a {
+                                pow_node
+                            } else {
+                                AstNode::Mul(Box::new(lin_a), Box::new(pow_node)).simplify()
+                            }
+                        } else {
+                            let coeff_node = if unit_a {
+                                factor_node
+                            } else {
+                                AstNode::Mul(Box::new(factor_node), Box::new(lin_a)).simplify()
+                            };
+                            AstNode::Mul(Box::new(coeff_node), Box::new(pow_node)).simplify()
+                        };
+                        return Some(
+                            AstNode::Neg(Box::new(
+                                AstNode::Div(Box::new(AstNode::Num(Value::from_int(1))), Box::new(denom)).simplify(),
+                            ))
+                            .simplify(),
+                        );
+                    }
                     let new_exp_val = Value { c: Complex::real(new_exp.to_f64()), rat: Some(new_exp) };
+                    let pow_node = if new_exp.den == 1 && new_exp.num == 1 {
+                        (**base).clone()
+                    } else {
+                        AstNode::Pow(base.clone(), Box::new(AstNode::Num(new_exp_val)))
+                    };
                     if new_exp.den == 1 {
-                        return Some(AstNode::Div(
-                            Box::new(AstNode::Pow(
-                                Box::new(AstNode::Var(var.to_string())),
-                                Box::new(AstNode::Num(new_exp_val)),
-                            )),
-                            Box::new(AstNode::Num(new_exp_val)),
-                        ));
+                        let denom = if unit_a {
+                            AstNode::Num(new_exp_val)
+                        } else {
+                            AstNode::Mul(Box::new(AstNode::Num(new_exp_val)), Box::new(lin_a)).simplify()
+                        };
+                        return Some(AstNode::Div(Box::new(pow_node), Box::new(denom)).simplify());
                     }
                     let coeff = ExactRat::from_int(1).div(new_exp)?;
                     let coeff_val = Value { c: Complex::real(coeff.to_f64()), rat: Some(coeff) };
-                    return Some(AstNode::Mul(
-                        Box::new(AstNode::Num(coeff_val)),
-                        Box::new(AstNode::Pow(
-                            Box::new(AstNode::Var(var.to_string())),
-                            Box::new(AstNode::Num(new_exp_val)),
-                        )),
-                    ));
+                    let base_res = AstNode::Mul(Box::new(AstNode::Num(coeff_val)), Box::new(pow_node)).simplify();
+                    return Some(if unit_a {
+                        base_res
+                    } else {
+                        AstNode::Div(Box::new(base_res), Box::new(lin_a)).simplify()
+                    });
                 }
                 if let Some(c_val) = exp.const_value() {
                     if c_val.c.is_real() {
                         if (c_val.c.re + 1.0).abs() < 1e-11 {
-                            return Some(AstNode::Func(
-                                "ln".to_string(),
-                                vec![AstNode::Var(var.to_string())],
-                            ));
+                            let ln_node = AstNode::Func("ln".to_string(), vec![(**base).clone()]);
+                            return Some(if unit_a {
+                                ln_node
+                            } else {
+                                AstNode::Div(Box::new(ln_node), Box::new(lin_a)).simplify()
+                            });
                         }
                         if (c_val.c.re - c_val.c.re.round()).abs() < 1e-11 {
                             let new_p = c_val.c.re.round() as i128 + 1;
-                            return Some(AstNode::Div(
-                                Box::new(AstNode::Pow(
-                                    Box::new(AstNode::Var(var.to_string())),
-                                    Box::new(AstNode::Num(Value::from_int(new_p))),
-                                )),
-                                Box::new(AstNode::Num(Value::from_int(new_p))),
-                            ));
+                            if new_p < 0 {
+                                let pos_k = new_p.abs();
+                                let pow_node = if pos_k == 1 {
+                                    (**base).clone()
+                                } else {
+                                    AstNode::Pow(base.clone(), Box::new(AstNode::Num(Value::from_int(pos_k))))
+                                };
+                                let factor_node = AstNode::Num(Value::from_int(pos_k));
+                                let denom = if pos_k == 1 {
+                                    if unit_a {
+                                        pow_node
+                                    } else {
+                                        AstNode::Mul(Box::new(lin_a), Box::new(pow_node)).simplify()
+                                    }
+                                } else {
+                                    let coeff_node = if unit_a {
+                                        factor_node
+                                    } else {
+                                        AstNode::Mul(Box::new(factor_node), Box::new(lin_a)).simplify()
+                                    };
+                                    AstNode::Mul(Box::new(coeff_node), Box::new(pow_node)).simplify()
+                                };
+                                return Some(
+                                    AstNode::Neg(Box::new(
+                                        AstNode::Div(Box::new(AstNode::Num(Value::from_int(1))), Box::new(denom)).simplify(),
+                                    ))
+                                    .simplify(),
+                                );
+                            }
+                            let pow_node = AstNode::Pow(base.clone(), Box::new(AstNode::Num(Value::from_int(new_p))));
+                            let denom = if unit_a {
+                                AstNode::Num(Value::from_int(new_p))
+                            } else {
+                                AstNode::Mul(Box::new(AstNode::Num(Value::from_int(new_p))), Box::new(lin_a)).simplify()
+                            };
+                            return Some(AstNode::Div(Box::new(pow_node), Box::new(denom)).simplify());
                         }
                         let new_p = c_val.c.re + 1.0;
+                        let denom = if unit_a {
+                            AstNode::Num(Value::from_f64(new_p))
+                        } else {
+                            AstNode::Mul(Box::new(AstNode::Num(Value::from_f64(new_p))), Box::new(lin_a)).simplify()
+                        };
                         return Some(AstNode::Div(
-                            Box::new(AstNode::Pow(
-                                Box::new(AstNode::Var(var.to_string())),
-                                Box::new(AstNode::Num(Value::from_f64(new_p))),
-                            )),
-                            Box::new(AstNode::Num(Value::from_f64(new_p))),
-                        ));
+                            Box::new(AstNode::Pow(base.clone(), Box::new(AstNode::Num(Value::from_f64(new_p))))),
+                            Box::new(denom),
+                        ).simplify());
                     }
                 }
                 None
@@ -2440,6 +3244,10 @@ impl AstNode {
                     return None;
                 }
                 let unit_a = a.is_one();
+                let inv_deg_scale = || AstNode::Div(
+                    Box::new(AstNode::Num(Value::from_int(180))),
+                    Box::new(AstNode::Var("pi".to_string())),
+                );
                 match name.as_str() {
                     "sqrt" => {
                         let three_halves = ExactRat::new(3, 2)?;
@@ -2469,51 +3277,75 @@ impl AstNode {
                     }
                     "exp" => {
                         let base = AstNode::Func("exp".to_string(), vec![u.clone()]);
-                        Some(if unit_a { base } else { AstNode::Div(Box::new(base), Box::new(a)) })
+                        Some(if unit_a { base } else { AstNode::Div(Box::new(base), Box::new(a)).simplify() })
+                    }
+                    "ln" => {
+                        let base = AstNode::Sub(
+                            Box::new(AstNode::Mul(
+                                Box::new(u.clone()),
+                                Box::new(AstNode::Func("ln".to_string(), vec![u.clone()])),
+                            )),
+                            Box::new(u.clone()),
+                        );
+                        Some(if unit_a { base } else { AstNode::Div(Box::new(base), Box::new(a)).simplify() })
                     }
                     "sin" => {
                         let cos_u = AstNode::Func("cos".to_string(), vec![u.clone()]);
-                        if unit_a {
-                            Some(AstNode::Neg(Box::new(cos_u)))
+                        let base = if unit_a {
+                            AstNode::Neg(Box::new(cos_u))
                         } else if let AstNode::Neg(inner_a) = a {
-                            Some(AstNode::Div(Box::new(cos_u), inner_a))
+                            AstNode::Div(Box::new(cos_u), inner_a).simplify()
                         } else if a.is_negative_display() {
-                            Some(AstNode::Div(Box::new(cos_u), Box::new(AstNode::Neg(Box::new(a)).simplify())))
+                            AstNode::Div(Box::new(cos_u), Box::new(AstNode::Neg(Box::new(a)).simplify())).simplify()
                         } else {
-                            Some(AstNode::Neg(Box::new(AstNode::Div(Box::new(cos_u), Box::new(a)))))
-                        }
+                            AstNode::Neg(Box::new(AstNode::Div(Box::new(cos_u), Box::new(a)).simplify()))
+                        };
+                        Some(if mode == AngleMode::Degrees {
+                            AstNode::Mul(Box::new(inv_deg_scale()), Box::new(base)).simplify()
+                        } else {
+                            base
+                        })
                     }
                     "cos" => {
                         let sin_u = AstNode::Func("sin".to_string(), vec![u.clone()]);
-                        Some(if unit_a { sin_u } else { AstNode::Div(Box::new(sin_u), Box::new(a)) })
+                        let base = if unit_a {
+                            sin_u
+                        } else {
+                            AstNode::Div(Box::new(sin_u), Box::new(a)).simplify()
+                        };
+                        Some(if mode == AngleMode::Degrees {
+                            AstNode::Mul(Box::new(inv_deg_scale()), Box::new(base)).simplify()
+                        } else {
+                            base
+                        })
                     }
                     "sinh" => {
                         let cosh_u = AstNode::Func("cosh".to_string(), vec![u.clone()]);
-                        Some(if unit_a { cosh_u } else { AstNode::Div(Box::new(cosh_u), Box::new(a)) })
+                        Some(if unit_a { cosh_u } else { AstNode::Div(Box::new(cosh_u), Box::new(a)).simplify() })
                     }
                     "cosh" => {
                         let sinh_u = AstNode::Func("sinh".to_string(), vec![u.clone()]);
-                        Some(if unit_a { sinh_u } else { AstNode::Div(Box::new(sinh_u), Box::new(a)) })
+                        Some(if unit_a { sinh_u } else { AstNode::Div(Box::new(sinh_u), Box::new(a)).simplify() })
                     }
                     _ => None,
                 }
             }
             AstNode::Add(a, b) => {
-                let ia = a.integrate(var)?;
-                let ib = b.integrate(var)?;
+                let ia = a.integrate_with_mode(var, mode)?;
+                let ib = b.integrate_with_mode(var, mode)?;
                 Some(AstNode::Add(Box::new(ia), Box::new(ib)))
             }
             AstNode::Sub(a, b) => {
-                let ia = a.integrate(var)?;
-                let ib = b.integrate(var)?;
+                let ia = a.integrate_with_mode(var, mode)?;
+                let ib = b.integrate_with_mode(var, mode)?;
                 Some(AstNode::Sub(Box::new(ia), Box::new(ib)))
             }
             AstNode::Mul(a, b) => {
                 if !a.contains_var(var) {
-                    let ib = b.integrate(var)?;
+                    let ib = b.integrate_with_mode(var, mode)?;
                     Some(AstNode::Mul(a.clone(), Box::new(ib)).simplify())
                 } else if !b.contains_var(var) {
-                    let ia = a.integrate(var)?;
+                    let ia = a.integrate_with_mode(var, mode)?;
                     Some(AstNode::Mul(Box::new(ia), b.clone()).simplify())
                 } else {
                     None
@@ -2580,9 +3412,97 @@ impl AstNode {
                 } else if sb.is_minus_one() {
                     AstNode::Neg(Box::new(sa)).simplify()
                 } else if let AstNode::Neg(inner_b) = sb {
-                    AstNode::Neg(Box::new(AstNode::Mul(Box::new(sa), inner_b).simplify()))
+                    AstNode::Neg(Box::new(AstNode::Mul(Box::new(sa), inner_b).simplify())).simplify()
                 } else if let AstNode::Neg(inner_a) = sa {
-                    AstNode::Neg(Box::new(AstNode::Mul(inner_a, Box::new(sb)).simplify()))
+                    AstNode::Neg(Box::new(AstNode::Mul(inner_a, Box::new(sb)).simplify())).simplify()
+                } else if let (AstNode::Num(lv), AstNode::Num(rv)) = (&sa, &sb) {
+                    if let (Some(lr), Some(rr)) = (lv.rat, rv.rat) {
+                        if let Some(prod) = lr.mul(rr) {
+                            return AstNode::Num(Value { c: Complex::real(prod.to_f64()), rat: Some(prod) });
+                        }
+                    }
+                    AstNode::Mul(Box::new(sa), Box::new(sb))
+                } else if let (AstNode::Num(lv), AstNode::Mul(rl, rr)) = (&sa, &sb) {
+                    if let (Some(lr), AstNode::Num(rlv)) = (lv.rat, rl.as_ref()) {
+                        if let Some(rlr) = rlv.rat {
+                            if let Some(comb) = lr.mul(rlr) {
+                                return AstNode::Mul(
+                                    Box::new(AstNode::Num(Value { c: Complex::real(comb.to_f64()), rat: Some(comb) })),
+                                    rr.clone(),
+                                )
+                                .simplify();
+                            }
+                        }
+                    }
+                    AstNode::Mul(Box::new(sa), Box::new(sb))
+                } else if let (AstNode::Num(lv), AstNode::Div(dnum, dden)) = (&sa, &sb) {
+                    if dnum.is_one() {
+                        return AstNode::Div(Box::new(AstNode::Num(*lv)), dden.clone()).simplify();
+                    }
+                    if let (Some(lr), AstNode::Num(drv)) = (lv.rat, dden.as_ref()) {
+                        if let Some(drr) = drv.rat {
+                            if drr.num != 0 {
+                                if let Some(factor) = lr.div(drr) {
+                                    if factor.den == 1 {
+                                        return AstNode::Mul(
+                                            Box::new(AstNode::Num(Value { c: Complex::real(factor.to_f64()), rat: Some(factor) })),
+                                            dnum.clone(),
+                                        )
+                                        .simplify();
+                                    }
+                                    let num_node = if factor.num == 1 {
+                                        (**dnum).clone()
+                                    } else {
+                                        AstNode::Mul(
+                                            Box::new(AstNode::Num(Value::from_int(factor.num))),
+                                            dnum.clone(),
+                                        )
+                                        .simplify()
+                                    };
+                                    return AstNode::Div(
+                                        Box::new(num_node),
+                                        Box::new(AstNode::Num(Value::from_int(factor.den))),
+                                    )
+                                    .simplify();
+                                }
+                            }
+                        }
+                    }
+                    AstNode::Mul(Box::new(sa), Box::new(sb))
+                } else if let (AstNode::Div(dnum, dden), AstNode::Num(rv)) = (&sa, &sb) {
+                    if dnum.is_one() {
+                        return AstNode::Div(Box::new(AstNode::Num(*rv)), dden.clone()).simplify();
+                    }
+                    if let (Some(rr), AstNode::Num(drv)) = (rv.rat, dden.as_ref()) {
+                        if let Some(drr) = drv.rat {
+                            if drr.num != 0 {
+                                if let Some(factor) = rr.div(drr) {
+                                    if factor.den == 1 {
+                                        return AstNode::Mul(
+                                            Box::new(AstNode::Num(Value { c: Complex::real(factor.to_f64()), rat: Some(factor) })),
+                                            dnum.clone(),
+                                        )
+                                        .simplify();
+                                    }
+                                    let num_node = if factor.num == 1 {
+                                        (**dnum).clone()
+                                    } else {
+                                        AstNode::Mul(
+                                            Box::new(AstNode::Num(Value::from_int(factor.num))),
+                                            dnum.clone(),
+                                        )
+                                        .simplify()
+                                    };
+                                    return AstNode::Div(
+                                        Box::new(num_node),
+                                        Box::new(AstNode::Num(Value::from_int(factor.den))),
+                                    )
+                                    .simplify();
+                                }
+                            }
+                        }
+                    }
+                    AstNode::Mul(Box::new(sa), Box::new(sb))
                 } else {
                     AstNode::Mul(Box::new(sa), Box::new(sb))
                 }
@@ -2590,12 +3510,46 @@ impl AstNode {
             AstNode::Div(a, b) => {
                 let sa = a.simplify();
                 let sb = b.simplify();
+                let num_is_neg = |n: &AstNode| -> bool {
+                    matches!(n, AstNode::Num(v) if v.rat.map_or(v.c.re < 0.0, |r| r.num < 0))
+                };
                 if sa.is_zero() {
                     AstNode::Num(Value::from_int(0))
                 } else if sb.is_one() {
                     sa
+                } else if sb.is_minus_one() {
+                    AstNode::Neg(Box::new(sa)).simplify()
+                } else if let AstNode::Neg(inner_b) = sb {
+                    AstNode::Neg(Box::new(AstNode::Div(Box::new(sa), inner_b).simplify())).simplify()
+                } else if num_is_neg(&sb) {
+                    AstNode::Neg(Box::new(AstNode::Div(Box::new(sa), Box::new(AstNode::Neg(Box::new(sb)).simplify())).simplify())).simplify()
+                } else if let AstNode::Neg(inner_a) = sa {
+                    AstNode::Neg(Box::new(AstNode::Div(inner_a, Box::new(sb)).simplify())).simplify()
+                } else if num_is_neg(&sa) {
+                    AstNode::Neg(Box::new(AstNode::Div(Box::new(AstNode::Neg(Box::new(sa)).simplify()), Box::new(sb)).simplify())).simplify()
                 } else if sa == sb {
                     AstNode::Num(Value::from_int(1))
+                } else if let (AstNode::Num(lv), AstNode::Num(rv)) = (&sa, &sb) {
+                    if let (Some(lr), Some(rr)) = (lv.rat, rv.rat) {
+                        if rr.num != 0 {
+                            if let Some(q) = lr.div(rr) {
+                                return AstNode::Num(Value { c: Complex::real(q.to_f64()), rat: Some(q) });
+                            }
+                        }
+                    }
+                    AstNode::Div(Box::new(sa), Box::new(sb))
+                } else if let AstNode::Div(inner_a, inner_b) = sa {
+                    AstNode::Div(
+                        inner_a,
+                        Box::new(AstNode::Mul(inner_b, Box::new(sb)).simplify()),
+                    )
+                    .simplify()
+                } else if let AstNode::Div(inner_a, inner_b) = sb {
+                    AstNode::Div(
+                        Box::new(AstNode::Mul(Box::new(sa), inner_b).simplify()),
+                        inner_a,
+                    )
+                    .simplify()
                 } else {
                     AstNode::Div(Box::new(sa), Box::new(sb))
                 }
@@ -2828,11 +3782,14 @@ fn add_poly(l: &BTreeMap<PolyMonomial, ExactRat>, r: &BTreeMap<PolyMonomial, Exa
 }
 
 fn mul_poly(l: &BTreeMap<PolyMonomial, ExactRat>, r: &BTreeMap<PolyMonomial, ExactRat>) -> Option<BTreeMap<PolyMonomial, ExactRat>> {
-    if l.len().saturating_mul(r.len()) > 128 {
+    if l.len().saturating_mul(r.len()) > 2048 {
         return None;
     }
     let mut res: BTreeMap<PolyMonomial, ExactRat> = BTreeMap::new();
     for (ml, &cl) in l {
+        if check_eval_deadline().is_err() {
+            return None;
+        }
         for (mr, &cr) in r {
             let m = ml.mul(mr);
             let prod = cl.mul(cr)?;
@@ -2850,10 +3807,22 @@ fn mul_poly(l: &BTreeMap<PolyMonomial, ExactRat>, r: &BTreeMap<PolyMonomial, Exa
     Some(res)
 }
 
+fn try_poly_rat_ast(node: &AstNode) -> Option<ExactRat> {
+    match node {
+        AstNode::Num(v) => v.rat.or_else(|| decimal_to_exact_rat(v.c.re)),
+        AstNode::Neg(inner) => try_poly_rat_ast(inner).and_then(|r| ExactRat::new(-r.num, r.den)),
+        AstNode::Add(a, b) => try_poly_rat_ast(a)?.add(try_poly_rat_ast(b)?),
+        AstNode::Sub(a, b) => try_poly_rat_ast(a)?.sub(try_poly_rat_ast(b)?),
+        AstNode::Mul(a, b) => try_poly_rat_ast(a)?.mul(try_poly_rat_ast(b)?),
+        AstNode::Div(a, b) => try_poly_rat_ast(a)?.div(try_poly_rat_ast(b)?),
+        _ => None,
+    }
+}
+
 fn ast_to_poly(node: &AstNode) -> Option<BTreeMap<PolyMonomial, ExactRat>> {
     match node {
         AstNode::Num(v) => {
-            let r = v.rat?;
+            let r = v.rat.or_else(|| decimal_to_exact_rat(v.c.re))?;
             let mut m = BTreeMap::new();
             if r.num != 0 {
                 m.insert(PolyMonomial::empty(), r);
@@ -2883,7 +3852,7 @@ fn ast_to_poly(node: &AstNode) -> Option<BTreeMap<PolyMonomial, ExactRat>> {
         AstNode::Mul(l, r) => mul_poly(&ast_to_poly(l)?, &ast_to_poly(r)?),
         AstNode::Div(l, r) => {
             let pl = ast_to_poly(l)?;
-            let sr = try_exact_rat_ast(r)?;
+            let sr = try_poly_rat_ast(r)?;
             if sr.num == 0 {
                 return None;
             }
@@ -2897,14 +3866,17 @@ fn ast_to_poly(node: &AstNode) -> Option<BTreeMap<PolyMonomial, ExactRat>> {
             Some(res)
         }
         AstNode::Pow(base, exp) => {
-            let er = try_exact_rat_ast(exp)?;
-            if er.den != 1 || er.num < 0 || er.num > 8 {
+            let er = try_poly_rat_ast(exp)?;
+            if er.den != 1 || er.num < 0 || er.num > 32 {
                 return None;
             }
             let base_poly = ast_to_poly(base)?;
             let mut res = BTreeMap::new();
             res.insert(PolyMonomial::empty(), ExactRat::from_int(1));
             for _ in 0..er.num {
+                if check_eval_deadline().is_err() {
+                    return None;
+                }
                 res = mul_poly(&res, &base_poly)?;
             }
             Some(res)
@@ -2982,8 +3954,45 @@ fn contains_add_or_sub(node: &AstNode) -> bool {
     }
 }
 
+fn count_var_occurrences(node: &AstNode) -> usize {
+    match node {
+        AstNode::Var(name) => usize::from(name != "i"),
+        AstNode::Neg(inner) => count_var_occurrences(inner),
+        AstNode::Add(l, r)
+        | AstNode::Sub(l, r)
+        | AstNode::Mul(l, r)
+        | AstNode::Div(l, r)
+        | AstNode::Pow(l, r) => count_var_occurrences(l) + count_var_occurrences(r),
+        AstNode::Func(_, args) => args.iter().map(count_var_occurrences).sum(),
+        AstNode::Num(_) => 0,
+    }
+}
+
+fn has_compound_power_base(node: &AstNode) -> bool {
+    match node {
+        AstNode::Pow(base, exp) => {
+            let compound = matches!(
+                base.as_ref(),
+                AstNode::Mul(_, _) | AstNode::Div(_, _) | AstNode::Pow(_, _)
+            );
+            (compound && count_var_occurrences(base) > 0)
+                || has_compound_power_base(base)
+                || has_compound_power_base(exp)
+        }
+        AstNode::Mul(l, r) | AstNode::Div(l, r) => {
+            has_compound_power_base(l) || has_compound_power_base(r)
+        }
+        AstNode::Neg(inner) => has_compound_power_base(inner),
+        _ => false,
+    }
+}
+
+fn can_simplify_as_polynomial(node: &AstNode) -> bool {
+    contains_add_or_sub(node) || count_var_occurrences(node) >= 2 || has_compound_power_base(node)
+}
+
 pub fn simplify_polynomial_ast(node: &AstNode) -> Option<AstNode> {
-    if contains_add_or_sub(node) {
+    if can_simplify_as_polynomial(node) {
         if let Some(poly) = ast_to_poly(node) {
             let expanded = poly_to_ast(&poly);
             if poly.len() > 1 || &expanded != node {
@@ -3065,10 +4074,12 @@ pub fn simplify_polynomial_ast(node: &AstNode) -> Option<AstNode> {
 pub struct AstParser {
     chars: Vec<char>,
     pos: usize,
+    depth: usize,
 }
 
 impl AstParser {
     pub fn parse(input: &str) -> Result<AstNode, String> {
+        check_bracket_depth(input)?;
         let normalized = input
             .replace('×', "*")
             .replace('·', "*")
@@ -3080,6 +4091,7 @@ impl AstParser {
         let mut p = AstParser {
             chars: normalized.chars().collect(),
             pos: 0,
+            depth: 0,
         };
         p.skip_ws();
         let node = p.parse_expr()?;
@@ -3088,6 +4100,15 @@ impl AstParser {
             return Err(format!("Unerwartetes Zeichen '{}'", p.chars[p.pos]));
         }
         Ok(node)
+    }
+
+    fn enter_depth(&mut self) -> Result<(), String> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING_DEPTH {
+            self.depth -= 1;
+            return Err("Maximale Verschachtelungstiefe überschritten".to_string());
+        }
+        Ok(())
     }
 
     fn skip_ws(&mut self) {
@@ -3155,13 +4176,20 @@ impl AstParser {
     fn parse_unary(&mut self) -> Result<AstNode, String> {
         self.skip_ws();
         if self.eat('+') {
-            self.parse_unary()
+            self.enter_depth()?;
+            let res = self.parse_unary();
+            self.depth -= 1;
+            res
         } else if self.eat('-') {
-            let u = self.parse_unary()?;
-            Ok(AstNode::Neg(Box::new(u)))
+            self.enter_depth()?;
+            let res = self.parse_unary();
+            self.depth -= 1;
+            Ok(AstNode::Neg(Box::new(res?)))
         } else if self.eat('√') {
-            let u = self.parse_unary()?;
-            Ok(AstNode::Func("sqrt".to_string(), vec![u]))
+            self.enter_depth()?;
+            let res = self.parse_unary();
+            self.depth -= 1;
+            Ok(AstNode::Func("sqrt".to_string(), vec![res?]))
         } else {
             self.parse_power()
         }
@@ -3203,7 +4231,10 @@ impl AstParser {
         };
 
         if self.eat('(') {
-            let inner = self.parse_expr()?;
+            self.enter_depth()?;
+            let inner = self.parse_expr();
+            self.depth -= 1;
+            let inner = inner?;
             if !self.eat(')') {
                 return Err("Fehlende schließende Klammer ')'".to_string());
             }
@@ -3211,21 +4242,29 @@ impl AstParser {
         }
 
         if self.eat('[') {
+            self.enter_depth()?;
             let mut entries = Vec::new();
             self.skip_ws();
             if !self.eat(']') {
                 loop {
-                    entries.push(self.parse_expr()?);
+                    let item = self.parse_expr();
+                    if let Err(e) = item {
+                        self.depth -= 1;
+                        return Err(e);
+                    }
+                    entries.push(item.unwrap());
                     self.skip_ws();
                     if self.eat(',') {
                         continue;
                     } else if self.eat(']') {
                         break;
                     } else {
+                        self.depth -= 1;
                         return Err("Erwarte ',' oder ']' in Matrix".to_string());
                     }
                 }
             }
+            self.depth -= 1;
             return Ok(AstNode::Func("[]".to_string(), entries));
         }
 
@@ -3309,22 +4348,29 @@ impl AstParser {
 
             self.skip_ws();
             if self.eat('(') {
+                self.enter_depth()?;
                 let mut args = Vec::new();
                 self.skip_ws();
                 if !self.eat(')') {
                     loop {
-                        let arg = self.parse_expr()?;
-                        args.push(arg);
+                        let arg = self.parse_expr();
+                        if let Err(e) = arg {
+                            self.depth -= 1;
+                            return Err(e);
+                        }
+                        args.push(arg.unwrap());
                         self.skip_ws();
                         if self.eat(',') {
                             continue;
                         } else if self.eat(')') {
                             break;
                         } else {
+                            self.depth -= 1;
                             return Err("Erwarte ',' oder ')' in Funktionsaufruf".to_string());
                         }
                     }
                 }
+                self.depth -= 1;
                 return Ok(AstNode::Func(ident, args));
             } else {
                 return Ok(AstNode::Var(ident));
@@ -3338,6 +4384,7 @@ impl AstParser {
 struct ExprParser<'a> {
     chars: Vec<char>,
     pos: usize,
+    depth: usize,
     engine: &'a MathEngine,
     overrides: Option<&'a HashMap<String, Value>>,
 }
@@ -3359,9 +4406,19 @@ impl<'a> ExprParser<'a> {
         Self {
             chars: normalized.chars().collect(),
             pos: 0,
+            depth: 0,
             engine,
             overrides,
         }
+    }
+
+    fn enter_depth(&mut self) -> Result<(), String> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING_DEPTH {
+            self.depth -= 1;
+            return Err("Maximale Verschachtelungstiefe überschritten".to_string());
+        }
+        Ok(())
     }
 
     fn skip_ws(&mut self) {
@@ -3447,11 +4504,17 @@ impl<'a> ExprParser<'a> {
         match self.peek() {
             Some('+') => {
                 self.pos += 1;
-                self.parse_unary()
+                self.enter_depth()?;
+                let res = self.parse_unary();
+                self.depth -= 1;
+                res
             }
             Some('-') => {
                 self.pos += 1;
-                let v = self.parse_unary()?;
+                self.enter_depth()?;
+                let res = self.parse_unary();
+                self.depth -= 1;
+                let v = res?;
                 Ok(Value {
                     c: Complex::new(-v.c.re, -v.c.im),
                     rat: v.rat.map(|r| ExactRat { num: -r.num, den: r.den }),
@@ -3459,8 +4522,10 @@ impl<'a> ExprParser<'a> {
             }
             Some('√') => {
                 self.pos += 1;
-                let v = self.parse_unary()?;
-                Ok(v.sqrt())
+                self.enter_depth()?;
+                let res = self.parse_unary();
+                self.depth -= 1;
+                Ok(res?.sqrt())
             }
             _ => self.parse_power(),
         }
@@ -3513,7 +4578,10 @@ impl<'a> ExprParser<'a> {
 
         if ch == '(' {
             self.pos += 1;
-            let v = self.parse_expr()?;
+            self.enter_depth()?;
+            let res = self.parse_expr();
+            self.depth -= 1;
+            let v = res?;
             if self.peek() == Some(')') {
                 self.pos += 1;
             }
@@ -3639,6 +4707,18 @@ impl<'a> ExprParser<'a> {
     }
 
     fn eval_arg(&self, s: &str, local_ov: Option<&HashMap<String, Value>>) -> Result<Value, String> {
+        let prev = EVAL_DEPTH.with(|d| d.get());
+        if prev >= MAX_NESTING_DEPTH {
+            return Err("Maximale Verschachtelungstiefe überschritten".to_string());
+        }
+        EVAL_DEPTH.with(|d| d.set(prev + 1));
+        struct EvalDepthGuard(usize);
+        impl Drop for EvalDepthGuard {
+            fn drop(&mut self) {
+                EVAL_DEPTH.with(|d| d.set(self.0));
+            }
+        }
+        let _guard = EvalDepthGuard(prev);
         let mut p = ExprParser::new(s, self.engine, local_ov.or(self.overrides));
         p.parse_expr()
     }
@@ -3661,7 +4741,12 @@ impl<'a> ExprParser<'a> {
                 }
                 let mut acc = Value::from_int(0);
                 let mut ov = self.overrides.cloned().unwrap_or_default();
+                let mut iter = 0usize;
                 for k in a..=b {
+                    if (iter & 63) == 0 {
+                        check_eval_deadline()?;
+                    }
+                    iter += 1;
                     ov.insert(var.to_string(), Value::from_int(k as i128));
                     acc = acc.add(self.eval_arg(&raw_args[0], Some(&ov))?);
                 }
@@ -3679,7 +4764,12 @@ impl<'a> ExprParser<'a> {
                 }
                 let mut acc = Value::from_int(1);
                 let mut ov = self.overrides.cloned().unwrap_or_default();
+                let mut iter = 0usize;
                 for k in a..=b {
+                    if (iter & 63) == 0 {
+                        check_eval_deadline()?;
+                    }
+                    iter += 1;
                     ov.insert(var.to_string(), Value::from_int(k as i128));
                     acc = acc.mul(self.eval_arg(&raw_args[0], Some(&ov))?);
                 }
@@ -3717,11 +4807,10 @@ impl<'a> ExprParser<'a> {
                 }
                 let _guard = IntegrationDepthGuard(prev_depth);
                 let has_inner_int = expr_str.contains("int(") || expr_str.contains("defint(");
-                let has_trig = expr_str.contains("sin") || expr_str.contains("cos") || expr_str.contains("tan");
-                let initial_subintervals = if prev_depth > 0 || has_inner_int || !has_trig {
+                let initial_subintervals = if prev_depth > 0 || has_inner_int {
                     16
                 } else {
-                    500
+                    2500
                 };
 
                 let report = adaptive_gauss_integrate(
@@ -3761,10 +4850,13 @@ impl<'a> ExprParser<'a> {
                     return Err("Ableitungsstelle muss eine endliche reelle Zahl sein".to_string());
                 }
                 let x0 = x0_val.c.re;
-                let h = if x0.abs() > 1e10 {
-                    1e-3 * x0.abs()
-                } else if x0.abs() > 1e4 {
+                let ax = x0.abs();
+                let h = if ax > 1e10 {
+                    1e-3 * ax
+                } else if ax > 1e4 {
                     1e-3
+                } else if ax > 0.0 && ax < 1.0 {
+                    (1e-3 * ax).max(1e-15).min(1e-4)
                 } else {
                     1e-4
                 };
@@ -3973,6 +5065,9 @@ impl<'a> ExprParser<'a> {
                 if let Some(r) = v0.rat {
                     return Ok(Value::from_int(r.num.div_euclid(r.den)));
                 }
+                if v0.c.re.abs() >= 9.0e15 {
+                    return Ok(Value::from_f64(v0.c.re.floor()));
+                }
                 Ok(Value::from_int(v0.c.re.floor() as i128))
             }
             "ceil" => {
@@ -3984,11 +5079,27 @@ impl<'a> ExprParser<'a> {
                     let rem = r.num.rem_euclid(r.den);
                     return Ok(Value::from_int(if rem > 0 { q + 1 } else { q }));
                 }
+                if v0.c.re.abs() >= 9.0e15 {
+                    return Ok(Value::from_f64(v0.c.re.ceil()));
+                }
                 Ok(Value::from_int(v0.c.re.ceil() as i128))
             }
             "round" => {
                 if !v0.c.is_real() || !v0.c.re.is_finite() {
                     return Err("round erfordert endliche reelle Zahl".to_string());
+                }
+                if let Some(r) = v0.rat {
+                    let q = r.num / r.den;
+                    let rem = (r.num % r.den).abs();
+                    let rounded = if rem.saturating_mul(2) >= r.den {
+                        if r.num >= 0 { q + 1 } else { q - 1 }
+                    } else {
+                        q
+                    };
+                    return Ok(Value::from_int(rounded));
+                }
+                if v0.c.re.abs() >= 9.0e15 {
+                    return Ok(Value::from_f64(v0.c.re.round()));
                 }
                 Ok(Value::from_int(v0.c.re.round() as i128))
             }

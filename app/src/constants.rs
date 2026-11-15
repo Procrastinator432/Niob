@@ -3,9 +3,9 @@
 //! `VariableMoreActivity.<init>()V`, and `res/layout/*.xml`).
 
 // --- Exact Mechanics Sheet Constants (`app/mechanics.json`) ---
-pub const SPEED_OF_LIGHT: f64 = 299790000.0;
-pub const PERMEABILITY_VACUUM: f64 = 0.0000012566;
-pub const PERMITTIVITY_VACUUM: f64 = 8.8542e-12;
+pub const SPEED_OF_LIGHT: f64 = 299792458.0;
+pub const PERMEABILITY_VACUUM: f64 = 1.25663706212e-6;
+pub const PERMITTIVITY_VACUUM: f64 = 8.8541878128e-12;
 pub const GRAVITATION_CONST: f64 = 6.6738e-11;
 pub const PLANCK_CONSTANT: f64 = 6.6261e-34;
 pub const FINE_STRUCTURE_CONST: f64 = 0.0072974;
