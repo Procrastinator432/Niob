@@ -57,6 +57,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Android 12 (API 31+) Material You (Monet Dynamic Color) Scientific Calculator.
@@ -66,6 +67,9 @@ public class MainActivity extends Activity {
 
     private final CalculatorEngine engine = new CalculatorEngine();
     private static final ExecutorService RESULT_WRITER = Executors.newSingleThreadExecutor();
+    private final ExecutorService previewExecutor = Executors.newSingleThreadExecutor();
+    private final AtomicLong previewGeneration = new AtomicLong(0);
+    private Future<?> pendingPreview;
     private boolean resultWritePending;
     private long draftRevision;
     private final Handler draftHandler = new Handler(Looper.getMainLooper());
@@ -215,6 +219,13 @@ public class MainActivity extends Activity {
         rootContainer = new LinearLayout(this);
         rootContainer.setOrientation(LinearLayout.VERTICAL);
         rootContainer.setBackgroundColor(colBgSurface);
+        rootContainer.setOnApplyWindowInsetsListener((view, windowInsets) -> {
+            android.graphics.Insets insets = windowInsets.getInsets(
+                    android.view.WindowInsets.Type.systemBars()
+                            | android.view.WindowInsets.Type.displayCutout());
+            view.setPadding(insets.left, insets.top, insets.right, insets.bottom);
+            return windowInsets;
+        });
         setContentView(rootContainer);
 
         rebuildScreen();
@@ -349,6 +360,17 @@ public class MainActivity extends Activity {
     protected void onPause() {
         super.onPause();
         saveDraft();
+    }
+
+    @Override
+    protected void onDestroy() {
+        previewGeneration.incrementAndGet();
+        if (pendingPreview != null) {
+            pendingPreview.cancel(true);
+            pendingPreview = null;
+        }
+        previewExecutor.shutdownNow();
+        super.onDestroy();
     }
 
     @Override
@@ -1337,15 +1359,28 @@ private static class FilledBackspaceDrawable extends Drawable {
 
     private void updatePreviewOnly() {
         if (previewDisplayView == null || resultWritePending) return;
-        previewDisplayView.setVisibility(View.VISIBLE);
-        previewMatrix.removeAllViews();
-        previewMatrix.setVisibility(View.GONE);
         if (formula.hasMissingField()) {
+            previewGeneration.incrementAndGet();
+            if (pendingPreview != null) {
+                pendingPreview.cancel(true);
+                pendingPreview = null;
+            }
+            previewDisplayView.setVisibility(View.VISIBLE);
+            previewMatrix.removeAllViews();
+            previewMatrix.setVisibility(View.GONE);
             previewDisplayView.setText("");
             return;
         }
-        String cur = formula.expression().trim();
+        final String cur = formula.expression().trim();
         if (cur.isEmpty()) {
+            previewGeneration.incrementAndGet();
+            if (pendingPreview != null) {
+                pendingPreview.cancel(true);
+                pendingPreview = null;
+            }
+            previewDisplayView.setVisibility(View.VISIBLE);
+            previewMatrix.removeAllViews();
+            previewMatrix.setVisibility(View.GONE);
             String ansStr = engine.formatAns(false);
             if (ansStr != null && !ansStr.isEmpty() && !ansStr.equals("0")) {
                 previewDisplayView.setText("ANS = " + formatDisplayNumber(ansStr));
@@ -1356,44 +1391,70 @@ private static class FilledBackspaceDrawable extends Drawable {
             return;
         }
 
-        try {
-            CalculatorEngine.Result result = engine.evaluateWithTimeout(cur, 350);
-            View matrix = formula.matrixResult(result.decimalText, 13f, null);
-            if (matrix != null) {
-                previewDisplayView.setVisibility(View.GONE);
-                previewMatrix.setVisibility(View.VISIBLE);
-                FrameLayout.LayoutParams matrixParams = new FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.END);
-                previewMatrix.addView(matrix, matrixParams);
-                return;
-            }
-            String dec = formatDisplayNumber(result.decimalText);
-            if (result.exactText != null && !result.exactText.isEmpty() && !result.exactText.equals(result.decimalText)) {
-                previewDisplayView.setText("= " + dec + "  (" + result.exactText + ")");
-            } else {
-                previewDisplayView.setText("= " + dec);
-            }
-            previewDisplayView.setTextColor(colPrimary);
-        } catch (Exception e) {
-            String msg = e.getMessage() != null ? e.getMessage() : "";
-            if (msg.contains("Division durch Null") || msg.contains("Division by zero")) {
-                previewDisplayView.setText("⚠ Division durch Null");
-                previewDisplayView.setTextColor(0xFFFFB4AB);
-            } else if (msg.contains("Zeitlimit") || msg.contains("Zeitüberschreitung") || msg.contains("Time limit")) {
-                previewDisplayView.setText("…");
-                previewDisplayView.setTextColor(colOnSurfaceVariant);
-            } else {
-                boolean isIncomplete = cur.endsWith("+") || cur.endsWith("-") || cur.endsWith("*")
-                        || cur.endsWith("/") || cur.endsWith("÷") || cur.endsWith("×") || cur.endsWith("−")
-                        || cur.endsWith("^") || cur.endsWith("(") || cur.endsWith(",") || cur.endsWith(":=");
-                if (isIncomplete) {
-                    previewDisplayView.setText("");
-                } else {
-                    previewDisplayView.setText("⚠ Ungültiger Ausdruck");
-                    previewDisplayView.setTextColor(colOnSurfaceVariant);
-                }
-            }
+        final long gen = previewGeneration.incrementAndGet();
+        if (pendingPreview != null) {
+            pendingPreview.cancel(true);
         }
+        final CalculatorEngine snapshot = new CalculatorEngine(engine);
+        pendingPreview = previewExecutor.submit(() -> {
+            try {
+                final CalculatorEngine.Result result = snapshot.evaluateWithTimeout(cur, 350);
+                runOnUiThread(() -> {
+                    if (gen != previewGeneration.get() || previewDisplayView == null
+                            || resultWritePending || isFinishing() || isDestroyed()) {
+                        return;
+                    }
+                    previewDisplayView.setVisibility(View.VISIBLE);
+                    previewMatrix.removeAllViews();
+                    previewMatrix.setVisibility(View.GONE);
+                    View matrix = formula.matrixResult(result.decimalText, 13f, null);
+                    if (matrix != null) {
+                        previewDisplayView.setVisibility(View.GONE);
+                        previewMatrix.setVisibility(View.VISIBLE);
+                        FrameLayout.LayoutParams matrixParams = new FrameLayout.LayoutParams(
+                                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.END);
+                        previewMatrix.addView(matrix, matrixParams);
+                        return;
+                    }
+                    String dec = formatDisplayNumber(result.decimalText);
+                    if (result.exactText != null && !result.exactText.isEmpty() && !result.exactText.equals(result.decimalText)) {
+                        previewDisplayView.setText("= " + dec + "  (" + result.exactText + ")");
+                    } else {
+                        previewDisplayView.setText("= " + dec);
+                    }
+                    previewDisplayView.setTextColor(colPrimary);
+                });
+            } catch (CancellationException ignored) {
+            } catch (Exception e) {
+                final String msg = e.getMessage() != null ? e.getMessage() : "";
+                runOnUiThread(() -> {
+                    if (gen != previewGeneration.get() || previewDisplayView == null
+                            || resultWritePending || isFinishing() || isDestroyed()) {
+                        return;
+                    }
+                    previewDisplayView.setVisibility(View.VISIBLE);
+                    previewMatrix.removeAllViews();
+                    previewMatrix.setVisibility(View.GONE);
+                    if (msg.contains("Division durch Null") || msg.contains("Division by zero")) {
+                        previewDisplayView.setText("⚠ Division durch Null");
+                        previewDisplayView.setTextColor(0xFFFFB4AB);
+                    } else if (msg.contains("Zeitlimit") || msg.contains("Zeitüberschreitung") || msg.contains("Time limit")) {
+                        previewDisplayView.setText("…");
+                        previewDisplayView.setTextColor(colOnSurfaceVariant);
+                    } else {
+                        boolean isIncomplete = cur.endsWith("+") || cur.endsWith("-") || cur.endsWith("*")
+                                || cur.endsWith("/") || cur.endsWith("÷") || cur.endsWith("×") || cur.endsWith("−")
+                                || cur.endsWith("^") || cur.endsWith("(") || cur.endsWith(",") || cur.endsWith(":=");
+                        if (isIncomplete) {
+                            previewDisplayView.setText("");
+                        } else {
+                            previewDisplayView.setText("⚠ Ungültiger Ausdruck");
+                            previewDisplayView.setTextColor(colOnSurfaceVariant);
+                        }
+                    }
+                });
+            }
+        });
     }
 
     private static final class KeyDef {

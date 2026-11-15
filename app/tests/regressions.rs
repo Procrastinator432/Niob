@@ -250,7 +250,29 @@ cases!(
     codata_c0_mu0_eps0,
     deriv_sqrt_tiny,
     deriv_sqrt_small,
-    matrix_power_10
+    matrix_power_10,
+    codata_na_kb_r,
+    codata_sigma,
+    codata_amu,
+    deriv_tiny_sin,
+    deriv_tiny_exp,
+    deriv_pow3_cancel,
+    deriv_sqrt_1e_neg8,
+    deriv_ln_1e6,
+    matrix_overflow_err,
+    matrix_det_sq,
+    matrix_illcond_inv_det,
+    integral_narrow_peak_far,
+    integral_osc_40000pi,
+    integral_nested_gaussian,
+    bigint_pow_mod,
+    oversized_int_2_200,
+    symbolic_int_recip_sqrt,
+    symbolic_int_tan,
+    symbolic_int_sin_sq,
+    symbolic_int_x_exp_x,
+    poly_const_fold_2y3,
+    poly_cancel_y_div_y
 );
 
 #[test]
@@ -749,4 +771,151 @@ fn deep_nesting_returns_error_without_overflow() {
         engine.evaluate_preview(&sins, false).is_err(),
         "300 nested sin() calls must return error cleanly"
     );
+}
+
+#[test]
+fn self_checking_derivative_sweep_matches_symbolic() {
+    let mut engine = new_engine();
+    let specs: &[(&str, &[f64], f64)] = &[
+        ("sin(x)", &[1e-9, 1e-6, 1e-4, 0.5, 2.5, 100.0, 1e4, 1e6], 1e-5),
+        ("cos(x)", &[1e-9, 1e-6, 1e-4, 0.5, 2.5, 100.0, 1e4, 1e6], 1e-5),
+        ("exp(x)", &[1e-9, 1e-5, 0.5, 2.5, 5.0], 1e-6),
+        ("ln(x)", &[1e-4, 0.5, 2.5, 100.0, 1e4, 1e6], 1e-6),
+        ("sqrt(x)", &[1e-6, 1e-4, 0.5, 100.0, 1e4, 1e6], 1e-6),
+        ("x^3", &[1e-4, 1e-2, 0.5, 2.5, 100.0, 1e4], 1e-6),
+        ("tan(x)", &[1e-6, 0.25, 0.75, 1.2], 1e-6),
+    ];
+    for &(expr, points, rel_tol) in specs {
+        let sym_out = engine
+            .evaluate_preview(&format!("d({expr},x)"), false)
+            .unwrap_or_else(|e| panic!("symbolic diff {expr}: {e}"));
+        for &x0 in points {
+            let num_out = engine
+                .evaluate_preview(&format!("d({expr},x,{x0})"), false)
+                .unwrap_or_else(|e| panic!("numeric diff {expr} at {x0}: {e}"));
+            let actual = num_out.numeric_value.expect("numeric deriv").re;
+            let expected = engine
+                .eval_for_x(&sym_out.exact_text, x0)
+                .unwrap_or_else(|| panic!("eval symbolic deriv {} at {x0}", sym_out.exact_text));
+            close(actual, expected, 1e-11, rel_tol);
+        }
+    }
+}
+
+#[test]
+fn self_checking_matrix_identity_and_variables() {
+    let mut engine = new_engine();
+    let matrices = [
+        "[[1,2],[3,4]]",
+        "[[1e20,0],[0,1e-20]]",
+        "[[1e-20,0],[0,1e20]]",
+        "[[1e8,1],[1,2e-8]]",
+        "[[1e10,1],[1,0]]",
+    ];
+    for mat in matrices {
+        let prod = engine
+            .evaluate_preview(&format!("{mat}*inv({mat})"), false)
+            .unwrap_or_else(|e| panic!("A*inv(A) failed for {mat}: {e}"));
+        assert_eq!(normalized(&prod.decimal_text), "[[1,0],[0,1]]", "for {mat}");
+        let det = engine
+            .evaluate_preview(&format!("det({mat}*inv({mat}))"), false)
+            .unwrap();
+        check_number(det, 1.0, 1e-9, 1e-9);
+    }
+
+    // Matrix ANS and variable persistence + overwrite + unset
+    engine.evaluate_and_commit("[[1,2],[3,4]]").unwrap();
+    let ans_det = engine.evaluate_and_commit("det(ans)").unwrap();
+    check_number(ans_det, -2.0, 1e-12, 0.0);
+
+    engine.evaluate_and_commit("m := [[2,1],[5,3]]").unwrap();
+    let sym_prod = engine.evaluate_preview("m * inv(m)", false).unwrap();
+    assert_eq!(normalized(&sym_prod.decimal_text), "[[1,0],[0,1]]");
+    let ans_echo = engine.evaluate_preview("ans", false).unwrap();
+    assert_eq!(normalized(&ans_echo.decimal_text), "[[2,1],[5,3]]");
+
+    engine.evaluate_and_commit("unset(m)").unwrap();
+    assert!(!engine.matrix_variables.contains_key("m"));
+    engine.evaluate_and_commit("m := [[1,0],[0,2]]").unwrap();
+    engine.evaluate_and_commit("m := 7").unwrap();
+    assert!(!engine.matrix_variables.contains_key("m"));
+    check_number(engine.evaluate_preview("m", false).unwrap(), 7.0, 0.0, 0.0);
+}
+
+#[test]
+fn self_checking_integral_additivity_and_calculus_checks() {
+    let mut engine = new_engine();
+    let additivity_cases: &[(&str, f64, f64, f64, f64)] = &[
+        ("exp(-x^2)", 0.0, 1.3, 5.0, 1e-8),
+        ("sin(x)^2", 0.0, 0.37, 1.0, 1e-8),
+        ("1/(1+x^2)", 0.0, 1.0, 5.0, 1e-8),
+        ("abs(x-1.3)", 0.0, 1.3, 4.0, 1e-7),
+    ];
+    for &(f, a, c, b, tol) in additivity_cases {
+        let i_ab = engine
+            .evaluate_preview(&format!("defint({f},x,{a},{b})"), false)
+            .unwrap()
+            .numeric_value
+            .unwrap()
+            .re;
+        let i_ac = engine
+            .evaluate_preview(&format!("defint({f},x,{a},{c})"), false)
+            .unwrap()
+            .numeric_value
+            .unwrap()
+            .re;
+        let i_cb = engine
+            .evaluate_preview(&format!("defint({f},x,{c},{b})"), false)
+            .unwrap()
+            .numeric_value
+            .unwrap()
+            .re;
+        close(i_ac + i_cb, i_ab, tol, tol);
+    }
+
+    // Verify symbolic antiderivatives by numerical differentiation
+    let sym_integrands: &[(&str, f64)] = &[
+        ("tan(x)", 0.4),
+        ("sin(x)^2", 0.7),
+        ("cos(x)^2", 0.7),
+        ("x*exp(x)", 0.8),
+        ("3/sqrt(2*x+1)", 1.5),
+    ];
+    for &(f, x0) in sym_integrands {
+        let anti = engine
+            .evaluate_preview(&format!("integral({f},x)"), false)
+            .unwrap_or_else(|e| panic!("integral({f},x): {e}"))
+            .exact_text;
+        let h = 1e-6;
+        let fp = engine.eval_for_x(&anti, x0 + h).unwrap();
+        let fm = engine.eval_for_x(&anti, x0 - h).unwrap();
+        let target = engine.eval_for_x(f, x0).unwrap();
+        close((fp - fm) / (2.0 * h), target, 1e-6, 1e-6);
+    }
+
+    // Verify (x+1)^33 expansion quantitatively via x variable evaluation
+    engine.variables.remove("x");
+    let expanded = engine.evaluate_preview("(x+1)^33", false).unwrap().exact_text;
+    assert!(!expanded.contains('('), "(x+1)^33 should expand cleanly: {expanded}");
+    assert!(expanded.contains("x^33"), "(x+1)^33 should contain x^33: {expanded}");
+    close(engine.eval_for_x(&expanded, 1.0).unwrap(), 8589934592.0, 1.0, 1e-10);
+}
+
+#[test]
+fn self_checking_nesting_depth_64_and_unset() {
+    let mut engine = new_engine();
+    let ok64 = format!("{}1{}", "(".repeat(60), ")".repeat(60));
+    check_number(engine.evaluate_preview(&ok64, false).unwrap(), 1.0, 0.0, 0.0);
+    let err65 = format!("{}1{}", "(".repeat(65), ")".repeat(65));
+    assert!(
+        engine.evaluate_preview(&err65, false).is_err(),
+        "65 nested parens must exceed depth 64 limit"
+    );
+
+    engine.evaluate_and_commit("k := 12").unwrap();
+    check_number(engine.evaluate_preview("k+1", false).unwrap(), 13.0, 0.0, 0.0);
+    let unset_out = engine.evaluate_and_commit("unset(k)").unwrap();
+    assert!(unset_out.exact_text.contains("k"), "unexpected unset text: {}", unset_out.exact_text);
+    let sym = engine.evaluate_preview("k+k", false).unwrap();
+    assert_eq!(normalized(&sym.exact_text), "2*k");
 }

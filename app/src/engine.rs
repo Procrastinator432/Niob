@@ -248,6 +248,45 @@ impl BigUInt {
         res
     }
 
+    fn div_rem_u32(&self, d: u32) -> (Self, u32) {
+        if d == 0 {
+            panic!("division by zero");
+        }
+        let mut q = vec![0u32; self.limbs.len()];
+        let mut rem = 0u64;
+        let divisor = u64::from(d);
+        for i in (0..self.limbs.len()).rev() {
+            let cur = (rem << 32) | u64::from(self.limbs[i]);
+            q[i] = (cur / divisor) as u32;
+            rem = cur % divisor;
+        }
+        let mut res = Self { limbs: q };
+        res.trim();
+        (res, rem as u32)
+    }
+
+    fn to_decimal_string(&self) -> String {
+        if self.is_zero() {
+            return "0".to_string();
+        }
+        let mut cur = self.clone();
+        let mut chunks: Vec<u32> = Vec::new();
+        while !cur.is_zero() {
+            let (q, r) = cur.div_rem_u32(1_000_000_000);
+            chunks.push(r);
+            cur = q;
+        }
+        let mut out = String::with_capacity(chunks.len() * 9);
+        if let Some(&top) = chunks.last() {
+            out.push_str(&top.to_string());
+        }
+        for &chunk in chunks.iter().rev().skip(1) {
+            use std::fmt::Write;
+            let _ = write!(&mut out, "{:09}", chunk);
+        }
+        out
+    }
+
     fn to_f64(&self) -> f64 {
         if self.is_zero() {
             return 0.0;
@@ -322,6 +361,39 @@ impl BigInt {
         } else {
             i128::try_from(u).ok()
         }
+    }
+
+    fn to_decimal_string(&self) -> String {
+        if self.mag.is_zero() {
+            return "0".to_string();
+        }
+        let s = self.mag.to_decimal_string();
+        if self.neg {
+            format!("-{}", s)
+        } else {
+            s
+        }
+    }
+
+    fn to_f64(&self) -> f64 {
+        let v = self.mag.to_f64();
+        if self.neg && v != 0.0 {
+            -v
+        } else {
+            v
+        }
+    }
+
+    fn rem_mod(&self, rhs: &Self, always_positive: bool) -> Result<Self, String> {
+        if rhs.mag.is_zero() {
+            return Err("Modulo durch Null".to_string());
+        }
+        let (_, r_mag) = self.mag.div_rem(&rhs.mag);
+        let mut rem = Self::from_u32_parts(self.neg, r_mag);
+        if always_positive && rem.neg {
+            rem = rem.add(&Self::from_u32_parts(false, rhs.mag.clone()));
+        }
+        Ok(rem)
     }
 }
 
@@ -418,6 +490,39 @@ impl BigRat {
         let den = BigInt::from_u32_parts(false, self.den.clone()).to_i128()?;
         ExactRat::new(num, den)
     }
+
+    fn to_exact_string(&self) -> String {
+        if self.den.is_one() {
+            self.num.to_decimal_string()
+        } else {
+            format!("{} / {}", self.num.to_decimal_string(), self.den.to_decimal_string())
+        }
+    }
+
+    fn to_f64(&self) -> f64 {
+        if self.num.mag.is_zero() {
+            return 0.0;
+        }
+        let n = self.num.to_f64();
+        let d = self.den.to_f64();
+        if n.is_finite() && d.is_finite() && d != 0.0 {
+            return n / d;
+        }
+        let nb = self.num.mag.bit_len() as i32;
+        let db = self.den.bit_len() as i32;
+        let top_scaled = |mag: &BigUInt| -> f64 {
+            let start = mag.limbs.len().saturating_sub(3);
+            let mut acc = 0.0f64;
+            for &limb in mag.limbs[start..].iter().rev() {
+                acc = acc * 4294967296.0 + f64::from(limb);
+            }
+            let norm_bits = mag.bit_len() as i32 - (start * 32) as i32;
+            acc * 2.0f64.powi(-norm_bits)
+        };
+        let mant_ratio = top_scaled(&self.num.mag) / top_scaled(&self.den);
+        let res = mant_ratio * 2.0f64.powi(nb - db);
+        if self.num.neg { -res } else { res }
+    }
 }
 
 fn try_eval_bigrat_ast(node: &AstNode, engine: &MathEngine) -> Result<Option<BigRat>, String> {
@@ -467,6 +572,21 @@ fn try_eval_bigrat_ast(node: &AstNode, engine: &MathEngine) -> Result<Option<Big
             }
             _ => Ok(None),
         },
+        AstNode::Func(name, args) if name == "mod" && args.len() == 2 => {
+            if let (Some(a), Some(b)) = (
+                try_eval_bigrat_ast(&args[0], engine)?,
+                try_eval_bigrat_ast(&args[1], engine)?,
+            ) {
+                if a.den.is_one() && b.den.is_one() {
+                    let rem = a.num.rem_mod(&b.num, engine.modulo_always_positive)?;
+                    return Ok(Some(BigRat {
+                        num: rem,
+                        den: BigUInt::one(),
+                    }));
+                }
+            }
+            Ok(None)
+        }
         AstNode::Func(name, args) if (name == "factorial" || name == "fact") && args.len() == 1 => {
             if let Some(arg) = try_eval_bigrat_ast(&args[0], engine)? {
                 if arg.den.is_one() && !arg.num.neg {
@@ -566,7 +686,7 @@ impl NumberFormatMode {
         if abs_v >= 1e12 || (abs_v > 0.0 && abs_v < 1e-6) {
             let exp = abs_v.log10().floor() as i32;
             let mantissa = val / 10f64.powi(exp);
-            let m_str = trim_float(mantissa, 8);
+            let m_str = trim_float(mantissa, 11);
             let m_formatted = self.apply_separators(&m_str);
             return format!("{} × 10{}", m_formatted, to_superscript(exp));
         }
@@ -1170,7 +1290,9 @@ impl Value {
 #[derive(Clone, Debug)]
 pub struct MathEngine {
     pub variables: HashMap<String, Value>,
+    pub matrix_variables: HashMap<String, Vec<Vec<Value>>>,
     pub ans: Value,
+    pub matrix_ans: Option<Vec<Vec<Value>>>,
     pub angle_mode: AngleMode,
     pub number_format: NumberFormatMode,
     pub modulo_always_positive: bool,
@@ -1187,7 +1309,9 @@ impl Default for MathEngine {
         variables.insert("x".to_string(), Value::from_int(2));
         Self {
             variables,
+            matrix_variables: HashMap::new(),
             ans: Value::from_int(0),
+            matrix_ans: None,
             angle_mode: AngleMode::Radians,
             number_format: NumberFormatMode::SpacePoint,
             modulo_always_positive: true,
@@ -1229,6 +1353,7 @@ impl MathEngine {
         let res = self.evaluate_preview(raw_input, true)?;
         if let Some(val) = res.val {
             self.ans = val;
+            self.matrix_ans = None;
         }
         Ok(res)
     }
@@ -1286,6 +1411,7 @@ impl MathEngine {
             if USER_VARIABLES.contains(&vname) {
                 if allow_mutation {
                     self.variables.remove(vname);
+                    self.matrix_variables.remove(vname);
                 }
                 return Ok(EvalOutput {
                     exact_text: format!("{} gelöscht (unset)", vname),
@@ -1308,10 +1434,41 @@ impl MathEngine {
                     var_name
                 ));
             }
+            let rhs_trimmed = rhs.trim();
+            let rhs_ast = AstParser::parse(rhs_trimmed).ok();
+            if rhs_trimmed.starts_with("inv(")
+                || rhs_trimmed.starts_with("trans(")
+                || rhs_trimmed.starts_with("transpose(")
+                || rhs_trimmed.starts_with("[[")
+                || rhs_ast.as_ref().is_some_and(|ast| self.contains_matrix_expression(ast))
+            {
+                let mat = self.eval_matrix_expr(rhs_trimmed)?;
+                let decimal = Self::format_matrix(&mat, |value| self.format_value_decimal(value));
+                let exact = Self::format_matrix(&mat, |value| {
+                    Self::format_exact_real(value).unwrap_or_else(|| self.format_value_decimal(value))
+                });
+                let reusable = Self::format_matrix(&mat, Value::reusable_expression);
+                if allow_mutation {
+                    self.matrix_variables.insert(var_name.to_string(), mat.clone());
+                    self.variables.remove(var_name);
+                    self.matrix_ans = Some(mat);
+                }
+                return Ok(EvalOutput {
+                    exact_text: format!("{} := {}", var_name, exact),
+                    decimal_text: format!("{} := {}", var_name, decimal),
+                    has_distinct_exact: exact != decimal,
+                    numeric_value: None,
+                    val: None,
+                    integration_report: None,
+                    matrix_expression: Some(reusable),
+                });
+            }
             let rhs_out = self.evaluate_preview(rhs, false)?;
             if let Some(val) = rhs_out.val {
                 if allow_mutation {
                     self.variables.insert(var_name.to_string(), val);
+                    self.matrix_variables.remove(var_name);
+                    self.matrix_ans = None;
                 }
                 return Ok(EvalOutput {
                     exact_text: format!("{} := {}", var_name, rhs_out.exact_text),
@@ -1336,9 +1493,15 @@ impl MathEngine {
             || trimmed.starts_with("trans(")
             || trimmed.starts_with("transpose(")
             || trimmed.starts_with("[[")
-            || parsed_ast.as_ref().is_some_and(contains_matrix_expression)
+            || parsed_ast.as_ref().is_some_and(|ast| self.contains_matrix_expression(ast))
         {
-            return self.evaluate_matrix_expression(trimmed);
+            let (out, mat_opt) = self.evaluate_matrix_expression_with_value(trimmed)?;
+            if allow_mutation {
+                if let Some(mat) = mat_opt {
+                    self.matrix_ans = Some(mat);
+                }
+            }
+            return Ok(out);
         }
 
         // Check symbolic calculus first (indefinite integral, symbolic derivative) on AST
@@ -1348,7 +1511,7 @@ impl MathEngine {
             }
         }
 
-        // Exact arbitrary-precision rational evaluation fallback (handles e.g. 2^127+1-2^127 and 100!/98!)
+        // Exact arbitrary-precision rational evaluation fallback (handles e.g. 2^127+1-2^127, 2^200-1, 100!/98!, (3^300) mod 1000007)
         if let Some(ref ast) = parsed_ast {
             if let Some(br) = try_eval_bigrat_ast(ast, self)? {
                 if let Some(er) = br.to_exact_rat() {
@@ -1369,6 +1532,26 @@ impl MathEngine {
                             has_distinct_exact,
                             numeric_value: Some(val.c),
                             val: Some(val),
+                            integration_report: None,
+                            matrix_expression: None,
+                        });
+                    }
+                } else {
+                    let approx = br.to_f64();
+                    if approx.is_finite() {
+                        let exact_str = br.to_exact_string();
+                        let dec_str = if br.den.is_one() && exact_str.len() <= 120 {
+                            exact_str.clone()
+                        } else {
+                            self.number_format.format_f64(approx)
+                        };
+                        let has_distinct_exact = exact_str != dec_str;
+                        return Ok(EvalOutput {
+                            exact_text: exact_str,
+                            decimal_text: dec_str,
+                            has_distinct_exact,
+                            numeric_value: Some(Complex::real(approx)),
+                            val: Some(Value::from_f64(approx)),
                             integration_report: None,
                             matrix_expression: None,
                         });
@@ -1732,29 +1915,13 @@ impl MathEngine {
         res.map(|s| s.to_string())
     }
 
-    fn evaluate_matrix_expression(&self, expr: &str) -> Result<EvalOutput, String> {
+    fn evaluate_matrix_expression_with_value(&self, expr: &str) -> Result<(EvalOutput, Option<Vec<Vec<Value>>>), String> {
         let trimmed = expr.trim();
-        if let Some(inner) = trimmed.strip_prefix("det(").and_then(|s| s.strip_suffix(')')) {
-            let mat = self.eval_matrix_expr(inner)?;
-            let det = matrix_det(&mat)?;
-            let dec = self.format_value_decimal(det);
-            let exact = Self::format_exact_real(det).unwrap_or_else(|| dec.clone());
-            return Ok(EvalOutput {
-                has_distinct_exact: exact != dec,
-                exact_text: exact,
-                decimal_text: dec,
-                numeric_value: Some(det.c),
-                val: Some(det),
-                integration_report: None,
-                matrix_expression: None,
-            });
-        }
-
         if let Ok(ast) = AstParser::parse(trimmed) {
             if let MatrixOrScalar::Scalar(val) = self.eval_matrix_or_scalar_ast(&ast)? {
                 let dec = self.format_value_decimal(val);
                 let exact = Self::format_exact_real(val).unwrap_or_else(|| dec.clone());
-                return Ok(EvalOutput {
+                return Ok((EvalOutput {
                     has_distinct_exact: exact != dec,
                     exact_text: exact,
                     decimal_text: dec,
@@ -1762,8 +1929,24 @@ impl MathEngine {
                     val: Some(val),
                     integration_report: None,
                     matrix_expression: None,
-                });
+                }, None));
             }
+        }
+
+        if let Some(inner) = trimmed.strip_prefix("det(").and_then(|s| s.strip_suffix(')')) {
+            let mat = self.eval_matrix_expr(inner)?;
+            let det = matrix_det(&mat)?;
+            let dec = self.format_value_decimal(det);
+            let exact = Self::format_exact_real(det).unwrap_or_else(|| dec.clone());
+            return Ok((EvalOutput {
+                has_distinct_exact: exact != dec,
+                exact_text: exact,
+                decimal_text: dec,
+                numeric_value: Some(det.c),
+                val: Some(det),
+                integration_report: None,
+                matrix_expression: None,
+            }, None));
         }
 
         let mat = self.eval_matrix_expr(trimmed)?;
@@ -1771,20 +1954,188 @@ impl MathEngine {
         let exact = Self::format_matrix(&mat, |value| {
             Self::format_exact_real(value).unwrap_or_else(|| self.format_value_decimal(value))
         });
-        Ok(EvalOutput {
+        let reusable = Self::format_matrix(&mat, Value::reusable_expression);
+        Ok((EvalOutput {
             has_distinct_exact: exact != decimal,
             exact_text: exact,
             decimal_text: decimal,
             numeric_value: None,
             val: None,
             integration_report: None,
-            matrix_expression: Some(Self::format_matrix(&mat, Value::reusable_expression)),
-        })
+            matrix_expression: Some(reusable),
+        }, Some(mat)))
     }
 
     fn format_exact_real(value: Value) -> Option<String> {
         let rat = value.rat?;
         Some(if rat.den == 1 { rat.num.to_string() } else { format!("{} / {}", rat.num, rat.den) })
+    }
+
+    fn is_entire_antiderivative(node: &AstNode, var: &str) -> bool {
+        match node {
+            AstNode::Num(_) | AstNode::Var(_) => true,
+            AstNode::Neg(inner) => Self::is_entire_antiderivative(inner, var),
+            AstNode::Add(a, b) | AstNode::Sub(a, b) | AstNode::Mul(a, b) => {
+                Self::is_entire_antiderivative(a, var) && Self::is_entire_antiderivative(b, var)
+            }
+            AstNode::Div(a, b) => {
+                !b.contains_var(var)
+                    && Self::is_entire_antiderivative(a, var)
+                    && Self::is_entire_antiderivative(b, var)
+            }
+            AstNode::Pow(base, exp) => {
+                if exp.contains_var(var) || !Self::is_entire_antiderivative(exp, var) {
+                    return false;
+                }
+                if !base.contains_var(var) {
+                    return Self::is_entire_antiderivative(base, var);
+                }
+                let Some(ev) = exp.const_value() else {
+                    return false;
+                };
+                ev.rat.map_or(false, |r| r.den == 1 && r.num > 0)
+                    && Self::is_entire_antiderivative(base, var)
+            }
+            AstNode::Func(name, args) => {
+                args.len() == 1
+                    && matches!(name.as_str(), "sin" | "cos" | "sinh" | "cosh" | "exp")
+                    && Self::is_entire_antiderivative(&args[0], var)
+            }
+        }
+    }
+
+    fn eval_ast_scalar_with_overrides(
+        &self,
+        node: &AstNode,
+        ov: Option<&HashMap<String, Value>>,
+    ) -> Result<Value, String> {
+        match node {
+            AstNode::Num(v) => Ok(*v),
+            AstNode::Var(v) => {
+                let p = ExprParser::new(v, self, ov);
+                p.resolve_identifier(v)
+            }
+            AstNode::Neg(a) => {
+                let v = self.eval_ast_scalar_with_overrides(a, ov)?;
+                Ok(Value {
+                    c: Complex::new(-v.c.re, -v.c.im),
+                    rat: v.rat.and_then(|r| Some(ExactRat { num: r.num.checked_neg()?, den: r.den })),
+                })
+            }
+            AstNode::Add(a, b) => Ok(self
+                .eval_ast_scalar_with_overrides(a, ov)?
+                .add(self.eval_ast_scalar_with_overrides(b, ov)?)),
+            AstNode::Sub(a, b) => Ok(self
+                .eval_ast_scalar_with_overrides(a, ov)?
+                .sub(self.eval_ast_scalar_with_overrides(b, ov)?)),
+            AstNode::Mul(a, b) => Ok(self
+                .eval_ast_scalar_with_overrides(a, ov)?
+                .mul(self.eval_ast_scalar_with_overrides(b, ov)?)),
+            AstNode::Div(a, b) => self
+                .eval_ast_scalar_with_overrides(a, ov)?
+                .div(self.eval_ast_scalar_with_overrides(b, ov)?),
+            AstNode::Pow(a, b) => Ok(self
+                .eval_ast_scalar_with_overrides(a, ov)?
+                .pow(self.eval_ast_scalar_with_overrides(b, ov)?)),
+            AstNode::Func(name, args) if name == "det" && args.len() == 1 && ov.is_none() => {
+                let mat = self.eval_matrix_ast(&args[0])?;
+                matrix_det(&mat)
+            }
+            AstNode::Func(name, args) if args.len() == 1 => {
+                let v0 = self.eval_ast_scalar_with_overrides(&args[0], ov)?;
+                match name.as_str() {
+                    "sin" => Ok(if v0.c.is_real() {
+                        Value::from_f64(self.angle_mode.to_radians(v0.c.re).sin())
+                    } else {
+                        Value::from_complex(v0.c.sin())
+                    }),
+                    "cos" => Ok(if v0.c.is_real() {
+                        Value::from_f64(self.angle_mode.to_radians(v0.c.re).cos())
+                    } else {
+                        Value::from_complex(v0.c.cos())
+                    }),
+                    "sinh" => Ok(if v0.c.is_real() {
+                        Value::from_f64(v0.c.re.sinh())
+                    } else {
+                        Value::from_complex(v0.c.sinh())
+                    }),
+                    "cosh" => Ok(if v0.c.is_real() {
+                        Value::from_f64(v0.c.re.cosh())
+                    } else {
+                        Value::from_complex(v0.c.cosh())
+                    }),
+                    "exp" => Ok(if v0.c.is_real() {
+                        Value::from_f64(v0.c.re.exp())
+                    } else {
+                        Value::from_complex(v0.c.exp())
+                    }),
+                    _ => {
+                        let expr = node.to_display_string();
+                        let mut p = ExprParser::new(&expr, self, ov);
+                        let v = p.parse_expr()?;
+                        p.skip_ws();
+                        if p.pos < p.chars.len() {
+                            return Err(format!("Unerwartetes Zeichen '{}'", p.chars[p.pos]));
+                        }
+                        Ok(v)
+                    }
+                }
+            }
+            _ => {
+                let expr = node.to_display_string();
+                let mut p = ExprParser::new(&expr, self, ov);
+                let v = p.parse_expr()?;
+                p.skip_ws();
+                if p.pos < p.chars.len() {
+                    return Err(format!("Unerwartetes Zeichen '{}'", p.chars[p.pos]));
+                }
+                Ok(v)
+            }
+        }
+    }
+
+    fn collect_critical_points(
+        &self,
+        node: &AstNode,
+        var: &str,
+        lo: f64,
+        hi: f64,
+        ov: Option<&HashMap<String, Value>>,
+        out: &mut Vec<f64>,
+    ) {
+        if out.len() >= 64 || !node.contains_var(var) {
+            return;
+        }
+        if let Some((a_node, b_node)) = node.match_linear(var) {
+            if let (Ok(av), Ok(bv)) = (
+                self.eval_ast_scalar_with_overrides(&a_node, ov),
+                self.eval_ast_scalar_with_overrides(&b_node, ov),
+            ) {
+                if av.c.is_real() && bv.c.is_real() && av.c.re.is_finite() && bv.c.re.is_finite() && av.c.re != 0.0 {
+                    let root = -bv.c.re / av.c.re;
+                    if root.is_finite() && root > lo && root < hi && out.len() < 64 {
+                        out.push(root);
+                    }
+                }
+            }
+        }
+        match node {
+            AstNode::Neg(inner) => self.collect_critical_points(inner, var, lo, hi, ov, out),
+            AstNode::Add(l, r)
+            | AstNode::Sub(l, r)
+            | AstNode::Mul(l, r)
+            | AstNode::Div(l, r) => {
+                self.collect_critical_points(l, var, lo, hi, ov, out);
+                self.collect_critical_points(r, var, lo, hi, ov, out);
+            }
+            AstNode::Pow(base, _) => self.collect_critical_points(base, var, lo, hi, ov, out),
+            AstNode::Func(_, args) => {
+                for a in args {
+                    self.collect_critical_points(a, var, lo, hi, ov, out);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn eval_ast_scalar(&self, node: &AstNode) -> Result<Value, String> {
@@ -1829,7 +2180,7 @@ impl MathEngine {
     fn eval_matrix_or_scalar_ast(&self, node: &AstNode) -> Result<MatrixOrScalar, String> {
         match node {
             AstNode::Neg(inner) => match self.eval_matrix_or_scalar_ast(inner)? {
-                MatrixOrScalar::Matrix(m) => Ok(MatrixOrScalar::Matrix(scale_matrix(&m, Value::from_int(-1)))),
+                MatrixOrScalar::Matrix(m) => Ok(MatrixOrScalar::Matrix(scale_matrix(&m, Value::from_int(-1))?)),
                 MatrixOrScalar::Scalar(s) => Ok(MatrixOrScalar::Scalar(Value {
                     c: Complex::new(-s.c.re, -s.c.im),
                     rat: s.rat.map(|r| ExactRat { num: -r.num, den: r.den }),
@@ -1848,15 +2199,23 @@ impl MathEngine {
             AstNode::Mul(l, r) => match (self.eval_matrix_or_scalar_ast(l)?, self.eval_matrix_or_scalar_ast(r)?) {
                 (MatrixOrScalar::Matrix(a), MatrixOrScalar::Matrix(b)) => Ok(MatrixOrScalar::Matrix(multiply_matrices(&a, &b)?)),
                 (MatrixOrScalar::Matrix(m), MatrixOrScalar::Scalar(s))
-                | (MatrixOrScalar::Scalar(s), MatrixOrScalar::Matrix(m)) => Ok(MatrixOrScalar::Matrix(scale_matrix(&m, s))),
+                | (MatrixOrScalar::Scalar(s), MatrixOrScalar::Matrix(m)) => Ok(MatrixOrScalar::Matrix(scale_matrix(&m, s)?)),
                 (MatrixOrScalar::Scalar(a), MatrixOrScalar::Scalar(b)) => Ok(MatrixOrScalar::Scalar(a.mul(b))),
             },
             AstNode::Div(l, r) => match (self.eval_matrix_or_scalar_ast(l)?, self.eval_matrix_or_scalar_ast(r)?) {
                 (MatrixOrScalar::Matrix(m), MatrixOrScalar::Scalar(s)) => {
-                    let scaled = m
-                        .into_iter()
-                        .map(|row| row.into_iter().map(|cell| cell.div(s)).collect::<Result<Vec<_>, _>>())
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let mut scaled = Vec::with_capacity(m.len());
+                    for row in m {
+                        let mut out_row = Vec::with_capacity(row.len());
+                        for cell in row {
+                            let q = cell.div(s)?;
+                            if !q.c.is_real() || !q.c.re.is_finite() {
+                                return Err("Matrix-Überlauf".to_string());
+                            }
+                            out_row.push(q);
+                        }
+                        scaled.push(out_row);
+                    }
                     Ok(MatrixOrScalar::Matrix(scaled))
                 }
                 (MatrixOrScalar::Scalar(a), MatrixOrScalar::Scalar(b)) => Ok(MatrixOrScalar::Scalar(a.div(b)?)),
@@ -1916,6 +2275,17 @@ impl MathEngine {
                 }
                 Ok(MatrixOrScalar::Matrix(rows))
             }
+            AstNode::Var(name) => {
+                if name.eq_ignore_ascii_case("ans") {
+                    if let Some(ref m) = self.matrix_ans {
+                        return Ok(MatrixOrScalar::Matrix(m.clone()));
+                    }
+                }
+                if let Some(m) = self.matrix_variables.get(name) {
+                    return Ok(MatrixOrScalar::Matrix(m.clone()));
+                }
+                Ok(MatrixOrScalar::Scalar(self.eval_ast_scalar(node)?))
+            }
             _ => Ok(MatrixOrScalar::Scalar(self.eval_ast_scalar(node)?)),
         }
     }
@@ -1939,22 +2309,7 @@ impl MathEngine {
         if let Some(pos) = split_pos {
             let left = self.eval_matrix_expr(&s[..pos])?;
             let right = self.eval_matrix_expr(&s[pos + 1..])?;
-            if left.len() != right.len() || left[0].len() != right[0].len() {
-                return Err("Incompatible matrix dimensions".to_string());
-            }
-            let rows = left.len();
-            let cols = left[0].len();
-            let mut res = vec![vec![Value::from_int(0); cols]; rows];
-            for r in 0..rows {
-                for c in 0..cols {
-                    res[r][c] = if op == '+' {
-                        left[r][c].add(right[r][c])
-                    } else {
-                        left[r][c].sub(right[r][c])
-                    };
-                }
-            }
-            return Ok(res);
+            return add_sub_matrices(&left, &right, op == '+');
         }
         if s.starts_with('[') {
             return self.parse_matrix(s);
@@ -2059,32 +2414,38 @@ impl MathEngine {
             .collect();
         format!("[{}]", row_strs.join(", "))
     }
+
+    fn contains_matrix_expression(&self, node: &AstNode) -> bool {
+        match node {
+            AstNode::Var(name) => {
+                (name.eq_ignore_ascii_case("ans") && self.matrix_ans.is_some())
+                    || self.matrix_variables.contains_key(name)
+            }
+            AstNode::Neg(a) => self.contains_matrix_expression(a),
+            AstNode::Add(a, b)
+            | AstNode::Sub(a, b)
+            | AstNode::Mul(a, b)
+            | AstNode::Div(a, b)
+            | AstNode::Pow(a, b) => {
+                self.contains_matrix_expression(a) || self.contains_matrix_expression(b)
+            }
+            AstNode::Func(name, args) => {
+                if name == "det" {
+                    return false;
+                }
+                if name == "[]" || name == "inv" || name == "trans" || name == "transpose" {
+                    return true;
+                }
+                args.iter().any(|arg| self.contains_matrix_expression(arg))
+            }
+            _ => false,
+        }
+    }
 }
 
 enum MatrixOrScalar {
     Matrix(Vec<Vec<Value>>),
     Scalar(Value),
-}
-
-fn contains_matrix_expression(node: &AstNode) -> bool {
-    match node {
-        AstNode::Neg(a) => contains_matrix_expression(a),
-        AstNode::Add(a, b)
-        | AstNode::Sub(a, b)
-        | AstNode::Mul(a, b)
-        | AstNode::Div(a, b)
-        | AstNode::Pow(a, b) => contains_matrix_expression(a) || contains_matrix_expression(b),
-        AstNode::Func(name, args) => {
-            if name == "det" {
-                return false;
-            }
-            if name == "[]" || name == "inv" || name == "trans" || name == "transpose" {
-                return true;
-            }
-            args.iter().any(contains_matrix_expression)
-        }
-        _ => false,
-    }
 }
 
 fn add_sub_matrices(left: &[Vec<Value>], right: &[Vec<Value>], is_add: bool) -> Result<Vec<Vec<Value>>, String> {
@@ -2096,11 +2457,15 @@ fn add_sub_matrices(left: &[Vec<Value>], right: &[Vec<Value>], is_add: bool) -> 
     let mut res = vec![vec![Value::from_int(0); cols]; rows];
     for r in 0..rows {
         for c in 0..cols {
-            res[r][c] = if is_add {
+            let val = if is_add {
                 left[r][c].add(right[r][c])
             } else {
                 left[r][c].sub(right[r][c])
             };
+            if !val.c.is_real() || !val.c.re.is_finite() {
+                return Err("Matrix-Überlauf".to_string());
+            }
+            res[r][c] = val;
         }
     }
     Ok(res)
@@ -2118,10 +2483,20 @@ fn transpose_matrix(mat: &[Vec<Value>]) -> Vec<Vec<Value>> {
     t
 }
 
-fn scale_matrix(mat: &[Vec<Value>], scalar: Value) -> Vec<Vec<Value>> {
-    mat.iter()
-        .map(|row| row.iter().map(|cell| cell.mul(scalar)).collect())
-        .collect()
+fn scale_matrix(mat: &[Vec<Value>], scalar: Value) -> Result<Vec<Vec<Value>>, String> {
+    let mut res = Vec::with_capacity(mat.len());
+    for row in mat {
+        let mut out_row = Vec::with_capacity(row.len());
+        for cell in row {
+            let val = cell.mul(scalar);
+            if !val.c.is_real() || !val.c.re.is_finite() {
+                return Err("Matrix-Überlauf".to_string());
+            }
+            out_row.push(val);
+        }
+        res.push(out_row);
+    }
+    Ok(res)
 }
 
 fn multiply_matrices(left: &[Vec<Value>], right: &[Vec<Value>]) -> Result<Vec<Vec<Value>>, String> {
@@ -2135,8 +2510,20 @@ fn multiply_matrices(left: &[Vec<Value>], right: &[Vec<Value>]) -> Result<Vec<Ve
     for r in 0..rows {
         for c in 0..cols {
             let mut sum = Value::from_int(0);
+            let mut abs_sum = 0.0_f64;
             for k in 0..inner {
-                sum = sum.add(left[r][k].mul(right[k][c]));
+                let prod = left[r][k].mul(right[k][c]);
+                if !prod.c.is_real() || !prod.c.re.is_finite() {
+                    return Err("Matrix-Überlauf".to_string());
+                }
+                abs_sum += prod.c.re.abs();
+                sum = sum.add(prod);
+                if !sum.c.is_real() || !sum.c.re.is_finite() {
+                    return Err("Matrix-Überlauf".to_string());
+                }
+            }
+            if sum.rat.is_none() && abs_sum > 0.0 && sum.c.re.abs() <= 1e-13 * abs_sum {
+                sum = Value::from_int(0);
             }
             res[r][c] = sum;
         }
@@ -2203,74 +2590,85 @@ fn matrix_inv(m: &[Vec<Value>]) -> Result<Vec<Vec<Value>>, String> {
     if n == 0 || m[0].len() != n {
         return Err("Matrix-Invertierung erfordert quadratische Matrix".to_string());
     }
-    let det = matrix_det(m)?;
-    if det.rat.map_or(det.c.re.abs() < 1e-14, |rat| rat.num == 0) {
-        return Err("Matrix ist singulär (det = 0)".to_string());
-    }
+    let mut row_scale = vec![0.0_f64; n];
     let zero = Value::from_int(0);
     let one = Value::from_int(1);
     let mut aug = vec![vec![zero; 2 * n]; n];
     for r in 0..n {
+        let mut r_max = 0.0_f64;
         for c in 0..n {
-            aug[r][c] = m[r][c];
+            let cell = m[r][c];
+            if !cell.c.is_real() || !cell.c.re.is_finite() {
+                return Err("Matrix-Überlauf".to_string());
+            }
+            r_max = r_max.max(cell.c.re.abs());
+            aug[r][c] = cell;
         }
+        if r_max == 0.0 {
+            return Err("Matrix ist singulär (nicht invertierbar)".to_string());
+        }
+        row_scale[r] = r_max;
         aug[r][n + r] = one;
     }
     for i in 0..n {
         let mut pivot_row = i;
-        let mut max_val = aug[i][i].c.abs();
+        let mut best_ratio = aug[i][i].c.abs() / row_scale[i];
         for k in (i + 1)..n {
-            let v = aug[k][i].c.abs();
-            if v > max_val {
-                max_val = v;
+            let ratio = aug[k][i].c.abs() / row_scale[k];
+            if ratio > best_ratio {
+                best_ratio = ratio;
                 pivot_row = k;
             }
         }
-        if max_val < 1e-14 {
+        let pivot_zero_rat = aug[pivot_row][i].rat.map_or(false, |rat| rat.num == 0);
+        if pivot_zero_rat || !best_ratio.is_finite() || best_ratio <= 1e-14 {
             return Err("Matrix ist singulär (nicht invertierbar)".to_string());
         }
         if pivot_row != i {
             aug.swap(i, pivot_row);
+            row_scale.swap(i, pivot_row);
         }
         let pivot = aug[i][i];
         for j in 0..(2 * n) {
-            aug[i][j] = aug[i][j].div(pivot)?;
+            let q = aug[i][j].div(pivot)?;
+            if !q.c.is_real() || !q.c.re.is_finite() {
+                return Err("Matrix-Überlauf".to_string());
+            }
+            aug[i][j] = q;
         }
         for k in 0..n {
             if k != i {
                 let factor = aug[k][i];
-                for j in 0..(2 * n) {
-                    let sub_term = factor.mul(aug[i][j]);
-                    aug[k][j] = aug[k][j].sub(sub_term);
+                if factor.c.re != 0.0 || factor.c.im != 0.0 {
+                    for j in 0..(2 * n) {
+                        let old = aug[k][j];
+                        let sub_term = factor.mul(aug[i][j]);
+                        if !sub_term.c.is_real() || !sub_term.c.re.is_finite() {
+                            return Err("Matrix-Überlauf".to_string());
+                        }
+                        let mut updated = old.sub(sub_term);
+                        if !updated.c.is_real() || !updated.c.re.is_finite() {
+                            return Err("Matrix-Überlauf".to_string());
+                        }
+                        if updated.rat.is_none()
+                            && updated.c.re.abs() <= 1e-13 * old.c.re.abs().max(sub_term.c.re.abs())
+                        {
+                            updated = Value::from_int(0);
+                        }
+                        aug[k][j] = updated;
+                    }
                 }
             }
         }
     }
     let mut inv = vec![vec![zero; n]; n];
-    let mut max_inv_abs = 0.0_f64;
     for i in 0..n {
-        inv[i].copy_from_slice(&aug[i][n..(2 * n)]);
-        for cell in &inv[i] {
-            let av = cell.c.re.abs();
-            if av > max_inv_abs {
-                max_inv_abs = av;
+        for j in 0..n {
+            let cell = aug[i][n + j];
+            if !cell.c.is_real() || !cell.c.re.is_finite() {
+                return Err("Matrix-Überlauf".to_string());
             }
-        }
-    }
-    let zero_tol = 1e-13 * max_inv_abs.max(1e-30);
-    for row in &mut inv {
-        for cell in row.iter_mut() {
-            if cell.rat.is_none() && cell.c.is_real() && cell.c.re.is_finite() {
-                let v = cell.c.re;
-                if v.abs() <= zero_tol {
-                    *cell = Value::from_int(0);
-                } else {
-                    let nearest = v.round();
-                    if (v - nearest).abs() <= 1e-13 * nearest.abs().max(1.0) && nearest.abs() <= 1e15 {
-                        *cell = Value::from_int(nearest as i128);
-                    }
-                }
-            }
+            inv[i][j] = cell;
         }
     }
     Ok(inv)
@@ -2327,6 +2725,21 @@ pub fn adaptive_gauss_integrate<F>(
     initial_subintervals: usize,
     eps_abs: f64,
     eps_rel: f64,
+) -> Result<IntegrationReport, String>
+where
+    F: Fn(f64) -> Result<f64, String>,
+{
+    adaptive_gauss_integrate_with_anchors(f, a, b, initial_subintervals, eps_abs, eps_rel, &[])
+}
+
+pub fn adaptive_gauss_integrate_with_anchors<F>(
+    f: F,
+    a: f64,
+    b: f64,
+    initial_subintervals: usize,
+    eps_abs: f64,
+    eps_rel: f64,
+    extra_anchors: &[f64],
 ) -> Result<IntegrationReport, String>
 where
     F: Fn(f64) -> Result<f64, String>,
@@ -2412,21 +2825,29 @@ where
     let mut total_err = 0.0;
     let mut evals: usize;
 
+    let lo = a.min(b);
+    let hi = a.max(b);
+    let span = hi - lo;
+    let step = span / (initial_subintervals as f64);
+    let mut pts = Vec::with_capacity(initial_subintervals + 128);
+    for i in 0..=initial_subintervals {
+        pts.push(if i == initial_subintervals { hi } else { lo + (i as f64) * step });
+    }
+
     if initial_subintervals >= 500 {
-        let lo = a.min(b);
-        let hi = a.max(b);
-        let span = hi - lo;
-        let step = span / (initial_subintervals as f64);
-        let mut pts = Vec::with_capacity(initial_subintervals + 128);
-        for i in 0..=initial_subintervals {
-            pts.push(if i == initial_subintervals { hi } else { lo + (i as f64) * step });
-        }
         let mid = 0.5 * (lo + hi);
-        let anchors: Vec<f64> = if lo < 0.0 && hi > 0.0 {
-            vec![lo, 0.0, mid, hi]
-        } else {
-            vec![lo, mid, hi]
-        };
+        let mut anchors: Vec<f64> = Vec::with_capacity(extra_anchors.len() + 4);
+        anchors.push(lo);
+        if lo < 0.0 && hi > 0.0 {
+            anchors.push(0.0);
+        }
+        anchors.push(mid);
+        anchors.push(hi);
+        for &ea in extra_anchors {
+            if ea.is_finite() && ea > lo && ea < hi {
+                anchors.push(ea);
+            }
+        }
         let offsets = [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1.0, 4.0, 16.0, 64.0, 256.0, 1024.0];
         for anchor in anchors {
             if anchor > lo && anchor < hi {
@@ -2444,47 +2865,62 @@ where
                 }
             }
         }
-        pts.sort_by(f64::total_cmp);
-        let mut dedup: Vec<f64> = Vec::with_capacity(pts.len());
-        for p in pts {
-            if let Some(&last) = dedup.last() {
-                if p - last <= 1e-12 * p.abs().max(1.0) {
-                    if p == hi {
-                        *dedup.last_mut().unwrap() = hi;
-                    }
-                    continue;
+    } else {
+        let mut anchors: Vec<f64> = Vec::with_capacity(extra_anchors.len() + 1);
+        if lo < 0.0 && hi > 0.0 {
+            anchors.push(0.0);
+        }
+        for &ea in extra_anchors {
+            if ea.is_finite() && ea > lo && ea < hi {
+                anchors.push(ea);
+            }
+        }
+        let nested_offsets = [2e-3, 1e-2, 5e-2, 0.25, 1.0, 4.0];
+        for anchor in anchors {
+            pts.push(anchor);
+            for &off in &nested_offsets {
+                if off >= span * 0.25 {
+                    break;
+                }
+                if anchor - off > lo {
+                    pts.push(anchor - off);
+                }
+                if anchor + off < hi {
+                    pts.push(anchor + off);
                 }
             }
-            dedup.push(p);
         }
-        if a < b {
-            for w in dedup.windows(2) {
-                let sub = eval_sub(w[0], w[1])?;
-                total_val += sub.val5;
-                total_err += sub.err;
-                intervals.push(sub);
-            }
-        } else {
-            for w in dedup.windows(2).rev() {
-                let sub = eval_sub(w[1], w[0])?;
-                total_val += sub.val5;
-                total_err += sub.err;
-                intervals.push(sub);
+    }
+
+    pts.sort_by(f64::total_cmp);
+    let mut dedup: Vec<f64> = Vec::with_capacity(pts.len());
+    for p in pts {
+        if let Some(&last) = dedup.last() {
+            if p - last <= 1e-12 * p.abs().max(1.0) {
+                if p == hi {
+                    *dedup.last_mut().unwrap() = hi;
+                }
+                continue;
             }
         }
-        evals = intervals.len() * 7;
-    } else {
-        let h = (b - a) / (initial_subintervals as f64);
-        for i in 0..initial_subintervals {
-            let ia = a + (i as f64) * h;
-            let ib = if i == initial_subintervals - 1 { b } else { ia + h };
-            let sub = eval_sub(ia, ib)?;
+        dedup.push(p);
+    }
+    if a < b {
+        for w in dedup.windows(2) {
+            let sub = eval_sub(w[0], w[1])?;
             total_val += sub.val5;
             total_err += sub.err;
             intervals.push(sub);
         }
-        evals = initial_subintervals * 7;
+    } else {
+        for w in dedup.windows(2).rev() {
+            let sub = eval_sub(w[1], w[0])?;
+            total_val += sub.val5;
+            total_err += sub.err;
+            intervals.push(sub);
+        }
     }
+    evals = intervals.len() * 7;
 
     let max_evals = 100_000;
     let mut target_tol = eps_abs.max(eps_rel * total_val.abs());
@@ -3097,10 +3533,77 @@ impl AstNode {
                             }
                         }
                     }
+                    if let AstNode::Func(fname, fargs) = &sb {
+                        if fname == "sqrt" && fargs.len() == 1 {
+                            if let Some((sq_a, _sq_b)) = fargs[0].match_linear(var) {
+                                if !sq_a.is_zero() {
+                                    let two = AstNode::Num(Value::from_int(2));
+                                    let scaled = if a.is_one() {
+                                        two
+                                    } else {
+                                        AstNode::Mul(Box::new(two), a.clone()).simplify()
+                                    };
+                                    let num = AstNode::Mul(Box::new(scaled), Box::new(sb.clone())).simplify();
+                                    return Some(if sq_a.is_one() {
+                                        num
+                                    } else {
+                                        AstNode::Div(Box::new(num), Box::new(sq_a)).simplify()
+                                    });
+                                }
+                            }
+                        }
+                    }
                 }
                 None
             }
             AstNode::Pow(base, exp) if !exp.contains_var(var) => {
+                if let AstNode::Func(fname, fargs) = base.as_ref() {
+                    if (fname == "sin" || fname == "cos") && fargs.len() == 1 {
+                        let is_sq = match try_poly_rat_ast(exp) {
+                            Some(er) => er.den == 1 && er.num == 2,
+                            None => exp.const_value().is_some_and(|cv| cv.c.is_real() && (cv.c.re - 2.0).abs() < 1e-11),
+                        };
+                        if is_sq {
+                            let u = &fargs[0];
+                            if let Some((u_a, _u_b)) = u.match_linear(var) {
+                                if !u_a.is_zero() {
+                                    let half_x = AstNode::Div(
+                                        Box::new(AstNode::Var(var.to_string())),
+                                        Box::new(AstNode::Num(Value::from_int(2))),
+                                    );
+                                    let two_u = AstNode::Mul(
+                                        Box::new(AstNode::Num(Value::from_int(2))),
+                                        Box::new(u.clone()),
+                                    ).simplify();
+                                    let sin_two_u = AstNode::Func("sin".to_string(), vec![two_u]);
+                                    let four_a = if u_a.is_one() {
+                                        AstNode::Num(Value::from_int(4))
+                                    } else {
+                                        AstNode::Mul(
+                                            Box::new(AstNode::Num(Value::from_int(4))),
+                                            Box::new(u_a),
+                                        ).simplify()
+                                    };
+                                    let osc = AstNode::Div(Box::new(sin_two_u), Box::new(four_a)).simplify();
+                                    let scaled_osc = if mode == AngleMode::Degrees {
+                                        let inv_deg = AstNode::Div(
+                                            Box::new(AstNode::Num(Value::from_int(180))),
+                                            Box::new(AstNode::Var("pi".to_string())),
+                                        );
+                                        AstNode::Mul(Box::new(inv_deg), Box::new(osc)).simplify()
+                                    } else {
+                                        osc
+                                    };
+                                    return Some(if fname == "sin" {
+                                        AstNode::Sub(Box::new(half_x), Box::new(scaled_osc)).simplify()
+                                    } else {
+                                        AstNode::Add(Box::new(half_x), Box::new(scaled_osc)).simplify()
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
                 let (lin_a, _lin_b) = base.match_linear(var)?;
                 if lin_a.is_zero() {
                     return None;
@@ -3319,6 +3822,26 @@ impl AstNode {
                             base
                         })
                     }
+                    "tan" => {
+                        let ln_cos_u = AstNode::Func(
+                            "ln".to_string(),
+                            vec![AstNode::Func("cos".to_string(), vec![u.clone()])],
+                        );
+                        let base = if unit_a {
+                            AstNode::Neg(Box::new(ln_cos_u))
+                        } else if let AstNode::Neg(inner_a) = a {
+                            AstNode::Div(Box::new(ln_cos_u), inner_a).simplify()
+                        } else if a.is_negative_display() {
+                            AstNode::Div(Box::new(ln_cos_u), Box::new(AstNode::Neg(Box::new(a)).simplify())).simplify()
+                        } else {
+                            AstNode::Neg(Box::new(AstNode::Div(Box::new(ln_cos_u), Box::new(a)).simplify()))
+                        };
+                        Some(if mode == AngleMode::Degrees {
+                            AstNode::Mul(Box::new(inv_deg_scale()), Box::new(base)).simplify()
+                        } else {
+                            base
+                        })
+                    }
                     "sinh" => {
                         let cosh_u = AstNode::Func("cosh".to_string(), vec![u.clone()]);
                         Some(if unit_a { cosh_u } else { AstNode::Div(Box::new(cosh_u), Box::new(a)).simplify() })
@@ -3348,6 +3871,36 @@ impl AstNode {
                     let ia = a.integrate_with_mode(var, mode)?;
                     Some(AstNode::Mul(Box::new(ia), b.clone()).simplify())
                 } else {
+                    for (lin_node, exp_node) in [(a.as_ref(), b.as_ref()), (b.as_ref(), a.as_ref())] {
+                        if let AstNode::Func(fname, fargs) = exp_node {
+                            if fname == "exp" && fargs.len() == 1 {
+                                if let (Some((lin_a, _)), Some((c, _))) =
+                                    (lin_node.match_linear(var), fargs[0].match_linear(var))
+                                {
+                                    if !lin_a.is_zero() && !c.is_zero() {
+                                        let term1 = if c.is_one() {
+                                            lin_node.clone()
+                                        } else {
+                                            AstNode::Div(Box::new(lin_node.clone()), Box::new(c.clone())).simplify()
+                                        };
+                                        let term2 = if c.is_one() {
+                                            lin_a
+                                        } else {
+                                            let c_sq = AstNode::Pow(
+                                                Box::new(c),
+                                                Box::new(AstNode::Num(Value::from_int(2))),
+                                            ).simplify();
+                                            AstNode::Div(Box::new(lin_a), Box::new(c_sq)).simplify()
+                                        };
+                                        let poly_factor = AstNode::Sub(Box::new(term1), Box::new(term2)).simplify();
+                                        return Some(
+                                            AstNode::Mul(Box::new(poly_factor), Box::new(exp_node.clone())).simplify(),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                     None
                 }
             }
@@ -3734,6 +4287,22 @@ impl PolyMonomial {
         }
         Self { vars }
     }
+
+    fn div_by(&self, other: &Self) -> Option<Self> {
+        let mut vars = self.vars.clone();
+        for (k, &den_exp) in &other.vars {
+            let num_exp = *vars.get(k).unwrap_or(&0);
+            if num_exp < den_exp {
+                return None;
+            }
+            if num_exp == den_exp {
+                vars.remove(k);
+            } else {
+                vars.insert(k.clone(), num_exp - den_exp);
+            }
+        }
+        Some(Self { vars })
+    }
 }
 
 impl Ord for PolyMonomial {
@@ -3782,7 +4351,7 @@ fn add_poly(l: &BTreeMap<PolyMonomial, ExactRat>, r: &BTreeMap<PolyMonomial, Exa
 }
 
 fn mul_poly(l: &BTreeMap<PolyMonomial, ExactRat>, r: &BTreeMap<PolyMonomial, ExactRat>) -> Option<BTreeMap<PolyMonomial, ExactRat>> {
-    if l.len().saturating_mul(r.len()) > 2048 {
+    if l.len().saturating_mul(r.len()) > 4096 {
         return None;
     }
     let mut res: BTreeMap<PolyMonomial, ExactRat> = BTreeMap::new();
@@ -3852,22 +4421,41 @@ fn ast_to_poly(node: &AstNode) -> Option<BTreeMap<PolyMonomial, ExactRat>> {
         AstNode::Mul(l, r) => mul_poly(&ast_to_poly(l)?, &ast_to_poly(r)?),
         AstNode::Div(l, r) => {
             let pl = ast_to_poly(l)?;
-            let sr = try_poly_rat_ast(r)?;
-            if sr.num == 0 {
-                return None;
-            }
-            let mut res = BTreeMap::new();
-            for (k, v) in pl {
-                let c = v.div(sr)?;
-                if c.num != 0 {
-                    res.insert(k, c);
+            if let Some(sr) = try_poly_rat_ast(r) {
+                if sr.num == 0 {
+                    return None;
                 }
+                let mut res = BTreeMap::new();
+                for (k, v) in pl {
+                    let c = v.div(sr)?;
+                    if c.num != 0 {
+                        res.insert(k, c);
+                    }
+                }
+                Some(res)
+            } else {
+                let pr = ast_to_poly(r)?;
+                if pr.len() != 1 {
+                    return None;
+                }
+                let (den_mon, &den_coeff) = pr.iter().next()?;
+                if den_coeff.num == 0 {
+                    return None;
+                }
+                let mut res = BTreeMap::new();
+                for (num_mon, num_coeff) in pl {
+                    let q_mon = num_mon.div_by(den_mon)?;
+                    let c = num_coeff.div(den_coeff)?;
+                    if c.num != 0 {
+                        res.insert(q_mon, c);
+                    }
+                }
+                Some(res)
             }
-            Some(res)
         }
         AstNode::Pow(base, exp) => {
             let er = try_poly_rat_ast(exp)?;
-            if er.den != 1 || er.num < 0 || er.num > 32 {
+            if er.den != 1 || er.num < 0 || er.num > 64 {
                 return None;
             }
             let base_poly = ast_to_poly(base)?;
@@ -3987,8 +4575,25 @@ fn has_compound_power_base(node: &AstNode) -> bool {
     }
 }
 
+fn count_numeric_literals(node: &AstNode) -> usize {
+    match node {
+        AstNode::Num(_) => 1,
+        AstNode::Neg(inner) => count_numeric_literals(inner),
+        AstNode::Add(l, r)
+        | AstNode::Sub(l, r)
+        | AstNode::Mul(l, r)
+        | AstNode::Div(l, r)
+        | AstNode::Pow(l, r) => count_numeric_literals(l) + count_numeric_literals(r),
+        AstNode::Func(_, args) => args.iter().map(count_numeric_literals).sum(),
+        AstNode::Var(_) => 0,
+    }
+}
+
 fn can_simplify_as_polynomial(node: &AstNode) -> bool {
-    contains_add_or_sub(node) || count_var_occurrences(node) >= 2 || has_compound_power_base(node)
+    contains_add_or_sub(node)
+        || count_var_occurrences(node) >= 2
+        || has_compound_power_base(node)
+        || count_numeric_literals(node) >= 2
 }
 
 pub fn simplify_polynomial_ast(node: &AstNode) -> Option<AstNode> {
@@ -4152,6 +4757,19 @@ impl AstParser {
         let mut left = self.parse_unary()?;
         loop {
             self.skip_ws();
+            if self.pos + 3 <= self.chars.len() {
+                let slice: String = self.chars[self.pos..self.pos + 3].iter().collect();
+                if slice == "mod"
+                    && (self.pos + 3 == self.chars.len()
+                        || (!self.chars[self.pos + 3].is_alphanumeric()
+                            && self.chars[self.pos + 3] != '_'))
+                {
+                    self.pos += 3;
+                    let right = self.parse_unary()?;
+                    left = AstNode::Func("mod".to_string(), vec![left, right]);
+                    continue;
+                }
+            }
             if self.eat('*') {
                 let right = self.parse_unary()?;
                 left = AstNode::Mul(Box::new(left), Box::new(right));
@@ -4807,13 +5425,66 @@ impl<'a> ExprParser<'a> {
                 }
                 let _guard = IntegrationDepthGuard(prev_depth);
                 let has_inner_int = expr_str.contains("int(") || expr_str.contains("defint(");
+                let parsed = AstParser::parse(&expr_str).ok();
+                if prev_depth == 0 && !has_inner_int {
+                    if let Some(ref ast) = parsed {
+                        if let Some(anti) = ast.integrate_with_mode(&var, engine_ref.angle_mode) {
+                            if MathEngine::is_entire_antiderivative(&anti, &var) {
+                                let mut local_b = base_ov.clone();
+                                local_b.insert(var.clone(), Value::from_f64(b));
+                                let mut local_a = base_ov.clone();
+                                local_a.insert(var.clone(), Value::from_f64(a));
+                                if let (Ok(fb_val), Ok(fa_val)) = (
+                                    engine_ref.eval_ast_scalar_with_overrides(&anti, Some(&local_b)),
+                                    engine_ref.eval_ast_scalar_with_overrides(&anti, Some(&local_a)),
+                                ) {
+                                    if fb_val.c.is_real()
+                                        && fa_val.c.is_real()
+                                        && fb_val.c.re.is_finite()
+                                        && fa_val.c.re.is_finite()
+                                    {
+                                        let fa = fa_val.c.re;
+                                        let fb = fb_val.c.re;
+                                        let mut diff = fb - fa;
+                                        if diff.abs() <= 1e-11 * fa.abs().max(fb.abs()) {
+                                            diff = 0.0;
+                                        }
+                                        if diff.is_finite() {
+                                            let report = IntegrationReport {
+                                                value: diff,
+                                                abs_err: 0.0,
+                                                converged: true,
+                                                subintervals: 1,
+                                                evaluations: 2,
+                                                message: "Konvergiert: Exakte Stammfunktion ausgewertet (2 Auswertungen)".to_string(),
+                                            };
+                                            engine_ref.last_integration_report.replace(Some(report));
+                                            return Ok(Value::from_f64(diff));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                let mut critical_anchors = Vec::new();
+                if let Some(ref ast) = parsed {
+                    engine_ref.collect_critical_points(
+                        ast,
+                        &var,
+                        a.min(b),
+                        a.max(b),
+                        Some(&base_ov),
+                        &mut critical_anchors,
+                    );
+                }
                 let initial_subintervals = if prev_depth > 0 || has_inner_int {
                     16
                 } else {
                     2500
                 };
 
-                let report = adaptive_gauss_integrate(
+                let report = adaptive_gauss_integrate_with_anchors(
                     |x| {
                         let mut local = base_ov.clone();
                         local.insert(var.clone(), Value::from_f64(x));
@@ -4833,6 +5504,7 @@ impl<'a> ExprParser<'a> {
                     initial_subintervals,
                     1e-10,
                     1e-8,
+                    &critical_anchors,
                 )?;
                 engine_ref.last_integration_report.replace(Some(report.clone()));
                 return Ok(Value::from_f64(report.value));
@@ -4850,16 +5522,6 @@ impl<'a> ExprParser<'a> {
                     return Err("Ableitungsstelle muss eine endliche reelle Zahl sein".to_string());
                 }
                 let x0 = x0_val.c.re;
-                let ax = x0.abs();
-                let h = if ax > 1e10 {
-                    1e-3 * ax
-                } else if ax > 1e4 {
-                    1e-3
-                } else if ax > 0.0 && ax < 1.0 {
-                    (1e-3 * ax).max(1e-15).min(1e-4)
-                } else {
-                    1e-4
-                };
                 let mut ov = self.overrides.cloned().unwrap_or_default();
                 let mut eval_real_at = |x: f64| -> Result<f64, String> {
                     ov.insert(var.to_string(), Value::from_f64(x));
@@ -4869,16 +5531,108 @@ impl<'a> ExprParser<'a> {
                     }
                     Ok(val.c.re)
                 };
-                eval_real_at(x0)?;
-                let f_p2 = eval_real_at(x0 + 2.0 * h)?;
-                let f_p1 = eval_real_at(x0 + h)?;
-                let f_m1 = eval_real_at(x0 - h)?;
-                let f_m2 = eval_real_at(x0 - 2.0 * h)?;
-                let deriv_val = (-f_p2 + 8.0 * f_p1 - 8.0 * f_m1 + f_m2) / (12.0 * h);
-                return Ok(Value::from_f64(deriv_val));
+                let f0 = eval_real_at(x0)?;
+                let mut h = 1e-4 * x0.abs().max(1.0);
+                let mut adjusted = false;
+                let mut stencil = None;
+                for _ in 0..40 {
+                    if let (Ok(fp2), Ok(fp1), Ok(fm1), Ok(fm2)) = (
+                        eval_real_at(x0 + 2.0 * h),
+                        eval_real_at(x0 + h),
+                        eval_real_at(x0 - h),
+                        eval_real_at(x0 - 2.0 * h),
+                    ) {
+                        stencil = Some((fp2, fp1, fm1, fm2));
+                        break;
+                    }
+                    h *= 0.5;
+                    adjusted = true;
+                    if !h.is_finite() || h == 0.0 || x0 + h == x0 || x0 - h == x0 {
+                        return Err("Funktion an der Stelle nicht reell differenzierbar".to_string());
+                    }
+                }
+                let (mut fp2, mut fp1, mut fm1, mut fm2) = stencil
+                    .ok_or_else(|| "Funktion an der Stelle nicht reell differenzierbar".to_string())?;
+                if adjusted {
+                    let safe_h = h * 0.25;
+                    if safe_h > 0.0 && x0 + safe_h != x0 && x0 - safe_h != x0 {
+                        if let (Ok(sp2), Ok(sp1), Ok(sm1), Ok(sm2)) = (
+                            eval_real_at(x0 + 2.0 * safe_h),
+                            eval_real_at(x0 + safe_h),
+                            eval_real_at(x0 - safe_h),
+                            eval_real_at(x0 - 2.0 * safe_h),
+                        ) {
+                            h = safe_h;
+                            fp2 = sp2;
+                            fp1 = sp1;
+                            fm1 = sm1;
+                            fm2 = sm2;
+                        }
+                    }
+                } else if f0.abs() > 0.0 && (fp1 - fm1).abs() < 1e-7 * f0.abs() {
+                    let h_wide = 1e-2 * x0.abs().max(1.0);
+                    if h_wide > h && x0 + h_wide != x0 && x0 - h_wide != x0 {
+                        if let (Ok(wp2), Ok(wp1), Ok(wm1), Ok(wm2)) = (
+                            eval_real_at(x0 + 2.0 * h_wide),
+                            eval_real_at(x0 + h_wide),
+                            eval_real_at(x0 - h_wide),
+                            eval_real_at(x0 - 2.0 * h_wide),
+                        ) {
+                            h = h_wide;
+                            fp2 = wp2;
+                            fp1 = wp1;
+                            fm1 = wm1;
+                            fm2 = wm2;
+                        }
+                    }
+                }
+                let h_eff = 0.5 * ((x0 + h) - (x0 - h));
+                let denom = 12.0 * if h_eff > 0.0 { h_eff } else { h };
+                let mut deriv_cur = (8.0 * (fp1 - fm1) - (fp2 - fm2)) / denom;
+                let mut best = deriv_cur;
+                let mut scale = f0.abs().max(fp1.abs()).max(fm1.abs()).max(fp2.abs()).max(fm2.abs());
+                let mut cur_h = h;
+                let x_ulp = x0.abs() * f64::EPSILON;
+                for _ in 0..20 {
+                    let h_half = cur_h * 0.5;
+                    if h_half <= 0.0 || x0 + h_half == x0 || x0 - h_half == x0 {
+                        break;
+                    }
+                    let Ok(hp2) = eval_real_at(x0 + 2.0 * h_half) else { break; };
+                    let Ok(hp1) = eval_real_at(x0 + h_half) else { break; };
+                    let Ok(hm1) = eval_real_at(x0 - h_half) else { break; };
+                    let Ok(hm2) = eval_real_at(x0 - 2.0 * h_half) else { break; };
+                    let h_half_eff = 0.5 * ((x0 + h_half) - (x0 - h_half));
+                    let denom_half = 12.0 * if h_half_eff > 0.0 { h_half_eff } else { h_half };
+                    let deriv_half = (8.0 * (hp1 - hm1) - (hp2 - hm2)) / denom_half;
+                    scale = scale.max(hp1.abs()).max(hm1.abs()).max(hp2.abs()).max(hm2.abs());
+                    let noise_bound = (64.0 * f64::EPSILON * scale + 8.0 * deriv_cur.abs() * x_ulp) / h_half;
+                    let diff = (deriv_half - deriv_cur).abs();
+                    if !deriv_half.is_finite() || diff <= 4.0 * noise_bound {
+                        break;
+                    }
+                    let richardson = (16.0 * deriv_half - deriv_cur) / 15.0;
+                    if !richardson.is_finite() {
+                        break;
+                    }
+                    best = richardson;
+                    if diff <= 1e-9 * richardson.abs().max(1.0) {
+                        break;
+                    }
+                    deriv_cur = deriv_half;
+                    cur_h = h_half;
+                }
+                return Ok(Value::from_f64(best));
             }
             "integral" => {
                 return Err("Symbolische Integration nicht möglich".to_string());
+            }
+            "det" => {
+                if raw_args.len() != 1 {
+                    return Err("det(Matrix) benötigt genau 1 Argument".to_string());
+                }
+                let mat = self.engine.eval_matrix_expr(&raw_args[0])?;
+                return matrix_det(&mat);
             }
             _ => {}
         }
@@ -5174,6 +5928,19 @@ impl<'a> ExprParser<'a> {
             if c.token == ident || c.symbol == ident || c.key == ident {
                 return Ok(Value::from_f64(c.value));
             }
+        }
+        match ident {
+            "sigma" => return Ok(Value::from_f64(crate::constants::STEFAN_BOLTZMANN_CONST)),
+            "G0" => return Ok(Value::from_f64(crate::constants::CONDUCTANCE_QUANTUM)),
+            "E_h" => return Ok(Value::from_f64(crate::constants::HARTREE_ENERGY)),
+            "m_u" => return Ok(Value::from_f64(crate::constants::ATOMIC_MASS_CONST)),
+            "Phi0" => return Ok(Value::from_f64(crate::constants::MAGNETIC_FLUX_QUANTUM)),
+            "m_mu" => return Ok(Value::from_f64(crate::constants::MASS_MUON)),
+            "r_e" => return Ok(Value::from_f64(crate::constants::CLASSICAL_ELECTRON_RADIUS)),
+            "lambda_C" => return Ok(Value::from_f64(crate::constants::COMPTON_WAVELENGTH)),
+            "a_0" => return Ok(Value::from_f64(crate::constants::BOHR_RADIUS)),
+            "mu_N" => return Ok(Value::from_f64(crate::constants::NUCLEAR_MAGNETON)),
+            _ => {}
         }
         Err(format!("Unbekannte Variable oder Konstante '{}'", ident))
     }

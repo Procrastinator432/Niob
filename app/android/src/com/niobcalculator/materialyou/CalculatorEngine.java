@@ -19,32 +19,37 @@ public final class CalculatorEngine {
     public static final double SPEED_OF_LIGHT = 299792458.0;
     public static final double PERMEABILITY_VACUUM = 1.25663706212e-6;
     public static final double PERMITTIVITY_VACUUM = 8.8541878128e-12;
-    public static final double GRAVITATION_CONST = 6.6738e-11;
-    public static final double PLANCK_CONSTANT = 6.6261e-34;
-    public static final double FINE_STRUCTURE_CONST = 0.0072974;
-    public static final double BOLTZMANN_CONST = 1.3806e-23;
-    public static final double GRAVITATIONAL_ACCELERATION = 9.8067;
-    public static final double PLANCK_MASS = 2.1765e-8;
-    public static final double PLANCK_TIME = 5.3911e-44;
-    public static final double PLANCK_LENGTH = 1.6162e-35;
-    public static final double ELECTRON_CHARGE = 1.6022e-19;
-    public static final double IMPEDANCE_VACUUM = 376.73;
-    public static final double MAGNETIC_FLUX_QUANTUM = 2.0678e-15;
-    public static final double JOSEPHSON_CONST = 4.835e14;
-    public static final double VON_KLITZING_CONST = 25813.0;
-    public static final double CONDUCTANCE_QUANTUM = 0.000077481;
-    public static final double STEFAN_BOLTZMANN_CONST = 5.6704e-8;
-    public static final double RYDBERG_CONST = 10974000.0;
-    public static final double HARTREE_ENERGY = 4.3597e-18;
-    public static final double BOHR_MAGNETON = 13996000000.0;
-    public static final double ELECTRON_MAGNETIC_MOMENT = -9.2848e-24;
-    public static final double AVOGADRO_CONST = 6.0221e23;
-    public static final double ATOMIC_MASS_CONST = 1.6605e-27;
-    public static final double FARADAY_CONST = 96485.0;
-    public static final double MOLAR_GAS_CONSTANT = 8.3145;
-    public static final double MASS_ELECTRON = 9.1094e-31;
-    public static final double MASS_PROTON = 1.6726e-27;
-    public static final double MASS_NEUTRON = 1.6749e-27;
+    public static final double GRAVITATION_CONST = 6.67430e-11;
+    public static final double PLANCK_CONSTANT = 6.62607015e-34;
+    public static final double FINE_STRUCTURE_CONST = 7.2973525693e-3;
+    public static final double BOLTZMANN_CONST = 1.380649e-23;
+    public static final double GRAVITATIONAL_ACCELERATION = 9.80665;
+    public static final double PLANCK_MASS = 2.176434e-8;
+    public static final double PLANCK_TIME = 5.391247e-44;
+    public static final double PLANCK_LENGTH = 1.616255e-35;
+    public static final double ELECTRON_CHARGE = 1.602176634e-19;
+    public static final double IMPEDANCE_VACUUM = 376.730313668;
+    public static final double MAGNETIC_FLUX_QUANTUM = 2.067833848e-15;
+    public static final double JOSEPHSON_CONST = 483597.8484e9;
+    public static final double VON_KLITZING_CONST = 25812.80745;
+    public static final double CONDUCTANCE_QUANTUM = 7.748091729e-5;
+    public static final double STEFAN_BOLTZMANN_CONST = 5.670374419e-8;
+    public static final double RYDBERG_CONST = 10973731.568160;
+    public static final double HARTREE_ENERGY = 4.3597447222071e-18;
+    public static final double BOHR_MAGNETON = 1.39962449361e10;
+    public static final double ELECTRON_MAGNETIC_MOMENT = -9.2847647043e-24;
+    public static final double AVOGADRO_CONST = 6.02214076e23;
+    public static final double ATOMIC_MASS_CONST = 1.66053906660e-27;
+    public static final double FARADAY_CONST = 96485.3321233100184;
+    public static final double MOLAR_GAS_CONSTANT = 8.31446261815324;
+    public static final double MASS_ELECTRON = 9.1093837015e-31;
+    public static final double MASS_PROTON = 1.67262192369e-27;
+    public static final double MASS_NEUTRON = 1.67492749804e-27;
+    public static final double MASS_MUON = 1.883531627e-28;
+    public static final double CLASSICAL_ELECTRON_RADIUS = 2.8179403262e-15;
+    public static final double COMPTON_WAVELENGTH = 2.42631023867e-12;
+    public static final double BOHR_RADIUS = 5.29177210903e-11;
+    public static final double NUCLEAR_MAGNETON = 5.0507837461e-27;
     public static final double PERCENT_VAR = 0.01;
 
     public static final String[] USER_VARIABLES = {
@@ -65,10 +70,21 @@ public final class CalculatorEngine {
     }
 
     private final Map<String, Value> variables = new HashMap<>();
+    private final Map<String, double[][]> matrixVariables = new HashMap<>();
     private Value lastAns = Value.fromInt(0);
+    private double[][] lastMatrixAns = null;
     private boolean radiansMode = true;
     private boolean moduloAlwaysPositive = true;
     private IntegrationReport lastIntegrationReport = null;
+
+    private static double[][] cloneMatrix(double[][] m) {
+        if (m == null) return null;
+        double[][] copy = new double[m.length][];
+        for (int i = 0; i < m.length; i++) {
+            copy[i] = m[i].clone();
+        }
+        return copy;
+    }
 
     public CalculatorEngine() {
         initConstantsAndVariables();
@@ -78,9 +94,13 @@ public final class CalculatorEngine {
         return new CalculatorEngine(this);
     }
 
-    private CalculatorEngine(CalculatorEngine source) {
+    public CalculatorEngine(CalculatorEngine source) {
         variables.putAll(source.variables);
+        for (Map.Entry<String, double[][]> entry : source.matrixVariables.entrySet()) {
+            matrixVariables.put(entry.getKey(), cloneMatrix(entry.getValue()));
+        }
         lastAns = source.lastAns;
+        lastMatrixAns = cloneMatrix(source.lastMatrixAns);
         radiansMode = source.radiansMode;
         moduloAlwaysPositive = source.moduloAlwaysPositive;
     }
@@ -158,7 +178,26 @@ public final class CalculatorEngine {
             throw new RuntimeException("Leerer Ausdruck");
         }
         String trimmed = rawExpr.trim();
+        checkBracketDepth(trimmed);
         AstNode parsedAst = AstParser.tryParse(trimmed);
+
+        // 0. Unset variables: `unset(var)`, `~=var`, `var~=`
+        String unsetInner = null;
+        if (trimmed.startsWith("unset(") && trimmed.endsWith(")")) {
+            unsetInner = trimmed.substring(6, trimmed.length() - 1).trim();
+        } else if (trimmed.startsWith("~=")) {
+            unsetInner = trimmed.substring(2).trim();
+        } else if (trimmed.endsWith("~=")) {
+            unsetInner = trimmed.substring(0, trimmed.length() - 2).trim();
+        }
+        if (unsetInner != null && isUserVariable(unsetInner)) {
+            if (commit) {
+                variables.remove(unsetInner);
+                matrixVariables.remove(unsetInner);
+            }
+            String msg = unsetInner + " gelöscht (unset)";
+            return new Result(0.0, msg, msg, unsetInner);
+        }
 
         // 1. Variable Assignment `var := expr`
         int assignIdx = trimmed.indexOf(":=");
@@ -169,6 +208,21 @@ public final class CalculatorEngine {
             }
             String rhs = trimmed.substring(assignIdx + 2).trim();
             AstNode rhsAst = AstParser.tryParse(rhs);
+            if (rhs.startsWith("inv(")
+                    || rhs.startsWith("trans(")
+                    || rhs.startsWith("transpose(")
+                    || rhs.startsWith("[")
+                    || (rhsAst != null && containsMatrixExpression(rhsAst))) {
+                double[][] rhsMatrix = evalMatrixExpr(rhs, null);
+                String display = formatMatrix(rhsMatrix, false);
+                String reusable = formatMatrix(rhsMatrix, true);
+                if (commit) {
+                    matrixVariables.put(vname, cloneMatrix(rhsMatrix));
+                    variables.remove(vname);
+                    lastMatrixAns = cloneMatrix(rhsMatrix);
+                }
+                return new Result(0.0, vname + " := " + display, vname + " := " + display, reusable);
+            }
             Value rhsVal = evalScalar(rhs, rhsAst);
             if (!Double.isFinite(rhsVal.c.re) || !Double.isFinite(rhsVal.c.im)) {
                 throw new RuntimeException("Ungültiges Rechenergebnis (Division durch Null oder Überlauf)");
@@ -179,7 +233,9 @@ public final class CalculatorEngine {
             String reusable = formatReusableVal(rhsVal, symbolic);
             if (commit) {
                 variables.put(vname, rhsVal);
+                matrixVariables.remove(vname);
                 lastAns = rhsVal;
+                lastMatrixAns = null;
             }
             return new Result(rhsVal.c.re, vname + " := " + exact, vname + " := " + decimal, reusable);
         }
@@ -192,6 +248,9 @@ public final class CalculatorEngine {
                 || (parsedAst != null && containsMatrixExpression(parsedAst))) {
             double[][] matrix = evalMatrixExpr(trimmed, null);
             String display = formatMatrix(matrix, false);
+            if (commit) {
+                lastMatrixAns = cloneMatrix(matrix);
+            }
             return new Result(0.0, display, display, formatMatrix(matrix, true));
         }
 
@@ -231,6 +290,7 @@ public final class CalculatorEngine {
 
         if (commit) {
             lastAns = val;
+            lastMatrixAns = null;
         }
         return new Result(numericVal, exact, decimal, reusable);
     }
@@ -543,29 +603,12 @@ public final class CalculatorEngine {
                 if (!aVal.c.isReal() || !bVal.c.isReal() || !Double.isFinite(aVal.c.re) || !Double.isFinite(bVal.c.re)) {
                     throw new RuntimeException("Integrationsgrenzen müssen endliche reelle Zahlen sein");
                 }
-                Map<String, Value> local = ov != null ? new HashMap<>(ov) : new HashMap<>();
-                int prevDepth = INTEGRATION_DEPTH.get();
-                boolean hasInnerInt = containsIntegralNode(f.args.get(0));
-                int initialSubintervals = (prevDepth > 0 || hasInnerInt) ? 16 : 2500;
-                INTEGRATION_DEPTH.set(prevDepth + 1);
-                try {
-                    IntegrationReport report = adaptiveGaussIntegrate(x -> {
-                        local.put(v, Value.fromFloat(x));
-                        Value val = evalAst(f.args.get(0), local);
-                        if (!val.c.isReal() || !Double.isFinite(val.c.re)) {
-                            throw new RuntimeException("Integrand liefert nicht-reellen oder unendlichen Wert");
-                        }
-                        return val.c.re;
-                    }, aVal.c.re, bVal.c.re, initialSubintervals, 1e-10, 1e-8);
-                    lastIntegrationReport = report;
-                    return Value.fromFloat(report.value);
-                } finally {
-                    INTEGRATION_DEPTH.set(prevDepth);
-                }
+                return Value.fromFloat(evaluateDefiniteIntegral(
+                        f.args.get(0), f.args.get(0).toDisplayString(), v, aVal.c.re, bVal.c.re, ov));
             }
             if (fn.equals("integral") && f.args.size() == 2) {
                 String v = calculusVariable(f.args.get(1).toDisplayString());
-                AstNode iNode = f.args.get(0).integrate(v);
+                AstNode iNode = f.args.get(0).integrate(v, radiansMode);
                 if (iNode == null) throw new RuntimeException("Symbolische Integration nicht möglich");
                 return evalAst(iNode, ov);
             }
@@ -581,15 +624,9 @@ public final class CalculatorEngine {
                     throw new RuntimeException("Ableitungsstelle muss eine endliche reelle Zahl sein");
                 }
                 double x0 = x0Val.c.re;
-                double ax = Math.abs(x0);
-                double h = (ax > 1e10) ? (1e-3 * ax) : ((ax > 1e4) ? 1e-3 : ((ax > 0.0 && ax < 1.0) ? Math.min(1e-4, Math.max(1e-15, 1e-3 * ax)) : 1e-4));
                 Map<String, Value> local = ov != null ? new HashMap<>(ov) : new HashMap<>();
-                evalRealDerivativeSample(f.args.get(0), local, v, x0);
-                double fp2 = evalRealDerivativeSample(f.args.get(0), local, v, x0 + 2.0 * h);
-                double fp1 = evalRealDerivativeSample(f.args.get(0), local, v, x0 + h);
-                double fm1 = evalRealDerivativeSample(f.args.get(0), local, v, x0 - h);
-                double fm2 = evalRealDerivativeSample(f.args.get(0), local, v, x0 - 2.0 * h);
-                return Value.fromFloat((-fp2 + 8.0 * fp1 - 8.0 * fm1 + fm2) / (12.0 * h));
+                return Value.fromFloat(computeNumericalDerivative(
+                        x -> evalRealDerivativeSample(f.args.get(0), local, v, x), x0));
             }
             if (fn.equals("det") && f.args.size() == 1) {
                 return Value.fromFloat(matrixDet(evalMatrixAst(f.args.get(0), ov)));
@@ -614,17 +651,20 @@ public final class CalculatorEngine {
 
     public void setVariable(String name, double val) {
         variables.put(name, Value.fromFloat(val));
+        matrixVariables.remove(name);
     }
 
     public void unsetVariable(String name) {
         if (name != null) {
             variables.remove(name);
+            matrixVariables.remove(name);
         }
     }
 
     public void setUserVariable(String name, Value val) {
         if (name != null && val != null) {
             variables.put(name, val);
+            matrixVariables.remove(name);
         }
     }
 
@@ -718,12 +758,15 @@ public final class CalculatorEngine {
 
         variables.put("c0", Value.fromFloat(SPEED_OF_LIGHT));
         variables.put("mu0", Value.fromFloat(PERMEABILITY_VACUUM));
+        variables.put("μ₀", Value.fromFloat(PERMEABILITY_VACUUM));
         variables.put("eps0", Value.fromFloat(PERMITTIVITY_VACUUM));
+        variables.put("ε₀", Value.fromFloat(PERMITTIVITY_VACUUM));
         variables.put("G", Value.fromFloat(GRAVITATION_CONST));
         variables.put("G_const", Value.fromFloat(GRAVITATION_CONST));
         variables.put("h", Value.fromFloat(PLANCK_CONSTANT));
         variables.put("h_planck", Value.fromFloat(PLANCK_CONSTANT));
         variables.put("alpha_fs", Value.fromFloat(FINE_STRUCTURE_CONST));
+        variables.put("α", Value.fromFloat(FINE_STRUCTURE_CONST));
         variables.put("k_B", Value.fromFloat(BOLTZMANN_CONST));
         variables.put("g", Value.fromFloat(GRAVITATIONAL_ACCELERATION));
         variables.put("g_earth", Value.fromFloat(GRAVITATIONAL_ACCELERATION));
@@ -733,23 +776,42 @@ public final class CalculatorEngine {
 
         variables.put("e_charge", Value.fromFloat(ELECTRON_CHARGE));
         variables.put("Z0", Value.fromFloat(IMPEDANCE_VACUUM));
+        variables.put("Z₀", Value.fromFloat(IMPEDANCE_VACUUM));
         variables.put("Phi0", Value.fromFloat(MAGNETIC_FLUX_QUANTUM));
+        variables.put("Φ₀", Value.fromFloat(MAGNETIC_FLUX_QUANTUM));
         variables.put("K_J", Value.fromFloat(JOSEPHSON_CONST));
         variables.put("R_K", Value.fromFloat(VON_KLITZING_CONST));
         variables.put("G0", Value.fromFloat(CONDUCTANCE_QUANTUM));
+        variables.put("G0_cond", Value.fromFloat(CONDUCTANCE_QUANTUM));
+        variables.put("G₀", Value.fromFloat(CONDUCTANCE_QUANTUM));
         variables.put("sigma", Value.fromFloat(STEFAN_BOLTZMANN_CONST));
+        variables.put("sigma_sb", Value.fromFloat(STEFAN_BOLTZMANN_CONST));
+        variables.put("σ", Value.fromFloat(STEFAN_BOLTZMANN_CONST));
         variables.put("R_inf", Value.fromFloat(RYDBERG_CONST));
+        variables.put("R_∞", Value.fromFloat(RYDBERG_CONST));
         variables.put("E_h", Value.fromFloat(HARTREE_ENERGY));
+        variables.put("E_H", Value.fromFloat(HARTREE_ENERGY));
         variables.put("mu_B", Value.fromFloat(BOHR_MAGNETON));
+        variables.put("μ_B", Value.fromFloat(BOHR_MAGNETON));
         variables.put("mu_e", Value.fromFloat(ELECTRON_MAGNETIC_MOMENT));
+        variables.put("μ_e", Value.fromFloat(ELECTRON_MAGNETIC_MOMENT));
 
         variables.put("N_A", Value.fromFloat(AVOGADRO_CONST));
         variables.put("m_u", Value.fromFloat(ATOMIC_MASS_CONST));
+        variables.put("u", Value.fromFloat(ATOMIC_MASS_CONST));
+        variables.put("u_amu", Value.fromFloat(ATOMIC_MASS_CONST));
         variables.put("F", Value.fromFloat(FARADAY_CONST));
+        variables.put("F_faraday", Value.fromFloat(FARADAY_CONST));
         variables.put("R", Value.fromFloat(MOLAR_GAS_CONSTANT));
+        variables.put("R_gas", Value.fromFloat(MOLAR_GAS_CONSTANT));
         variables.put("m_e", Value.fromFloat(MASS_ELECTRON));
         variables.put("m_p", Value.fromFloat(MASS_PROTON));
         variables.put("m_n", Value.fromFloat(MASS_NEUTRON));
+        variables.put("m_mu", Value.fromFloat(MASS_MUON));
+        variables.put("r_e", Value.fromFloat(CLASSICAL_ELECTRON_RADIUS));
+        variables.put("lambda_C", Value.fromFloat(COMPTON_WAVELENGTH));
+        variables.put("a_0", Value.fromFloat(BOHR_RADIUS));
+        variables.put("mu_N", Value.fromFloat(NUCLEAR_MAGNETON));
     }
 
     // --- Exact Rational Arithmetic ---
@@ -1024,8 +1086,23 @@ public final class CalculatorEngine {
     }
 
     // --- Expression Evaluator ---
-    private static final int MAX_NESTING_DEPTH = 128;
+    private static final int MAX_NESTING_DEPTH = 64;
     private static final ThreadLocal<Integer> EVAL_DEPTH = ThreadLocal.withInitial(() -> 0);
+
+    private static void checkBracketDepth(String expr) {
+        int depth = 0;
+        for (int i = 0; i < expr.length(); i++) {
+            char ch = expr.charAt(i);
+            if (ch == '(' || ch == '[') {
+                depth++;
+                if (depth > MAX_NESTING_DEPTH) {
+                    throw new RuntimeException("Maximale Verschachtelungstiefe überschritten");
+                }
+            } else if (ch == ')' || ch == ']') {
+                depth = Math.max(0, depth - 1);
+            }
+        }
+    }
 
     private Value evalExpression(String expr, Map<String, Value> overrides) {
         int d = EVAL_DEPTH.get();
@@ -1412,6 +1489,10 @@ public final class CalculatorEngine {
     }
 
     private static IntegrationReport adaptiveGaussIntegrate(IntegrandFunc f, double a, double b, int initialSubintervals, double epsAbs, double epsRel) {
+        return adaptiveGaussIntegrate(f, a, b, initialSubintervals, epsAbs, epsRel, null);
+    }
+
+    private static IntegrationReport adaptiveGaussIntegrate(IntegrandFunc f, double a, double b, int initialSubintervals, double epsAbs, double epsRel, List<Double> extraAnchors) {
         if (a == b) {
             return new IntegrationReport(0.0, 0.0, true, 0, 0, "Konvergiert: Fehlerabschätzung 0.00e+00 <= Toleranz 1.00e-10 (0 Auswertungen)");
         }
@@ -1421,17 +1502,25 @@ public final class CalculatorEngine {
         double span = Math.abs(b - a);
         int evals = 0;
 
+        double lo = Math.min(a, b);
+        double hi = Math.max(a, b);
+        double step = (hi - lo) / (double) initialSubintervals;
+        java.util.ArrayList<Double> pts = new java.util.ArrayList<>(initialSubintervals + 128);
+        for (int i = 0; i <= initialSubintervals; i++) {
+            pts.add(i == initialSubintervals ? hi : (lo + i * step));
+        }
+
         if (initialSubintervals >= 500) {
-            double lo = Math.min(a, b);
-            double hi = Math.max(a, b);
-            double step = (hi - lo) / (double) initialSubintervals;
-            java.util.ArrayList<Double> pts = new java.util.ArrayList<>(initialSubintervals + 128);
-            for (int i = 0; i <= initialSubintervals; i++) {
-                pts.add(i == initialSubintervals ? hi : (lo + i * step));
+            java.util.ArrayList<Double> anchors = new java.util.ArrayList<>();
+            anchors.add(lo);
+            if (lo < 0.0 && hi > 0.0) anchors.add(0.0);
+            anchors.add(0.5 * (lo + hi));
+            anchors.add(hi);
+            if (extraAnchors != null) {
+                for (double ea : extraAnchors) {
+                    if (Double.isFinite(ea) && ea > lo && ea < hi) anchors.add(ea);
+                }
             }
-            double[] anchors = (lo < 0.0 && hi > 0.0)
-                    ? new double[]{lo, 0.0, 0.5 * (lo + hi), hi}
-                    : new double[]{lo, 0.5 * (lo + hi), hi};
             double[] offsets = new double[]{1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1.0, 4.0, 16.0, 64.0, 256.0, 1024.0};
             for (double anchor : anchors) {
                 if (anchor > lo && anchor < hi) pts.add(anchor);
@@ -1441,44 +1530,51 @@ public final class CalculatorEngine {
                     if (anchor + off < hi) pts.add(anchor + off);
                 }
             }
-            java.util.Collections.sort(pts);
-            double[] dedup = new double[pts.size()];
-            int count = 0;
-            for (double p : pts) {
-                if (count == 0 || (p - dedup[count - 1]) > 1e-12 * Math.max(1.0, Math.abs(p))) {
-                    dedup[count++] = p;
-                } else if (p == hi) {
-                    dedup[count - 1] = hi;
-                }
-            }
-            if (a < b) {
-                for (int i = 0; i + 1 < count; i++) {
-                    Subinterval sub = evalSubinterval(f, dedup[i], dedup[i + 1]);
-                    totalVal += sub.val5;
-                    totalErr += sub.err;
-                    intervals.add(sub);
-                }
-            } else {
-                for (int i = count - 1; i > 0; i--) {
-                    Subinterval sub = evalSubinterval(f, dedup[i], dedup[i - 1]);
-                    totalVal += sub.val5;
-                    totalErr += sub.err;
-                    intervals.add(sub);
-                }
-            }
-            evals = Math.max(0, (count - 1) * 7);
         } else {
-            double h = (b - a) / (double) initialSubintervals;
-            for (int i = 0; i < initialSubintervals; i++) {
-                double ia = a + i * h;
-                double ib = (i == initialSubintervals - 1) ? b : (ia + h);
-                Subinterval sub = evalSubinterval(f, ia, ib);
+            java.util.ArrayList<Double> anchors = new java.util.ArrayList<>();
+            if (lo < 0.0 && hi > 0.0) anchors.add(0.0);
+            if (extraAnchors != null) {
+                for (double ea : extraAnchors) {
+                    if (Double.isFinite(ea) && ea > lo && ea < hi) anchors.add(ea);
+                }
+            }
+            double[] nestedOffsets = new double[]{2e-3, 1e-2, 5e-2, 0.25, 1.0, 4.0};
+            for (double anchor : anchors) {
+                pts.add(anchor);
+                for (double off : nestedOffsets) {
+                    if (off >= span * 0.25) break;
+                    if (anchor - off > lo) pts.add(anchor - off);
+                    if (anchor + off < hi) pts.add(anchor + off);
+                }
+            }
+        }
+
+        java.util.Collections.sort(pts);
+        double[] dedup = new double[pts.size()];
+        int count = 0;
+        for (double p : pts) {
+            if (count == 0 || (p - dedup[count - 1]) > 1e-12 * Math.max(1.0, Math.abs(p))) {
+                dedup[count++] = p;
+            } else if (p == hi) {
+                dedup[count - 1] = hi;
+            }
+        }
+        if (a < b) {
+            for (int i = 0; i + 1 < count; i++) {
+                Subinterval sub = evalSubinterval(f, dedup[i], dedup[i + 1]);
                 totalVal += sub.val5;
                 totalErr += sub.err;
                 intervals.add(sub);
             }
-            evals = initialSubintervals * 7;
+        } else {
+            for (int i = count - 1; i > 0; i--) {
+                Subinterval sub = evalSubinterval(f, dedup[i], dedup[i - 1]);
+                totalVal += sub.val5;
+                totalErr += sub.err;
+                intervals.add(sub);
+            }
         }
+        evals = Math.max(0, (count - 1) * 7);
 
         int maxEvals = 100000;
         double targetTol = Math.max(epsAbs, epsRel * Math.abs(totalVal));
@@ -1535,6 +1631,273 @@ public final class CalculatorEngine {
         return name;
     }
 
+    private static boolean isEntireAntiderivative(AstNode node, String var) {
+        if (node == null) return false;
+        if (node instanceof AstNum || node instanceof AstVar) return true;
+        if (node instanceof AstNeg) return isEntireAntiderivative(((AstNeg) node).inner, var);
+        if (node instanceof AstAdd) {
+            AstAdd add = (AstAdd) node;
+            return isEntireAntiderivative(add.left, var) && isEntireAntiderivative(add.right, var);
+        }
+        if (node instanceof AstSub) {
+            AstSub sub = (AstSub) node;
+            return isEntireAntiderivative(sub.left, var) && isEntireAntiderivative(sub.right, var);
+        }
+        if (node instanceof AstMul) {
+            AstMul mul = (AstMul) node;
+            return isEntireAntiderivative(mul.left, var) && isEntireAntiderivative(mul.right, var);
+        }
+        if (node instanceof AstDiv) {
+            AstDiv div = (AstDiv) node;
+            return !div.right.containsVar(var)
+                    && isEntireAntiderivative(div.left, var)
+                    && isEntireAntiderivative(div.right, var);
+        }
+        if (node instanceof AstPow) {
+            AstPow pow = (AstPow) node;
+            if (pow.exp.containsVar(var) || !isEntireAntiderivative(pow.exp, var)) {
+                return false;
+            }
+            if (!pow.base.containsVar(var)) {
+                return isEntireAntiderivative(pow.base, var);
+            }
+            Value ev = pow.exp.constValue();
+            if (ev == null || ev.rat == null || !ev.rat.den.equals(BigInteger.ONE) || ev.rat.num.signum() <= 0) {
+                return false;
+            }
+            return isEntireAntiderivative(pow.base, var);
+        }
+        if (node instanceof AstFunc) {
+            AstFunc f = (AstFunc) node;
+            if (f.args.size() != 1) return false;
+            String fn = f.name;
+            if (!fn.equals("sin") && !fn.equals("cos") && !fn.equals("sinh") && !fn.equals("cosh") && !fn.equals("exp")) {
+                return false;
+            }
+            return isEntireAntiderivative(f.args.get(0), var);
+        }
+        return false;
+    }
+
+    private void collectCriticalPoints(AstNode node, String var, double lo, double hi, Map<String, Value> ov, List<Double> out) {
+        if (node == null || out.size() >= 64) return;
+        if (!node.containsVar(var)) return;
+        AstNode.LinearMatch lin = AstNode.matchLinear(node, var);
+        if (lin != null) {
+            try {
+                Value av = evalAst(lin.a, ov);
+                Value bv = evalAst(lin.b, ov);
+                if (av.c.isReal() && bv.c.isReal() && Double.isFinite(av.c.re) && Double.isFinite(bv.c.re) && av.c.re != 0.0) {
+                    double root = -bv.c.re / av.c.re;
+                    if (Double.isFinite(root) && root > lo && root < hi && out.size() < 64) {
+                        out.add(root);
+                    }
+                }
+            } catch (RuntimeException ignored) {
+                checkInterrupted();
+            }
+        }
+        if (node instanceof AstNeg) {
+            collectCriticalPoints(((AstNeg) node).inner, var, lo, hi, ov, out);
+        } else if (node instanceof AstAdd) {
+            AstAdd add = (AstAdd) node;
+            collectCriticalPoints(add.left, var, lo, hi, ov, out);
+            collectCriticalPoints(add.right, var, lo, hi, ov, out);
+        } else if (node instanceof AstSub) {
+            AstSub sub = (AstSub) node;
+            collectCriticalPoints(sub.left, var, lo, hi, ov, out);
+            collectCriticalPoints(sub.right, var, lo, hi, ov, out);
+        } else if (node instanceof AstMul) {
+            AstMul mul = (AstMul) node;
+            collectCriticalPoints(mul.left, var, lo, hi, ov, out);
+            collectCriticalPoints(mul.right, var, lo, hi, ov, out);
+        } else if (node instanceof AstDiv) {
+            AstDiv div = (AstDiv) node;
+            collectCriticalPoints(div.left, var, lo, hi, ov, out);
+            collectCriticalPoints(div.right, var, lo, hi, ov, out);
+        } else if (node instanceof AstPow) {
+            collectCriticalPoints(((AstPow) node).base, var, lo, hi, ov, out);
+        } else if (node instanceof AstFunc) {
+            for (AstNode arg : ((AstFunc) node).args) {
+                collectCriticalPoints(arg, var, lo, hi, ov, out);
+            }
+        }
+    }
+
+    private double evaluateDefiniteIntegral(AstNode exprNode, String exprStr, String v, double a, double b, Map<String, Value> ov) {
+        Map<String, Value> local = ov != null ? new HashMap<>(ov) : new HashMap<>();
+        int prevDepth = INTEGRATION_DEPTH.get();
+        boolean hasInnerInt = (exprNode != null)
+                ? containsIntegralNode(exprNode)
+                : (exprStr.contains("int(") || exprStr.contains("defint("));
+        AstNode parsed = exprNode != null ? exprNode : AstParser.tryParse(exprStr);
+        if (prevDepth == 0 && !hasInnerInt && parsed != null) {
+            AstNode anti = parsed.integrate(v, radiansMode);
+            if (isEntireAntiderivative(anti, v)) {
+                try {
+                    local.put(v, Value.fromFloat(b));
+                    Value fbVal = evalAst(anti, local);
+                    local.put(v, Value.fromFloat(a));
+                    Value faVal = evalAst(anti, local);
+                    if (fbVal.c.isReal() && faVal.c.isReal()
+                            && Double.isFinite(fbVal.c.re) && Double.isFinite(faVal.c.re)) {
+                        double fa = faVal.c.re;
+                        double fb = fbVal.c.re;
+                        double diff = fb - fa;
+                        if (Math.abs(diff) <= 1e-11 * Math.max(Math.abs(fa), Math.abs(fb))) {
+                            diff = 0.0;
+                        }
+                        if (Double.isFinite(diff)) {
+                            lastIntegrationReport = new IntegrationReport(
+                                    diff, 0.0, true, 1, 2,
+                                    "Konvergiert: Exakte Stammfunktion ausgewertet (2 Auswertungen)");
+                            return diff;
+                        }
+                    }
+                } catch (RuntimeException ignored) {
+                    checkInterrupted();
+                }
+            }
+        }
+        List<Double> criticalAnchors = new ArrayList<>();
+        if (parsed != null) {
+            double lo = Math.min(a, b);
+            double hi = Math.max(a, b);
+            collectCriticalPoints(parsed, v, lo, hi, ov, criticalAnchors);
+        }
+        int initialSubintervals = (prevDepth > 0 || hasInnerInt) ? 16 : 2500;
+        INTEGRATION_DEPTH.set(prevDepth + 1);
+        try {
+            IntegrationReport report = adaptiveGaussIntegrate(x -> {
+                local.put(v, Value.fromFloat(x));
+                Value val = (exprNode != null) ? evalAst(exprNode, local) : evalExpression(exprStr, local);
+                if (!val.c.isReal() || !Double.isFinite(val.c.re)) {
+                    throw new RuntimeException("Integrand liefert nicht-reellen oder unendlichen Wert");
+                }
+                return val.c.re;
+            }, a, b, initialSubintervals, 1e-10, 1e-8, criticalAnchors);
+            lastIntegrationReport = report;
+            return report.value;
+        } finally {
+            INTEGRATION_DEPTH.set(prevDepth);
+        }
+    }
+
+    private interface RealSampler {
+        double sample(double x);
+    }
+
+    private double computeNumericalDerivative(RealSampler sampler, double x0) {
+        double f0 = sampler.sample(x0);
+        double h = 1e-4 * Math.max(1.0, Math.abs(x0));
+        boolean adjusted = false;
+        double fp2 = 0.0;
+        double fp1 = 0.0;
+        double fm1 = 0.0;
+        double fm2 = 0.0;
+        boolean ok = false;
+        for (int attempt = 0; attempt < 40; attempt++) {
+            try {
+                fp2 = sampler.sample(x0 + 2.0 * h);
+                fp1 = sampler.sample(x0 + h);
+                fm1 = sampler.sample(x0 - h);
+                fm2 = sampler.sample(x0 - 2.0 * h);
+                ok = true;
+                break;
+            } catch (RuntimeException ex) {
+                checkInterrupted();
+                h *= 0.5;
+                adjusted = true;
+                if (!Double.isFinite(h) || h == 0.0 || x0 + h == x0 || x0 - h == x0) {
+                    throw new RuntimeException("Funktion an der Stelle nicht reell differenzierbar");
+                }
+            }
+        }
+        if (!ok) {
+            throw new RuntimeException("Funktion an der Stelle nicht reell differenzierbar");
+        }
+        if (adjusted) {
+            double safeH = h * 0.25;
+            if (safeH > 0.0 && x0 + safeH != x0 && x0 - safeH != x0) {
+                try {
+                    double sp2 = sampler.sample(x0 + 2.0 * safeH);
+                    double sp1 = sampler.sample(x0 + safeH);
+                    double sm1 = sampler.sample(x0 - safeH);
+                    double sm2 = sampler.sample(x0 - 2.0 * safeH);
+                    h = safeH;
+                    fp2 = sp2;
+                    fp1 = sp1;
+                    fm1 = sm1;
+                    fm2 = sm2;
+                } catch (RuntimeException ignored) {
+                    checkInterrupted();
+                }
+            }
+        } else if (Math.abs(f0) > 0.0 && Math.abs(fp1 - fm1) < 1e-7 * Math.abs(f0)) {
+            double hWide = 1e-2 * Math.max(1.0, Math.abs(x0));
+            if (hWide > h && x0 + hWide != x0 && x0 - hWide != x0) {
+                try {
+                    double wp2 = sampler.sample(x0 + 2.0 * hWide);
+                    double wp1 = sampler.sample(x0 + hWide);
+                    double wm1 = sampler.sample(x0 - hWide);
+                    double wm2 = sampler.sample(x0 - 2.0 * hWide);
+                    h = hWide;
+                    fp2 = wp2;
+                    fp1 = wp1;
+                    fm1 = wm1;
+                    fm2 = wm2;
+                } catch (RuntimeException ignored) {
+                    checkInterrupted();
+                }
+            }
+        }
+        double hEff = 0.5 * ((x0 + h) - (x0 - h));
+        double denom = 12.0 * (hEff > 0.0 ? hEff : h);
+        double derivCur = (8.0 * (fp1 - fm1) - (fp2 - fm2)) / denom;
+        double best = derivCur;
+        double scale = Math.max(Math.abs(f0),
+                Math.max(Math.max(Math.abs(fp1), Math.abs(fm1)),
+                        Math.max(Math.abs(fp2), Math.abs(fm2))));
+
+        double curH = h;
+        double xUlp = Math.ulp(Math.abs(x0));
+        for (int ref = 0; ref < 20; ref++) {
+            double hHalf = curH * 0.5;
+            if (hHalf <= 0.0 || x0 + hHalf == x0 || x0 - hHalf == x0) break;
+            try {
+                double hp2 = sampler.sample(x0 + 2.0 * hHalf);
+                double hp1 = sampler.sample(x0 + hHalf);
+                double hm1 = sampler.sample(x0 - hHalf);
+                double hm2 = sampler.sample(x0 - 2.0 * hHalf);
+                double hHalfEff = 0.5 * ((x0 + hHalf) - (x0 - hHalf));
+                double denomHalf = 12.0 * (hHalfEff > 0.0 ? hHalfEff : hHalf);
+                double derivHalf = (8.0 * (hp1 - hm1) - (hp2 - hm2)) / denomHalf;
+                scale = Math.max(scale,
+                        Math.max(Math.max(Math.abs(hp1), Math.abs(hm1)),
+                                Math.max(Math.abs(hp2), Math.abs(hm2))));
+                double noiseBound = (64.0 * Math.ulp(1.0) * scale + 8.0 * Math.abs(derivCur) * xUlp) / hHalf;
+                double diff = Math.abs(derivHalf - derivCur);
+                if (!Double.isFinite(derivHalf) || diff <= 4.0 * noiseBound) {
+                    break;
+                }
+                double richardson = (16.0 * derivHalf - derivCur) / 15.0;
+                if (!Double.isFinite(richardson)) {
+                    break;
+                }
+                best = richardson;
+                if (diff <= 1e-9 * Math.max(1.0, Math.abs(richardson))) {
+                    break;
+                }
+                derivCur = derivHalf;
+                curH = hHalf;
+            } catch (RuntimeException ignored) {
+                checkInterrupted();
+                break;
+            }
+        }
+        return best;
+    }
+
     private double evalRealDerivativeSampleExpr(String expr, Map<String, Value> local, String var, double x) {
         local.put(var, Value.fromFloat(x));
         Value val = evalExpression(expr, local);
@@ -1582,28 +1945,8 @@ public final class CalculatorEngine {
             if (!aVal.c.isReal() || !bVal.c.isReal() || !Double.isFinite(aVal.c.re) || !Double.isFinite(bVal.c.re)) {
                 throw new RuntimeException("Integrationsgrenzen müssen endliche reelle Zahlen sein");
             }
-            double a = aVal.c.re;
-            double b = bVal.c.re;
-            String exprStr = args.get(0);
-            Map<String, Value> local = ov != null ? new HashMap<>(ov) : new HashMap<>();
-            int prevDepth = INTEGRATION_DEPTH.get();
-            boolean hasInnerInt = exprStr.contains("int(") || exprStr.contains("defint(");
-            int initialSubintervals = (prevDepth > 0 || hasInnerInt) ? 16 : 2500;
-            INTEGRATION_DEPTH.set(prevDepth + 1);
-            try {
-                IntegrationReport report = adaptiveGaussIntegrate(x -> {
-                    local.put(v, Value.fromFloat(x));
-                    Value val = evalExpression(exprStr, local);
-                    if (!val.c.isReal() || !Double.isFinite(val.c.re)) {
-                        throw new RuntimeException("Integrand liefert nicht-reellen oder unendlichen Wert");
-                    }
-                    return val.c.re;
-                }, a, b, initialSubintervals, 1e-10, 1e-8);
-                lastIntegrationReport = report;
-                return Value.fromFloat(report.value);
-            } finally {
-                INTEGRATION_DEPTH.set(prevDepth);
-            }
+            return Value.fromFloat(evaluateDefiniteIntegral(
+                    null, args.get(0), v, aVal.c.re, bVal.c.re, ov));
         }
 
         if ((fn.equals("deriv") || fn.equals("diff") || fn.equals("d")) && args.size() >= 2) {
@@ -1616,18 +1959,9 @@ public final class CalculatorEngine {
                 throw new RuntimeException("Ableitungsstelle muss eine endliche reelle Zahl sein");
             }
             double x0 = x0Val.c.re;
-            double ax = Math.abs(x0);
-            double h = (ax > 1e10) ? (1e-3 * ax) : ((ax > 1e4) ? 1e-3 : ((ax > 0.0 && ax < 1.0) ? Math.min(1e-4, Math.max(1e-15, 1e-3 * ax)) : 1e-4));
-
             Map<String, Value> local = ov != null ? new HashMap<>(ov) : new HashMap<>();
-            evalRealDerivativeSampleExpr(args.get(0), local, v, x0);
-            double fp2 = evalRealDerivativeSampleExpr(args.get(0), local, v, x0 + 2.0 * h);
-            double fp1 = evalRealDerivativeSampleExpr(args.get(0), local, v, x0 + h);
-            double fm1 = evalRealDerivativeSampleExpr(args.get(0), local, v, x0 - h);
-            double fm2 = evalRealDerivativeSampleExpr(args.get(0), local, v, x0 - 2.0 * h);
-
-            double deriv = (-fp2 + 8.0 * fp1 - 8.0 * fm1 + fm2) / (12.0 * h);
-            return Value.fromFloat(deriv);
+            return Value.fromFloat(computeNumericalDerivative(
+                    x -> evalRealDerivativeSampleExpr(args.get(0), local, v, x), x0));
         }
 
         List<Value> argVals = new ArrayList<>(args.size());
@@ -1857,63 +2191,177 @@ public final class CalculatorEngine {
     }
 
     // --- Matrix Support ---
-    private double[][] matrixInv(double[][] m) {
-        int n = m.length;
-        if (n == 0 || m[0].length != n) throw new RuntimeException("Inverse erfordert quadratische Matrix");
-        double[][] aug = new double[n][2 * n];
-        for (int i = 0; i < n; i++) {
-            System.arraycopy(m[i], 0, aug[i], 0, n);
-            aug[i][n + i] = 1.0;
-        }
-        for (int i = 0; i < n; i++) {
-            int pivotRow = i;
-            double maxVal = Math.abs(aug[i][i]);
-            for (int k = i + 1; k < n; k++) {
-                if (Math.abs(aug[k][i]) > maxVal) {
-                    maxVal = Math.abs(aug[k][i]);
-                    pivotRow = k;
+    private static void checkMatrixFinite(double[][] mat) {
+        for (double[] row : mat) {
+            for (double v : row) {
+                if (!Double.isFinite(v)) {
+                    throw new RuntimeException("Matrix-Überlauf");
                 }
             }
-            if (maxVal < 1e-14) throw new RuntimeException("Matrix ist singulär (nicht invertierbar)");
+        }
+    }
+
+    private static ExactRat doubleToExactRat(double v) {
+        if (v == 0.0) return ExactRat.of(0);
+        if (!Double.isFinite(v) || Math.abs(v) > 1e30 || Math.abs(v) < 1e-30) {
+            return null;
+        }
+        try {
+            java.math.BigDecimal bd = java.math.BigDecimal.valueOf(v).stripTrailingZeros();
+            int scale = bd.scale();
+            if (scale < -30 || scale > 30) return null;
+            BigInteger num;
+            BigInteger den;
+            if (scale <= 0) {
+                num = bd.unscaledValue().multiply(BigInteger.TEN.pow(-scale));
+                den = BigInteger.ONE;
+            } else {
+                num = bd.unscaledValue();
+                den = BigInteger.TEN.pow(scale);
+            }
+            if (num.bitLength() > 128 || den.bitLength() > 128) return null;
+            return new ExactRat(num, den);
+        } catch (RuntimeException ex) {
+            return null;
+        }
+    }
+
+    private double[][] tryExactMatrixInv(double[][] m) {
+        int n = m.length;
+        if (n > 12) return null;
+        ExactRat[][] aug = new ExactRat[n][2 * n];
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < n; j++) {
+                ExactRat cell = doubleToExactRat(m[i][j]);
+                if (cell == null) return null;
+                aug[i][j] = cell;
+                aug[i][n + j] = ExactRat.of(i == j ? 1L : 0L);
+            }
+        }
+        for (int i = 0; i < n; i++) {
+            int pivotRow = -1;
+            for (int k = i; k < n; k++) {
+                if (aug[k][i].num.signum() != 0) {
+                    pivotRow = k;
+                    break;
+                }
+            }
+            if (pivotRow < 0) {
+                throw new RuntimeException("Matrix ist singulär (nicht invertierbar)");
+            }
             if (pivotRow != i) {
-                double[] tmp = aug[i];
+                ExactRat[] tmp = aug[i];
                 aug[i] = aug[pivotRow];
                 aug[pivotRow] = tmp;
             }
-            double pivot = aug[i][i];
+            ExactRat pivot = aug[i][i];
             for (int j = 0; j < 2 * n; j++) {
-                aug[i][j] /= pivot;
+                aug[i][j] = aug[i][j].div(pivot);
+                if (aug[i][j].num.bitLength() > 2048 || aug[i][j].den.bitLength() > 2048) {
+                    return null;
+                }
             }
             for (int k = 0; k < n; k++) {
                 if (k != i) {
-                    double factor = aug[k][i];
-                    for (int j = 0; j < 2 * n; j++) {
-                        aug[k][j] -= factor * aug[i][j];
+                    ExactRat factor = aug[k][i];
+                    if (factor.num.signum() != 0) {
+                        for (int j = 0; j < 2 * n; j++) {
+                            aug[k][j] = aug[k][j].sub(factor.mul(aug[i][j]));
+                            if (aug[k][j].num.bitLength() > 2048 || aug[k][j].den.bitLength() > 2048) {
+                                return null;
+                            }
+                        }
                     }
                 }
             }
         }
         double[][] inv = new double[n][n];
-        double maxInvAbs = 0.0;
         for (int i = 0; i < n; i++) {
-            System.arraycopy(aug[i], n, inv[i], 0, n);
             for (int j = 0; j < n; j++) {
-                double av = Math.abs(inv[i][j]);
-                if (av > maxInvAbs) maxInvAbs = av;
+                double val = aug[i][n + j].toDouble();
+                if (!Double.isFinite(val)) {
+                    throw new RuntimeException("Matrix-Überlauf");
+                }
+                inv[i][j] = (val == 0.0) ? 0.0 : val;
             }
         }
-        double zeroTol = 1e-13 * Math.max(1e-30, maxInvAbs);
+        return inv;
+    }
+
+    private double[][] matrixInv(double[][] m) {
+        int n = m.length;
+        if (n == 0 || m[0].length != n) throw new RuntimeException("Inverse erfordert quadratische Matrix");
+        checkMatrixFinite(m);
+        double[][] exactInv = tryExactMatrixInv(m);
+        if (exactInv != null) {
+            return exactInv;
+        }
+        double[] rowScale = new double[n];
+        double[][] aug = new double[n][2 * n];
         for (int i = 0; i < n; i++) {
+            double rMax = 0.0;
             for (int j = 0; j < n; j++) {
-                double val = inv[i][j];
-                if (Math.abs(val) <= zeroTol) {
-                    inv[i][j] = 0.0;
-                } else {
-                    double nearest = Math.rint(val);
-                    if (Math.abs(val - nearest) <= 1e-13 * Math.max(1.0, Math.abs(nearest))) {
-                        inv[i][j] = (nearest == 0.0) ? 0.0 : nearest;
+                rMax = Math.max(rMax, Math.abs(m[i][j]));
+            }
+            if (rMax == 0.0) {
+                throw new RuntimeException("Matrix ist singulär (nicht invertierbar)");
+            }
+            rowScale[i] = rMax;
+            System.arraycopy(m[i], 0, aug[i], 0, n);
+            aug[i][n + i] = 1.0;
+        }
+        for (int i = 0; i < n; i++) {
+            int pivotRow = i;
+            double bestRatio = Math.abs(aug[i][i]) / rowScale[i];
+            for (int k = i + 1; k < n; k++) {
+                double ratio = Math.abs(aug[k][i]) / rowScale[k];
+                if (ratio > bestRatio) {
+                    bestRatio = ratio;
+                    pivotRow = k;
+                }
+            }
+            if (!Double.isFinite(bestRatio) || bestRatio <= 1e-14) {
+                throw new RuntimeException("Matrix ist singulär (nicht invertierbar)");
+            }
+            if (pivotRow != i) {
+                double[] tmp = aug[i];
+                aug[i] = aug[pivotRow];
+                aug[pivotRow] = tmp;
+                double sTmp = rowScale[i];
+                rowScale[i] = rowScale[pivotRow];
+                rowScale[pivotRow] = sTmp;
+            }
+            double pivot = aug[i][i];
+            for (int j = 0; j < 2 * n; j++) {
+                double q = aug[i][j] / pivot;
+                if (!Double.isFinite(q)) throw new RuntimeException("Matrix-Überlauf");
+                aug[i][j] = (q == 0.0) ? 0.0 : q;
+            }
+            for (int k = 0; k < n; k++) {
+                if (k != i) {
+                    double factor = aug[k][i];
+                    if (factor != 0.0) {
+                        for (int j = 0; j < 2 * n; j++) {
+                            double old = aug[k][j];
+                            double subTerm = factor * aug[i][j];
+                            if (!Double.isFinite(subTerm)) throw new RuntimeException("Matrix-Überlauf");
+                            double updated = old - subTerm;
+                            if (!Double.isFinite(updated)) throw new RuntimeException("Matrix-Überlauf");
+                            if (Math.abs(updated) <= 1e-13 * Math.max(Math.abs(old), Math.abs(subTerm))) {
+                                updated = 0.0;
+                            }
+                            aug[k][j] = (updated == 0.0) ? 0.0 : updated;
+                        }
                     }
                 }
+            }
+        }
+        double[][] inv = new double[n][n];
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < n; j++) {
+                double val = aug[i][n + j];
+                if (!Double.isFinite(val)) throw new RuntimeException("Matrix-Überlauf");
+                inv[i][j] = (val == 0.0) ? 0.0 : val;
             }
         }
         return inv;
@@ -1940,7 +2388,13 @@ public final class CalculatorEngine {
         return res;
     }
 
-    private static boolean containsMatrixExpression(AstNode node) {
+    private boolean isMatrixVariableRef(String name) {
+        return (name.equalsIgnoreCase("ans") && lastMatrixAns != null)
+                || matrixVariables.containsKey(name);
+    }
+
+    private boolean containsMatrixExpression(AstNode node) {
+        if (node instanceof AstVar) return isMatrixVariableRef(((AstVar) node).name);
         if (node instanceof AstNeg) return containsMatrixExpression(((AstNeg) node).inner);
         if (node instanceof AstAdd) return containsMatrixExpression(((AstAdd) node).left) || containsMatrixExpression(((AstAdd) node).right);
         if (node instanceof AstSub) return containsMatrixExpression(((AstSub) node).left) || containsMatrixExpression(((AstSub) node).right);
@@ -1972,18 +2426,22 @@ public final class CalculatorEngine {
                 double absSum = 0.0;
                 for (int k = 0; k < inner; k++) {
                     double prod = left[r][k] * right[k][c];
+                    if (!Double.isFinite(prod)) {
+                        throw new RuntimeException("Matrix-Überlauf");
+                    }
                     sum += prod;
+                    if (!Double.isFinite(sum)) {
+                        throw new RuntimeException("Matrix-Überlauf");
+                    }
                     absSum += Math.abs(prod);
+                }
+                if (!Double.isFinite(sum)) {
+                    throw new RuntimeException("Matrix-Überlauf");
                 }
                 if (absSum > 0.0 && Math.abs(sum) <= 1e-13 * absSum) {
                     sum = 0.0;
-                } else {
-                    double nearest = Math.rint(sum);
-                    if (Math.abs(sum - nearest) <= 1e-13 * Math.max(1.0, Math.abs(nearest))) {
-                        sum = (nearest == 0.0) ? 0.0 : nearest;
-                    }
                 }
-                result[r][c] = sum;
+                result[r][c] = (sum == 0.0) ? 0.0 : sum;
             }
         }
         return result;
@@ -1993,7 +2451,11 @@ public final class CalculatorEngine {
         double[][] res = new double[m.length][m[0].length];
         for (int r = 0; r < m.length; r++) {
             for (int c = 0; c < m[r].length; c++) {
-                res[r][c] = m[r][c] * s;
+                double val = m[r][c] * s;
+                if (!Double.isFinite(val)) {
+                    throw new RuntimeException("Matrix-Überlauf");
+                }
+                res[r][c] = (val == 0.0) ? 0.0 : val;
             }
         }
         return res;
@@ -2040,10 +2502,17 @@ public final class CalculatorEngine {
         if (left.length != right.length || left[0].length != right[0].length) {
             throw new RuntimeException("Matrixdimensionen stimmen nicht überein");
         }
+        double[][] res = new double[left.length][left[0].length];
         for (int r = 0; r < left.length; r++) {
-            for (int c = 0; c < left[r].length; c++) left[r][c] += sign * right[r][c];
+            for (int c = 0; c < left[r].length; c++) {
+                double val = left[r][c] + sign * right[r][c];
+                if (!Double.isFinite(val)) {
+                    throw new RuntimeException("Matrix-Überlauf");
+                }
+                res[r][c] = (val == 0.0) ? 0.0 : val;
+            }
         }
-        return left;
+        return res;
     }
 
     private static double[][] transposeMatrix(double[][] matrix) {
@@ -2199,6 +2668,18 @@ public final class CalculatorEngine {
                 }
             }
             return new MatrixOrScalar(matrix);
+        }
+        if (node instanceof AstVar) {
+            String name = ((AstVar) node).name;
+            if (overrides == null || !overrides.containsKey(name)) {
+                if (name.equalsIgnoreCase("ans") && lastMatrixAns != null) {
+                    return new MatrixOrScalar(cloneMatrix(lastMatrixAns));
+                }
+                double[][] matVar = matrixVariables.get(name);
+                if (matVar != null) {
+                    return new MatrixOrScalar(cloneMatrix(matVar));
+                }
+            }
         }
         Value v = evalAst(node, overrides);
         if (!v.c.isReal() || !Double.isFinite(v.c.re)) {
@@ -2600,7 +3081,24 @@ public final class CalculatorEngine {
                 AstNode il = left.integrate(var, radiansMode);
                 return il != null ? new AstMul(il, right).simplify() : null;
             }
-            return null;
+            AstNode byParts = tryIntegrateLinearExp(left, right, var);
+            if (byParts != null) return byParts;
+            return tryIntegrateLinearExp(right, left, var);
+        }
+
+        private static AstNode tryIntegrateLinearExp(AstNode linCandidate, AstNode expCandidate, String var) {
+            if (!(expCandidate instanceof AstFunc)) return null;
+            AstFunc expFn = (AstFunc) expCandidate;
+            if (!"exp".equals(expFn.name) || expFn.args.size() != 1) return null;
+            LinearMatch linP = matchLinear(linCandidate, var);
+            LinearMatch linE = matchLinear(expFn.args.get(0), var);
+            if (linP == null || linP.a.isZero() || linE == null || linE.a.isZero()) return null;
+            AstNode c = linE.a;
+            AstNode term1 = c.isOne() ? linCandidate : new AstDiv(linCandidate, c).simplify();
+            AstNode cSq = c.isOne() ? c : new AstPow(c, new AstNum(2)).simplify();
+            AstNode term2 = c.isOne() ? linP.a : new AstDiv(linP.a, cSq).simplify();
+            AstNode polyFactor = new AstSub(term1, term2).simplify();
+            return new AstMul(polyFactor, expCandidate).simplify();
         }
         @Override AstNode simplify() {
             AstNode sl = left.simplify();
@@ -2720,6 +3218,18 @@ public final class CalculatorEngine {
                         }
                     }
                 }
+                if (sr instanceof AstFunc) {
+                    AstFunc fn = (AstFunc) sr;
+                    if ("sqrt".equals(fn.name) && fn.args.size() == 1) {
+                        AstNode.LinearMatch sqLin = matchLinear(fn.args.get(0), var);
+                        if (sqLin != null && !sqLin.a.isZero()) {
+                            AstNode two = new AstNum(2);
+                            AstNode scaled = left.isOne() ? two : new AstMul(two, left).simplify();
+                            AstNode num = new AstMul(scaled, sr).simplify();
+                            return sqLin.a.isOne() ? num : new AstDiv(num, sqLin.a).simplify();
+                        }
+                    }
+                }
             }
             return null;
         }
@@ -2823,6 +3333,36 @@ public final class CalculatorEngine {
             return new AstMul(this, new AstAdd(term1, term2));
         }
         @Override AstNode integrate(String var, boolean radiansMode) {
+            if (base instanceof AstFunc && !exp.containsVar(var)) {
+                AstFunc fn = (AstFunc) base;
+                if (("sin".equals(fn.name) || "cos".equals(fn.name)) && fn.args.size() == 1) {
+                    ExactRat expRat = evalConstantRat(exp);
+                    boolean isSq = expRat != null && expRat.den.equals(BigInteger.ONE) && expRat.num.equals(BigInteger.valueOf(2));
+                    if (!isSq) {
+                        Value cVal = exp.constValue();
+                        isSq = cVal != null && cVal.c.isReal() && Math.abs(cVal.c.re - 2.0) < 1e-11;
+                    }
+                    if (isSq) {
+                        AstNode u = fn.args.get(0);
+                        LinearMatch uLin = matchLinear(u, var);
+                        if (uLin != null && !uLin.a.isZero()) {
+                            AstNode halfX = new AstDiv(new AstVar(var), new AstNum(2));
+                            AstNode twoU = new AstMul(new AstNum(2), u).simplify();
+                            AstNode sinTwoU = new AstFunc("sin", java.util.Collections.singletonList(twoU));
+                            AstNode fourA = uLin.a.isOne()
+                                    ? new AstNum(4)
+                                    : new AstMul(new AstNum(4), uLin.a).simplify();
+                            AstNode osc = new AstDiv(sinTwoU, fourA).simplify();
+                            AstNode scaledOsc = radiansMode
+                                    ? osc
+                                    : new AstMul(new AstDiv(new AstNum(180), new AstVar("pi")), osc).simplify();
+                            return "sin".equals(fn.name)
+                                    ? new AstSub(halfX, scaledOsc).simplify()
+                                    : new AstAdd(halfX, scaledOsc).simplify();
+                        }
+                    }
+                }
+            }
             LinearMatch lin = matchLinear(base, var);
             if (lin != null && !lin.a.isZero() && !exp.containsVar(var)) {
                 AstNode a = lin.a;
@@ -3083,6 +3623,19 @@ public final class CalculatorEngine {
                     AstNode base = unitA ? sinU : new AstDiv(sinU, a).simplify();
                     return invDegScale != null ? new AstMul(invDegScale, base).simplify() : base;
                 }
+                case "tan": {
+                    AstNode lnCosU = new AstFunc("ln", java.util.Collections.singletonList(
+                            new AstFunc("cos", java.util.Collections.singletonList(uNode))));
+                    AstNode base;
+                    if (unitA) base = new AstNeg(lnCosU);
+                    else if (a instanceof AstNeg) base = new AstDiv(lnCosU, ((AstNeg) a).inner).simplify();
+                    else if (a instanceof AstNum && ((AstNum) a).isNegativeDisplay()) {
+                        base = new AstDiv(lnCosU, new AstNeg(a).simplify()).simplify();
+                    } else {
+                        base = new AstNeg(new AstDiv(lnCosU, a).simplify());
+                    }
+                    return invDegScale != null ? new AstMul(invDegScale, base).simplify() : base;
+                }
                 case "sinh": {
                     AstNode coshU = new AstFunc("cosh", java.util.Collections.singletonList(uNode));
                     return unitA ? coshU : new AstDiv(coshU, a).simplify();
@@ -3146,6 +3699,18 @@ public final class CalculatorEngine {
             java.util.TreeMap<String, Integer> m = new java.util.TreeMap<>(this.vars);
             for (Map.Entry<String, Integer> entry : o.vars.entrySet()) {
                 m.merge(entry.getKey(), entry.getValue(), Integer::sum);
+            }
+            return new Monomial(m);
+        }
+
+        Monomial divideBy(Monomial o) {
+            java.util.TreeMap<String, Integer> m = new java.util.TreeMap<>(this.vars);
+            for (Map.Entry<String, Integer> entry : o.vars.entrySet()) {
+                int numExp = m.getOrDefault(entry.getKey(), 0);
+                int denExp = entry.getValue();
+                if (numExp < denExp) return null;
+                if (numExp == denExp) m.remove(entry.getKey());
+                else m.put(entry.getKey(), numExp - denExp);
             }
             return new Monomial(m);
         }
@@ -3223,12 +3788,29 @@ public final class CalculatorEngine {
         }
         if (node instanceof AstDiv) {
             java.util.TreeMap<Monomial, ExactRat> l = astToPoly(((AstDiv) node).left);
+            if (l == null) return null;
             ExactRat scalar = AstNode.evalConstantRat(((AstDiv) node).right);
-            if (l == null || scalar == null || scalar.num.signum() == 0) return null;
+            if (scalar != null) {
+                if (scalar.num.signum() == 0) return null;
+                java.util.TreeMap<Monomial, ExactRat> res = new java.util.TreeMap<>();
+                for (Map.Entry<Monomial, ExactRat> e : l.entrySet()) {
+                    ExactRat c = e.getValue().div(scalar);
+                    if (c.num.signum() != 0) res.put(e.getKey(), c);
+                }
+                return res;
+            }
+            java.util.TreeMap<Monomial, ExactRat> r = astToPoly(((AstDiv) node).right);
+            if (r == null || r.size() != 1) return null;
+            Map.Entry<Monomial, ExactRat> denEntry = r.entrySet().iterator().next();
+            Monomial denMon = denEntry.getKey();
+            ExactRat denCoeff = denEntry.getValue();
+            if (denCoeff.num.signum() == 0) return null;
             java.util.TreeMap<Monomial, ExactRat> res = new java.util.TreeMap<>();
             for (Map.Entry<Monomial, ExactRat> e : l.entrySet()) {
-                ExactRat c = e.getValue().div(scalar);
-                if (c.num.signum() != 0) res.put(e.getKey(), c);
+                Monomial qMon = e.getKey().divideBy(denMon);
+                if (qMon == null) return null;
+                ExactRat c = e.getValue().div(denCoeff);
+                if (c.num.signum() != 0) res.put(qMon, c);
             }
             return res;
         }
@@ -3242,7 +3824,7 @@ public final class CalculatorEngine {
             } catch (ArithmeticException e) {
                 return null;
             }
-            if (expVal > 32) return null;
+            if (expVal > 64) return null;
             java.util.TreeMap<Monomial, ExactRat> base = astToPoly(p.base);
             if (base == null) return null;
             java.util.TreeMap<Monomial, ExactRat> res = new java.util.TreeMap<>();
@@ -3275,7 +3857,7 @@ public final class CalculatorEngine {
     private static java.util.TreeMap<Monomial, ExactRat> mulPoly(
             java.util.TreeMap<Monomial, ExactRat> l,
             java.util.TreeMap<Monomial, ExactRat> r) {
-        if ((long) l.size() * (long) r.size() > 2048) return null;
+        if ((long) l.size() * (long) r.size() > 4096) return null;
         java.util.TreeMap<Monomial, ExactRat> res = new java.util.TreeMap<>();
         for (Map.Entry<Monomial, ExactRat> el : l.entrySet()) {
             checkInterrupted();
@@ -3379,8 +3961,27 @@ public final class CalculatorEngine {
         return false;
     }
 
+    private static int countNumericLiterals(AstNode node) {
+        if (node instanceof AstNum) return 1;
+        if (node instanceof AstNeg) return countNumericLiterals(((AstNeg) node).inner);
+        if (node instanceof AstAdd) return countNumericLiterals(((AstAdd) node).left) + countNumericLiterals(((AstAdd) node).right);
+        if (node instanceof AstSub) return countNumericLiterals(((AstSub) node).left) + countNumericLiterals(((AstSub) node).right);
+        if (node instanceof AstMul) return countNumericLiterals(((AstMul) node).left) + countNumericLiterals(((AstMul) node).right);
+        if (node instanceof AstDiv) return countNumericLiterals(((AstDiv) node).left) + countNumericLiterals(((AstDiv) node).right);
+        if (node instanceof AstPow) return countNumericLiterals(((AstPow) node).base) + countNumericLiterals(((AstPow) node).exp);
+        if (node instanceof AstFunc) {
+            int sum = 0;
+            for (AstNode arg : ((AstFunc) node).args) sum += countNumericLiterals(arg);
+            return sum;
+        }
+        return 0;
+    }
+
     private static boolean canSimplifyAsPolynomial(AstNode node) {
-        return containsAddOrSub(node) || countVarOccurrences(node) >= 2 || hasCompoundPowerBase(node);
+        return containsAddOrSub(node)
+                || countVarOccurrences(node) >= 2
+                || hasCompoundPowerBase(node)
+                || countNumericLiterals(node) >= 2;
     }
 
     public static AstNode simplifyPolynomialAst(AstNode node) {
@@ -3713,7 +4314,9 @@ public final class CalculatorEngine {
         AstNode simplified = simplifyPolynomialAst(ast);
         if (simplified != null) {
             String res = simplified.toDisplayString();
-            return new Result(0.0, res, res);
+            double numVal = 0.0;
+            try { numVal = Double.parseDouble(res); } catch (Exception ignored) {}
+            return new Result(numVal, res, res);
         }
         return null;
     }
@@ -3727,7 +4330,7 @@ public final class CalculatorEngine {
 
         // Scientific notation for very small (< 1e-6) or large (>= 1e12) values
         if (absV >= 1e12 || absV < 1e-6) {
-            String s = String.format(Locale.US, "%.8g", v);
+            String s = String.format(Locale.US, "%.12g", v);
             if (s.contains("e") || s.contains("E")) {
                 String[] p = s.split("[eE]");
                 String mantissa = trimTrailingZeros(p[0]);

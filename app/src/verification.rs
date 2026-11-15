@@ -168,10 +168,10 @@ pub fn run_all_verification_checks() -> Vec<VerificationCheck> {
 
     // 7. Original App Bug #1: Swapped Proton/Neutron Masses & Wrong Unit Exponent (10^-24 g vs 10^-27 kg)
     {
-        // Fixed SI masses: m_p = 1.6726e-27 kg < m_n = 1.6749e-27 kg (previously swapped and in grams in original APK).
+        // Fixed SI masses (CODATA 2018/2022): m_p = 1.67262192369e-27 kg < m_n = 1.67492749804e-27 kg.
         let mp_lt_mn_kg = MASS_PROTON < MASS_NEUTRON
-            && (MASS_PROTON - 1.6726e-27).abs() < 1e-32
-            && (MASS_NEUTRON - 1.6749e-27).abs() < 1e-32;
+            && (MASS_PROTON - 1.67262192369e-27).abs() < 1e-36
+            && (MASS_NEUTRON - 1.67492749804e-27).abs() < 1e-36;
         results.push(VerificationCheck {
             id: "ORIG-BUG-01",
             category: "Original-App Fehler #1 (Physikalische Konstanten)",
@@ -216,18 +216,18 @@ pub fn run_all_verification_checks() -> Vec<VerificationCheck> {
         let const_count = SCIENTIFIC_CONSTANTS.len();
         let ok = const_count == 32
             && (SPEED_OF_LIGHT - 299792458.0).abs() < 1e-3
-            && (GRAVITATION_CONST - 6.6738e-11).abs() < 1e-16
-            && (PLANCK_CONSTANT - 6.6261e-34).abs() < 1e-40
-            && (BOLTZMANN_CONST - 1.3806e-23).abs() < 1e-29
-            && (GRAVITATIONAL_ACCELERATION - 9.8067).abs() < 1e-6
-            && (ELECTRON_CHARGE - 1.6022e-19).abs() < 1e-25
-            && (IMPEDANCE_VACUUM - 376.73).abs() < 1e-4
-            && (VON_KLITZING_CONST - 25813.0).abs() < 1e-3
-            && (STEFAN_BOLTZMANN_CONST - 5.6704e-8).abs() < 1e-14
-            && (AVOGADRO_CONST - 6.0221e23).abs() < 1e18
-            && (FARADAY_CONST - 96485.0).abs() < 1e-3
-            && (MOLAR_GAS_CONSTANT - 8.3145).abs() < 1e-6
-            && (MASS_ELECTRON - 9.1094e-31).abs() < 1e-36
+            && (GRAVITATION_CONST - 6.67430e-11).abs() < 1e-16
+            && (PLANCK_CONSTANT - 6.62607015e-34).abs() < 1e-42
+            && (BOLTZMANN_CONST - 1.380649e-23).abs() < 1e-30
+            && (GRAVITATIONAL_ACCELERATION - 9.80665).abs() < 1e-8
+            && (ELECTRON_CHARGE - 1.602176634e-19).abs() < 1e-28
+            && (IMPEDANCE_VACUUM - 376.730313668).abs() < 1e-8
+            && (VON_KLITZING_CONST - 25812.80745).abs() < 1e-5
+            && (STEFAN_BOLTZMANN_CONST - 5.670374419e-8).abs() < 1e-16
+            && (AVOGADRO_CONST - 6.02214076e23).abs() < 1e15
+            && (FARADAY_CONST - 96485.3321233100184).abs() < 1e-8
+            && (MOLAR_GAS_CONSTANT - 8.31446261815324).abs() < 1e-12
+            && (MASS_ELECTRON - 9.1093837015e-31).abs() < 1e-39
             && (PERCENT_VAR - 0.01).abs() < 1e-9;
         results.push(VerificationCheck {
             id: "ORIG-BUG-03",

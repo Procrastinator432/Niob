@@ -15,8 +15,364 @@ use crate::constants::{
     KEYBOARD_SECTION_BAR_HEIGHT, PLOTTER_AXIS_LABEL_SIZE, PLOTTER_MAJOR_GRID_STROKE,
     PLOTTER_MINOR_GRID_STROKE, SCIENTIFIC_CONSTANTS, SYMBOLIC_WATCHDOG_TIMEOUT_MS, USER_VARIABLES,
 };
-use crate::engine::{AngleMode, MathEngine, NumberFormatMode, Value};
+use crate::engine::{AngleMode, Complex, EvalOutput, MathEngine, NumberFormatMode, Value};
 use crate::theme::{AccentSeed, MaterialYouPalette, ThemeMode};
+
+mod state_json {
+    use super::{AngleMode, Complex, HistoryItem, MathEngine, Value, USER_VARIABLES};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    pub(super) fn state_file_path() -> Option<PathBuf> {
+        #[cfg(target_os = "windows")]
+        let base = std::env::var_os("LOCALAPPDATA")
+            .or_else(|| std::env::var_os("APPDATA"))
+            .map(PathBuf::from);
+        #[cfg(target_os = "macos")]
+        let base = std::env::var_os("HOME")
+            .map(|h| PathBuf::from(h).join("Library/Application Support"));
+        #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+        let base = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")));
+        base.map(|dir| dir.join("niob_calculator").join("state.json"))
+    }
+
+    fn json_escape(s: &str, out: &mut String) {
+        out.push('"');
+        for ch in s.chars() {
+            match ch {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if (c as u32) < 0x20 => {
+                    out.push_str(&format!("\\u{:04x}", c as u32));
+                }
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+    }
+
+    fn push_value_json(v: Value, out: &mut String) {
+        let re = if v.c.re.is_finite() { v.c.re } else { 0.0 };
+        let im = if v.c.im.is_finite() { v.c.im } else { 0.0 };
+        out.push_str("{\"re\":");
+        out.push_str(&format!("{re:?}"));
+        out.push_str(",\"im\":");
+        out.push_str(&format!("{im:?}"));
+        out.push_str(",\"rat\":");
+        if let Some(r) = v.rat {
+            json_escape(&format!("{}/{}", r.num, r.den), out);
+        } else {
+            out.push_str("null");
+        }
+        out.push('}');
+    }
+
+    pub(super) fn save_state_to_disk(engine: &MathEngine, history: &[HistoryItem]) {
+        let Some(path) = state_file_path() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                return;
+            }
+        }
+        let mut out = String::from("{\n  \"angle_mode\": ");
+        json_escape(
+            match engine.angle_mode {
+                AngleMode::Radians => "radians",
+                AngleMode::Degrees => "degrees",
+            },
+            &mut out,
+        );
+        out.push_str(",\n  \"modulo_always_positive\": ");
+        out.push_str(if engine.modulo_always_positive { "true" } else { "false" });
+        out.push_str(",\n  \"ans\": ");
+        push_value_json(engine.ans, &mut out);
+        out.push_str(",\n  \"variables\": {");
+        let mut first_var = true;
+        for &name in &USER_VARIABLES {
+            if let Some(&val) = engine.variables.get(name) {
+                if !first_var {
+                    out.push(',');
+                }
+                first_var = false;
+                out.push_str("\n    ");
+                json_escape(name, &mut out);
+                out.push_str(": ");
+                push_value_json(val, &mut out);
+            }
+        }
+        out.push_str("\n  },\n  \"history\": [");
+        for (idx, item) in history.iter().enumerate() {
+            if idx > 0 {
+                out.push(',');
+            }
+            out.push_str("\n    {\"raw_input\":");
+            json_escape(&item.raw_input, &mut out);
+            out.push_str(",\"exact_result\":");
+            json_escape(&item.exact_result, &mut out);
+            out.push_str(",\"decimal_result\":");
+            json_escape(&item.decimal_result, &mut out);
+            out.push_str(",\"reusable_result\":");
+            json_escape(&item.reusable_result, &mut out);
+            out.push_str(",\"has_distinct_exact\":");
+            out.push_str(if item.has_distinct_exact { "true" } else { "false" });
+            out.push_str(",\"showing_exact\":");
+            out.push_str(if item.showing_exact { "true" } else { "false" });
+            out.push_str(",\"is_error\":");
+            out.push_str(if item.is_error { "true" } else { "false" });
+            out.push('}');
+        }
+        out.push_str("\n  ]\n}\n");
+        let _ = std::fs::write(path, out);
+    }
+
+    enum JsonVal {
+        Null,
+        Bool(bool),
+        Num(f64),
+        Str(String),
+        Arr(Vec<JsonVal>),
+        Obj(Vec<(String, JsonVal)>),
+    }
+
+    impl JsonVal {
+        fn get(&self, key: &str) -> Option<&JsonVal> {
+            let Self::Obj(entries) = self else { return None };
+            entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+        }
+        fn as_str(&self) -> Option<&str> {
+            match self { Self::Str(s) => Some(s.as_str()), _ => None }
+        }
+        fn as_bool(&self) -> Option<bool> {
+            match self { Self::Bool(b) => Some(*b), _ => None }
+        }
+        fn as_f64(&self) -> Option<f64> {
+            match self { Self::Num(n) if n.is_finite() => Some(*n), _ => None }
+        }
+    }
+
+    struct Parser<'a> {
+        bytes: &'a [u8],
+        pos: usize,
+    }
+
+    impl<'a> Parser<'a> {
+        fn skip_ws(&mut self) {
+            while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_whitespace() {
+                self.pos += 1;
+            }
+        }
+        fn parse_value(&mut self, depth: usize) -> Option<JsonVal> {
+            if depth > 64 {
+                return None;
+            }
+            self.skip_ws();
+            let b = *self.bytes.get(self.pos)?;
+            match b {
+                b'{' => self.parse_obj(depth + 1),
+                b'[' => self.parse_arr(depth + 1),
+                b'"' => Some(JsonVal::Str(self.parse_str()?)),
+                b't' if self.bytes[self.pos..].starts_with(b"true") => {
+                    self.pos += 4;
+                    Some(JsonVal::Bool(true))
+                }
+                b'f' if self.bytes[self.pos..].starts_with(b"false") => {
+                    self.pos += 5;
+                    Some(JsonVal::Bool(false))
+                }
+                b'n' if self.bytes[self.pos..].starts_with(b"null") => {
+                    self.pos += 4;
+                    Some(JsonVal::Null)
+                }
+                b'-' | b'0'..=b'9' => self.parse_num(),
+                _ => None,
+            }
+        }
+        fn parse_str(&mut self) -> Option<String> {
+            if *self.bytes.get(self.pos)? != b'"' {
+                return None;
+            }
+            self.pos += 1;
+            let mut s = String::new();
+            while self.pos < self.bytes.len() {
+                let b = self.bytes[self.pos];
+                if b == b'"' {
+                    self.pos += 1;
+                    return Some(s);
+                }
+                if b == b'\\' {
+                    self.pos += 1;
+                    let esc = *self.bytes.get(self.pos)?;
+                    self.pos += 1;
+                    match esc {
+                        b'"' => s.push('"'),
+                        b'\\' => s.push('\\'),
+                        b'/' => s.push('/'),
+                        b'b' => s.push('\u{0008}'),
+                        b'f' => s.push('\u{000C}'),
+                        b'n' => s.push('\n'),
+                        b'r' => s.push('\r'),
+                        b't' => s.push('\t'),
+                        b'u' => {
+                            let hex = std::str::from_utf8(self.bytes.get(self.pos..self.pos + 4)?).ok()?;
+                            self.pos += 4;
+                            let code = u32::from_str_radix(hex, 16).ok()?;
+                            s.push(char::from_u32(code)?);
+                        }
+                        _ => return None,
+                    }
+                } else if b < 0x80 {
+                    s.push(b as char);
+                    self.pos += 1;
+                } else {
+                    let tail = std::str::from_utf8(&self.bytes[self.pos..]).ok()?;
+                    let ch = tail.chars().next()?;
+                    s.push(ch);
+                    self.pos += ch.len_utf8();
+                }
+            }
+            None
+        }
+        fn parse_num(&mut self) -> Option<JsonVal> {
+            let start = self.pos;
+            while self.pos < self.bytes.len() {
+                match self.bytes[self.pos] {
+                    b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9' => self.pos += 1,
+                    _ => break,
+                }
+            }
+            let txt = std::str::from_utf8(&self.bytes[start..self.pos]).ok()?;
+            let n = txt.parse::<f64>().ok()?;
+            Some(JsonVal::Num(n))
+        }
+        fn parse_arr(&mut self, depth: usize) -> Option<JsonVal> {
+            self.pos += 1;
+            let mut items = Vec::new();
+            self.skip_ws();
+            if self.bytes.get(self.pos) == Some(&b']') {
+                self.pos += 1;
+                return Some(JsonVal::Arr(items));
+            }
+            loop {
+                items.push(self.parse_value(depth)?);
+                self.skip_ws();
+                match *self.bytes.get(self.pos)? {
+                    b',' => self.pos += 1,
+                    b']' => {
+                        self.pos += 1;
+                        return Some(JsonVal::Arr(items));
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        fn parse_obj(&mut self, depth: usize) -> Option<JsonVal> {
+            self.pos += 1;
+            let mut entries = Vec::new();
+            self.skip_ws();
+            if self.bytes.get(self.pos) == Some(&b'}') {
+                self.pos += 1;
+                return Some(JsonVal::Obj(entries));
+            }
+            loop {
+                self.skip_ws();
+                let key = self.parse_str()?;
+                self.skip_ws();
+                if *self.bytes.get(self.pos)? != b':' {
+                    return None;
+                }
+                self.pos += 1;
+                let val = self.parse_value(depth)?;
+                entries.push((key, val));
+                self.skip_ws();
+                match *self.bytes.get(self.pos)? {
+                    b',' => self.pos += 1,
+                    b'}' => {
+                        self.pos += 1;
+                        return Some(JsonVal::Obj(entries));
+                    }
+                    _ => return None,
+                }
+            }
+        }
+    }
+
+    fn decode_value(jv: &JsonVal) -> Option<Value> {
+        if let Some(rat_str) = jv.get("rat").and_then(JsonVal::as_str) {
+            if let Some((n_s, d_s)) = rat_str.split_once('/') {
+                if let (Ok(n), Ok(d)) = (n_s.parse::<i128>(), d_s.parse::<i128>()) {
+                    if let Some(v) = Value::from_rat(n, d) {
+                        return Some(v);
+                    }
+                }
+            }
+        }
+        let re = jv.get("re").and_then(JsonVal::as_f64)?;
+        let im = jv.get("im").and_then(JsonVal::as_f64).unwrap_or(0.0);
+        Some(Value::from_complex(Complex::new(re, im)))
+    }
+
+    pub(super) fn load_state_from_disk(engine: &mut MathEngine, history: &mut Vec<HistoryItem>) {
+        let Some(path) = state_file_path() else {
+            return;
+        };
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let mut parser = Parser { bytes: raw.as_bytes(), pos: 0 };
+        let Some(root) = parser.parse_value(0) else {
+            return;
+        };
+        if let Some(am) = root.get("angle_mode").and_then(JsonVal::as_str) {
+            engine.angle_mode = if am == "degrees" { AngleMode::Degrees } else { AngleMode::Radians };
+        }
+        if let Some(mp) = root.get("modulo_always_positive").and_then(JsonVal::as_bool) {
+            engine.modulo_always_positive = mp;
+        }
+        if let Some(ans_val) = root.get("ans").and_then(decode_value) {
+            engine.ans = ans_val;
+        }
+        if let Some(JsonVal::Obj(vars)) = root.get("variables") {
+            let mut loaded_vars = HashMap::new();
+            for (k, v) in vars {
+                if USER_VARIABLES.contains(&k.as_str()) {
+                    if let Some(decoded) = decode_value(v) {
+                        loaded_vars.insert(k.clone(), decoded);
+                    }
+                }
+            }
+            engine.variables = loaded_vars;
+        }
+        if let Some(JsonVal::Arr(items)) = root.get("history") {
+            history.clear();
+            for entry in items {
+                let Some(raw_input) = entry.get("raw_input").and_then(JsonVal::as_str) else { continue };
+                let exact_result = entry.get("exact_result").and_then(JsonVal::as_str).unwrap_or("").to_string();
+                let decimal_result = entry.get("decimal_result").and_then(JsonVal::as_str).unwrap_or("").to_string();
+                let reusable_result = entry.get("reusable_result").and_then(JsonVal::as_str).unwrap_or("").to_string();
+                let has_distinct_exact = entry.get("has_distinct_exact").and_then(JsonVal::as_bool).unwrap_or(false);
+                let showing_exact = entry.get("showing_exact").and_then(JsonVal::as_bool).unwrap_or(true);
+                let is_error = entry.get("is_error").and_then(JsonVal::as_bool).unwrap_or(false);
+                history.push(HistoryItem {
+                    raw_input: raw_input.to_string(),
+                    exact_result,
+                    decimal_result,
+                    reusable_result,
+                    has_distinct_exact,
+                    showing_exact,
+                    is_error,
+                    integration_report: None,
+                });
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MainTab {
@@ -219,6 +575,11 @@ struct NiobCalculatorApp {
     unit_to_idx: usize,
     unit_input_str: String,
 
+    // Preview evaluation cache
+    eval_revision: u64,
+    preview_cache_key: Option<(String, AngleMode, bool, u64)>,
+    preview_cache_result: Option<Result<EvalOutput, String>>,
+
     // Screenshot automation
     screenshot_path: Option<PathBuf>,
     frame_count: u32,
@@ -229,35 +590,41 @@ impl NiobCalculatorApp {
     fn new(screenshot_path: Option<PathBuf>) -> Self {
         let mut engine = MathEngine::default();
         let mut history = Vec::new();
+        let mut input_expr = String::new();
 
-        // Populate initial history with representative scientific expressions
-        let samples = [
-            "1/3 + 1/6",
-            "sin(pi / 3)",
-            "int(x^2, x, 0, 3)",
-            "sum(k^2, k, 1, 10)",
-            "det([[4, 2], [1, 3]])",
-        ];
-        for s in samples {
-            if let Ok(out) = engine.evaluate_and_commit(s) {
-                history.push(HistoryItem {
-                    raw_input: s.to_string(),
-                    reusable_result: out.reusable_expression(),
-                    exact_result: out.exact_text,
-                    decimal_result: out.decimal_text,
-                    has_distinct_exact: out.has_distinct_exact,
-                    showing_exact: engine.show_exact_first,
-                    is_error: false,
-                    integration_report: out.integration_report,
-                });
+        if screenshot_path.is_some() {
+            // Populate initial history with representative scientific expressions
+            let samples = [
+                "1/3 + 1/6",
+                "sin(pi / 3)",
+                "int(x^2, x, 0, 3)",
+                "sum(k^2, k, 1, 10)",
+                "det([[4, 2], [1, 3]])",
+            ];
+            for s in samples {
+                if let Ok(out) = engine.evaluate_and_commit(s) {
+                    history.push(HistoryItem {
+                        raw_input: s.to_string(),
+                        reusable_result: out.reusable_expression(),
+                        exact_result: out.exact_text,
+                        decimal_result: out.decimal_text,
+                        has_distinct_exact: out.has_distinct_exact,
+                        showing_exact: engine.show_exact_first,
+                        is_error: false,
+                        integration_report: out.integration_report,
+                    });
+                }
             }
+            input_expr = "sqrt(2)/2 + sin(pi/4)".to_string();
+        } else {
+            state_json::load_state_from_disk(&mut engine, &mut history);
         }
 
         let keyboard_slots = DEFAULT_KEYBOARD_SLOTS.map(|s| s.to_string());
 
         Self {
             engine,
-            input_expr: "sqrt(2)/2 + sin(pi/4)".to_string(),
+            input_expr,
             history,
             active_tab: MainTab::Calculator,
             active_section: KeyboardSection::Operators,
@@ -298,9 +665,19 @@ impl NiobCalculatorApp {
             unit_from_idx: 0,
             unit_to_idx: 1,
             unit_input_str: "1250".to_string(),
+            eval_revision: 0,
+            preview_cache_key: None,
+            preview_cache_result: None,
             screenshot_path,
             frame_count: 0,
             screenshot_requested: false,
+        }
+    }
+
+    fn mark_state_dirty(&mut self) {
+        self.eval_revision = self.eval_revision.wrapping_add(1);
+        if self.screenshot_path.is_none() {
+            state_json::save_state_to_disk(&self.engine, &self.history);
         }
     }
 
@@ -373,6 +750,7 @@ impl NiobCalculatorApp {
                 });
             }
         }
+        self.mark_state_dirty();
     }
 
     fn handle_keyboard_input(&mut self, ctx: &egui::Context) {
@@ -580,6 +958,7 @@ impl NiobCalculatorApp {
                         AngleMode::Radians => AngleMode::Degrees,
                         AngleMode::Degrees => AngleMode::Radians,
                     };
+                    self.mark_state_dirty();
                 }
             });
         });
@@ -704,6 +1083,7 @@ impl NiobCalculatorApp {
                                 .clicked()
                         {
                             self.history.clear();
+                            self.mark_state_dirty();
                         }
                     });
                 });
@@ -924,6 +1304,7 @@ impl NiobCalculatorApp {
                         }
                         if let Some(i) = delete_idx {
                             self.history.remove(i);
+                            self.mark_state_dirty();
                         }
                     });
             });
@@ -1002,7 +1383,17 @@ impl NiobCalculatorApp {
                             .color(pal.on_surface_variant),
                         );
                     } else {
-                        match self.engine.evaluate_preview(&raw, false) {
+                        let key = (
+                            raw,
+                            self.engine.angle_mode,
+                            self.engine.modulo_always_positive,
+                            self.eval_revision,
+                        );
+                        if self.preview_cache_key.as_ref() != Some(&key) {
+                            self.preview_cache_result = Some(self.engine.evaluate_preview(&key.0, false));
+                            self.preview_cache_key = Some(key);
+                        }
+                        match self.preview_cache_result.as_ref().unwrap() {
                             Ok(preview) => {
                                 ui.label(
                                     RichText::new(format!("exact: {}", preview.exact_text))
@@ -1318,6 +1709,7 @@ impl NiobCalculatorApp {
                         },
                     ) {
                         self.engine.angle_mode = AngleMode::Radians;
+                        self.mark_state_dirty();
                     }
                     if Self::key_btn(
                         &mut cols[1],
@@ -1339,6 +1731,7 @@ impl NiobCalculatorApp {
                         },
                     ) {
                         self.engine.angle_mode = AngleMode::Degrees;
+                        self.mark_state_dirty();
                     }
                 });
 
@@ -1918,10 +2311,18 @@ impl NiobCalculatorApp {
                         .clicked()
                     {
                         if let Ok(out) = self.engine.evaluate_preview(&self.var_edit_value, false) {
-                            if let Some(c) = out.numeric_value {
+                            if let Some(val) = out.val {
+                                self.engine
+                                    .variables
+                                    .insert(self.var_edit_name.clone(), val);
+                                self.engine.matrix_variables.remove(&self.var_edit_name);
+                                self.mark_state_dirty();
+                            } else if let Some(c) = out.numeric_value {
                                 self.engine
                                     .variables
                                     .insert(self.var_edit_name.clone(), Value::from_complex(c));
+                                self.engine.matrix_variables.remove(&self.var_edit_name);
+                                self.mark_state_dirty();
                             }
                         }
                     }
@@ -1934,6 +2335,8 @@ impl NiobCalculatorApp {
                         .clicked()
                     {
                         self.engine.variables.remove(&self.var_edit_name);
+                        self.engine.matrix_variables.remove(&self.var_edit_name);
+                        self.mark_state_dirty();
                     }
                 });
             });
@@ -2317,14 +2720,19 @@ impl NiobCalculatorApp {
                                 "Show exact results (fractions, π, surds) first in history"
                             },
                         );
-                        ui.checkbox(
-                            &mut self.engine.modulo_always_positive,
-                            if self.german_ui {
-                                "Modulo-Ergebnis immer positiv (a mod b ≥ 0)"
-                            } else {
-                                "Modulo result always positive (a mod b ≥ 0)"
-                            },
-                        );
+                        if ui
+                            .checkbox(
+                                &mut self.engine.modulo_always_positive,
+                                if self.german_ui {
+                                    "Modulo-Ergebnis immer positiv (a mod b ≥ 0)"
+                                } else {
+                                    "Modulo result always positive (a mod b ≥ 0)"
+                                },
+                            )
+                            .changed()
+                        {
+                            self.mark_state_dirty();
+                        }
                         ui.checkbox(
                             &mut self.engine.auto_ans_insertion,
                             if self.german_ui {

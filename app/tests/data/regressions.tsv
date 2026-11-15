@@ -24,8 +24,8 @@ symbolic	y+y	y+y	exact	2*y|2y	0	0
 symbolic_derivative	deriv(x^3,x)	d(x^3,x)	exact	3*x^2|3x^2	0	0
 indefinite_integral	integral(x^2,x)	integral(x^2,x)	exact	x^3/3|1/3*x^3|x^3*(1/3)	0	0
 small_number	1/100000000000000000000	1/100000000000000000000	number	1e-20	0	1e-8
-planck	h	h	number	6.6261e-34	0	1e-8
-tiny_product	h*10000000000000000000000000000000000	h*10000000000000000000000000000000000	number	6.6261	1e-8	1e-8
+planck	h	h	number	6.62607015e-34	0	1e-12
+tiny_product	h*10000000000000000000000000000000000	h*10000000000000000000000000000000000	number	6.62607015	1e-8	1e-8
 large_integer	9007199254740993-9007199254740992	9007199254740993-9007199254740992	number	1	0	0
 false_exact	1666666667/5000000000	1666666667/5000000000	exact	1666666667/5000000000	0	0
 root_exact	sqrt(8)	sqrt(8)	exact	2√2|2*sqrt(2)|2*2^(1/2)	0	0
@@ -70,7 +70,7 @@ binomial_fractional	binomial(5.5,2)	binomial(5.5,2)	number	12.375	1e-12	1e-12
 sum_non_integer_bound	sum(k,k,1,2.5)	sum(k,k,1,2.5)	error	Non-integer sum bounds must be rejected	0	0
 deriv_domain_boundary	deriv(sqrt(x),x,0)	d(sqrt(x),x,0)	error	Derivative at domain boundary must be rejected	0	0
 multivar_poly_expand	(y+1)^2	(y+1)^2	exact	y^2+2*y+1|1+2*y+y^2|y^2+2y+1	0	0
-proton_less_than_neutron	m_n-m_p	m_n-m_p	number	2.3e-30	1e-35	1e-6
+proton_less_than_neutron	m_n-m_p	m_n-m_p	number	2.30557435e-30	1e-36	1e-8
 integral_wide_exp	int(exp(-x),x,0,10000)	defint(exp(-x),x,0,10000)	number	1	1e-8	1e-8
 integral_very_wide_exp	int(exp(-x),x,0,1000000)	defint(exp(-x),x,0,1000000)	number	1	1e-8	1e-8
 integral_gaussian_wide	int(exp(-x^2),x,-1000,1000)	defint(exp(-x^2),x,-1000,1000)	number	1.772453850905516	1e-8	1e-8
@@ -94,3 +94,25 @@ codata_c0_mu0_eps0	c0^2*mu0*eps0	c0^2*mu0*eps0	number	1	1e-10	1e-10
 deriv_sqrt_tiny	deriv(sqrt(x),x,0.0001)	d(sqrt(x),x,0.0001)	number	50	1e-6	1e-6
 deriv_sqrt_small	deriv(sqrt(x),x,0.001)	d(sqrt(x),x,0.001)	number	15.811388300841896	1e-6	1e-6
 matrix_power_10	[[1,1],[1,0]]^10	[[1,1],[1,0]]^10	exact	[[89,55],[55,34]]	0	0
+codata_na_kb_r	N_A*k_B-R	N_A*k_B-R	number	0	1e-22	0
+codata_sigma	sigma	sigma	number	5.670374419e-8	0	1e-9
+codata_amu	u	u	number	1.66053906660e-27	0	1e-11
+deriv_tiny_sin	deriv(sin(x),x,1e-9)	d(sin(x),x,1e-9)	number	1	1e-9	1e-10
+deriv_tiny_exp	deriv(exp(x),x,1e-9)	d(exp(x),x,1e-9)	number	1.000000001	1e-11	1e-10
+deriv_pow3_cancel	deriv(x^3,x,1e-4)	d(x^3,x,1e-4)	number	3e-8	1e-15	1e-6
+deriv_sqrt_1e_neg8	deriv(sqrt(x),x,1e-8)	d(sqrt(x),x,1e-8)	number	5000	1e-6	1e-8
+deriv_ln_1e6	deriv(ln(x),x,1e6)	d(ln(x),x,1e6)	number	1e-6	1e-15	1e-9
+matrix_overflow_err	[[1e200,0],[0,1]]*[[1e200,0],[0,1]]	[[1e200,0],[0,1]]*[[1e200,0],[0,1]]	error	Matrix overflow must fail explicitly	0	0
+matrix_det_sq	det([[1,2],[3,4]])*det([[1,2],[3,4]])	det([[1,2],[3,4]])*det([[1,2],[3,4]])	number	4	1e-12	1e-10
+matrix_illcond_inv_det	det([[1,1],[1,1.00000001]]*inv([[1,1],[1,1.00000001]]))	det([[1,1],[1,1.00000001]]*inv([[1,1],[1,1.00000001]]))	number	1	1e-6	1e-6
+integral_narrow_peak_far	int(exp(-(x-774.6)^2),x,0,100000)	defint(exp(-(x-774.6)^2),x,0,100000)	number	1.772453850905516	1e-7	1e-7
+integral_osc_40000pi	int(cos(40000*pi*x),x,0,1)	defint(cos(40000*pi*x),x,0,1)	number	0	1e-10	0
+integral_nested_gaussian	int(int(exp(-(x^2+y^2)*10000),y,-10,10),x,-10,10)	defint(defint(exp(-(x^2+y^2)*10000),y,-10,10),x,-10,10)	number	0.0003141592653589793	1e-7	1e-4
+bigint_pow_mod	(3^300) mod 1000007	(3^300) mod 1000007	number	771541	0	0
+oversized_int_2_200	2^200-1	2^200-1	exact	1606938044258990275541962092341162602522202993782792835301375	0	0
+symbolic_int_recip_sqrt	integral(1/sqrt(x),x)	integral(1/sqrt(x),x)	symbolic_samples	1:2;4:4;9:6	1e-9	1e-9
+symbolic_int_tan	integral(tan(x),x)	integral(tan(x),x)	exact	-ln(cos(x))|-(ln(cos(x)))	0	0
+symbolic_int_sin_sq	integral(sin(x)^2,x)	integral(sin(x)^2,x)	exact	x/2-sin(2*x)/4|(x/2)-(sin(2*x)/4)	0	0
+symbolic_int_x_exp_x	integral(x*exp(x),x)	integral(x*exp(x),x)	exact	(x-1)*exp(x)|exp(x)*(x-1)	0	0
+poly_const_fold_2y3	2*y*3	2*y*3	exact	6*y|6y	0	0
+poly_cancel_y_div_y	y/y	y/y	exact	1	0	0

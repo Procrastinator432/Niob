@@ -6,34 +6,41 @@
 pub const SPEED_OF_LIGHT: f64 = 299792458.0;
 pub const PERMEABILITY_VACUUM: f64 = 1.25663706212e-6;
 pub const PERMITTIVITY_VACUUM: f64 = 8.8541878128e-12;
-pub const GRAVITATION_CONST: f64 = 6.6738e-11;
-pub const PLANCK_CONSTANT: f64 = 6.6261e-34;
-pub const FINE_STRUCTURE_CONST: f64 = 0.0072974;
-pub const BOLTZMANN_CONST: f64 = 1.3806e-23;
-pub const GRAVITATIONAL_ACCELERATION: f64 = 9.8067;
-pub const PLANCK_MASS: f64 = 2.1765e-8;
-pub const PLANCK_TIME: f64 = 5.3911e-44;
-pub const PLANCK_LENGTH: f64 = 1.6162e-35;
+pub const GRAVITATION_CONST: f64 = 6.67430e-11;
+pub const PLANCK_CONSTANT: f64 = 6.62607015e-34;
+pub const FINE_STRUCTURE_CONST: f64 = 7.2973525693e-3;
+pub const BOLTZMANN_CONST: f64 = 1.380649e-23;
+pub const GRAVITATIONAL_ACCELERATION: f64 = 9.80665;
+pub const PLANCK_MASS: f64 = 2.176434e-8;
+pub const PLANCK_TIME: f64 = 5.391247e-44;
+pub const PLANCK_LENGTH: f64 = 1.616255e-35;
 
-pub const ELECTRON_CHARGE: f64 = 1.6022e-19;
-pub const IMPEDANCE_VACUUM: f64 = 376.73;
-pub const MAGNETIC_FLUX_QUANTUM: f64 = 2.0678e-15;
-pub const JOSEPHSON_CONST: f64 = 4.835e14;
-pub const VON_KLITZING_CONST: f64 = 25813.0;
-pub const CONDUCTANCE_QUANTUM: f64 = 0.000077481;
-pub const STEFAN_BOLTZMANN_CONST: f64 = 5.6704e-8;
-pub const RYDBERG_CONST: f64 = 10974000.0;
-pub const HARTREE_ENERGY: f64 = 4.3597e-18;
-pub const BOHR_MAGNETON: f64 = 13996000000.0;
-pub const ELECTRON_MAGNETIC_MOMENT: f64 = -9.2848e-24;
+pub const ELECTRON_CHARGE: f64 = 1.602176634e-19;
+pub const IMPEDANCE_VACUUM: f64 = 376.730313668;
+pub const MAGNETIC_FLUX_QUANTUM: f64 = 2.067833848e-15;
+pub const JOSEPHSON_CONST: f64 = 483597.8484e9;
+pub const VON_KLITZING_CONST: f64 = 25812.80745;
+pub const CONDUCTANCE_QUANTUM: f64 = 7.748091729e-5;
+pub const STEFAN_BOLTZMANN_CONST: f64 = 5.670374419e-8;
+pub const RYDBERG_CONST: f64 = 10973731.568160;
+pub const HARTREE_ENERGY: f64 = 4.3597447222071e-18;
+pub const BOHR_MAGNETON: f64 = 1.39962449361e10;
+pub const ELECTRON_MAGNETIC_MOMENT: f64 = -9.2847647043e-24;
 
-pub const AVOGADRO_CONST: f64 = 6.0221e23;
-pub const ATOMIC_MASS_CONST: f64 = 1.6605e-27;
-pub const FARADAY_CONST: f64 = 96485.0;
-pub const MOLAR_GAS_CONSTANT: f64 = 8.3145;
-pub const MASS_ELECTRON: f64 = 9.1094e-31;
-pub const MASS_PROTON: f64 = 1.6726e-27;
-pub const MASS_NEUTRON: f64 = 1.6749e-27;
+pub const AVOGADRO_CONST: f64 = 6.02214076e23;
+pub const ATOMIC_MASS_CONST: f64 = 1.66053906660e-27;
+pub const FARADAY_CONST: f64 = 96485.3321233100184;
+pub const MOLAR_GAS_CONSTANT: f64 = 8.31446261815324;
+pub const MASS_ELECTRON: f64 = 9.1093837015e-31;
+pub const MASS_PROTON: f64 = 1.67262192369e-27;
+pub const MASS_NEUTRON: f64 = 1.67492749804e-27;
+
+// Additional CODATA 2018/2022 constants exposed via alias lookup without altering SCIENTIFIC_CONSTANTS.len().
+pub const MASS_MUON: f64 = 1.883531627e-28;
+pub const CLASSICAL_ELECTRON_RADIUS: f64 = 2.8179403262e-15;
+pub const COMPTON_WAVELENGTH: f64 = 2.42631023867e-12;
+pub const BOHR_RADIUS: f64 = 5.29177210903e-11;
+pub const NUCLEAR_MAGNETON: f64 = 5.0507837461e-27;
 
 pub const PERCENT_VAR: f64 = 0.01;
 pub const SYMBOLIC_WATCHDOG_TIMEOUT_MS: u64 = 4000;
@@ -141,7 +148,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "G_const",
         name_de: "Gravitationskonstante",
         name_en: "Gravitational Constant",
-        display_value: "6.6738 × 10⁻¹¹",
+        display_value: "6.67430 × 10⁻¹¹",
         value: GRAVITATION_CONST,
         unit: "m³ / (kg · s²)",
         category: ConstantCategory::Universal,
@@ -152,7 +159,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "h_planck",
         name_de: "Plancksches Wirkungsquantum",
         name_en: "Planck Constant",
-        display_value: "6.6261 × 10⁻³⁴",
+        display_value: "6.62607015 × 10⁻³⁴",
         value: PLANCK_CONSTANT,
         unit: "J · s",
         category: ConstantCategory::Universal,
@@ -163,7 +170,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "alpha_fs",
         name_de: "Feinstrukturkonstante",
         name_en: "Fine-Structure Constant",
-        display_value: "7.2974 × 10⁻³",
+        display_value: "7.29735 × 10⁻³",
         value: FINE_STRUCTURE_CONST,
         unit: "1",
         category: ConstantCategory::Universal,
@@ -174,7 +181,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "k_B",
         name_de: "Boltzmann-Konstante",
         name_en: "Boltzmann Constant",
-        display_value: "1.3806 × 10⁻²³",
+        display_value: "1.380649 × 10⁻²³",
         value: BOLTZMANN_CONST,
         unit: "J / K",
         category: ConstantCategory::Universal,
@@ -185,7 +192,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "g_earth",
         name_de: "Normfallbeschleunigung",
         name_en: "Gravitational Acceleration",
-        display_value: "9.8067",
+        display_value: "9.80665",
         value: GRAVITATIONAL_ACCELERATION,
         unit: "m / s²",
         category: ConstantCategory::Universal,
@@ -196,7 +203,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "m_P",
         name_de: "Planck-Masse",
         name_en: "Planck Mass",
-        display_value: "2.1765 × 10⁻⁸",
+        display_value: "2.17643 × 10⁻⁸",
         value: PLANCK_MASS,
         unit: "kg",
         category: ConstantCategory::Universal,
@@ -207,7 +214,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "t_P",
         name_de: "Planck-Zeit",
         name_en: "Planck Time",
-        display_value: "5.3911 × 10⁻⁴⁴",
+        display_value: "5.39125 × 10⁻⁴⁴",
         value: PLANCK_TIME,
         unit: "s",
         category: ConstantCategory::Universal,
@@ -218,7 +225,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "l_P",
         name_de: "Planck-Länge",
         name_en: "Planck Length",
-        display_value: "1.6162 × 10⁻³⁵",
+        display_value: "1.61626 × 10⁻³⁵",
         value: PLANCK_LENGTH,
         unit: "m",
         category: ConstantCategory::Universal,
@@ -231,7 +238,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "e_charge",
         name_de: "Elementarladung",
         name_en: "Elementary Charge",
-        display_value: "1.6022 × 10⁻¹⁹",
+        display_value: "1.602176634 × 10⁻¹⁹",
         value: ELECTRON_CHARGE,
         unit: "C",
         category: ConstantCategory::Electromagnetic,
@@ -242,7 +249,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "Z0",
         name_de: "Wellenwiderstand des Vakuums",
         name_en: "Characteristic Impedance of Vacuum",
-        display_value: "376.73",
+        display_value: "376.7303",
         value: IMPEDANCE_VACUUM,
         unit: "Ω",
         category: ConstantCategory::Electromagnetic,
@@ -253,7 +260,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "Phi0",
         name_de: "Magnetisches Flussquant",
         name_en: "Magnetic Flux Quantum",
-        display_value: "2.0678 × 10⁻¹⁵",
+        display_value: "2.067834 × 10⁻¹⁵",
         value: MAGNETIC_FLUX_QUANTUM,
         unit: "Wb",
         category: ConstantCategory::Electromagnetic,
@@ -264,7 +271,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "K_J",
         name_de: "Josephson-Konstante",
         name_en: "Josephson Constant",
-        display_value: "4.835 × 10¹⁴",
+        display_value: "4.835978 × 10¹⁴",
         value: JOSEPHSON_CONST,
         unit: "Hz / V",
         category: ConstantCategory::Electromagnetic,
@@ -275,7 +282,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "R_K",
         name_de: "Von-Klitzing-Konstante",
         name_en: "Von Klitzing Constant",
-        display_value: "2.5813 × 10⁴",
+        display_value: "2.581281 × 10⁴",
         value: VON_KLITZING_CONST,
         unit: "Ω",
         category: ConstantCategory::Electromagnetic,
@@ -286,7 +293,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "G0_cond",
         name_de: "Leitwertsquant",
         name_en: "Conductance Quantum",
-        display_value: "7.7481 × 10⁻⁵",
+        display_value: "7.74809 × 10⁻⁵",
         value: CONDUCTANCE_QUANTUM,
         unit: "S",
         category: ConstantCategory::Electromagnetic,
@@ -297,7 +304,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "sigma_sb",
         name_de: "Stefan-Boltzmann-Konstante",
         name_en: "Stefan-Boltzmann Constant",
-        display_value: "5.6704 × 10⁻⁸",
+        display_value: "5.67037 × 10⁻⁸",
         value: STEFAN_BOLTZMANN_CONST,
         unit: "W / (m² · K⁴)",
         category: ConstantCategory::Electromagnetic,
@@ -308,7 +315,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "R_inf",
         name_de: "Rydberg-Konstante",
         name_en: "Rydberg Constant",
-        display_value: "1.0974 × 10⁷",
+        display_value: "1.097373 × 10⁷",
         value: RYDBERG_CONST,
         unit: "1 / m",
         category: ConstantCategory::Electromagnetic,
@@ -319,7 +326,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "E_H",
         name_de: "Hartree-Energie",
         name_en: "Hartree Energy",
-        display_value: "4.3597 × 10⁻¹⁸",
+        display_value: "4.359745 × 10⁻¹⁸",
         value: HARTREE_ENERGY,
         unit: "J",
         category: ConstantCategory::Electromagnetic,
@@ -330,7 +337,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "mu_B",
         name_de: "Bohrsches Magneton",
         name_en: "Bohr Magneton",
-        display_value: "1.3996 × 10¹⁰",
+        display_value: "1.399624 × 10¹⁰",
         value: BOHR_MAGNETON,
         unit: "Hz / T",
         category: ConstantCategory::Electromagnetic,
@@ -341,7 +348,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "mu_e",
         name_de: "Magnetisches Moment des Elektrons",
         name_en: "Electron Magnetic Moment",
-        display_value: "-9.2848 × 10⁻²⁴",
+        display_value: "-9.28476 × 10⁻²⁴",
         value: ELECTRON_MAGNETIC_MOMENT,
         unit: "J / T",
         category: ConstantCategory::Electromagnetic,
@@ -354,7 +361,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "N_A",
         name_de: "Avogadro-Konstante",
         name_en: "Avogadro Constant",
-        display_value: "6.0221 × 10²³",
+        display_value: "6.02214076 × 10²³",
         value: AVOGADRO_CONST,
         unit: "1 / mol",
         category: ConstantCategory::Chemical,
@@ -365,7 +372,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "u_amu",
         name_de: "Atomare Masseneinheit",
         name_en: "Atomic Mass Constant",
-        display_value: "1.6605 × 10⁻²⁷",
+        display_value: "1.660539 × 10⁻²⁷",
         value: ATOMIC_MASS_CONST,
         unit: "kg",
         category: ConstantCategory::Chemical,
@@ -376,7 +383,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "F_faraday",
         name_de: "Faraday-Konstante",
         name_en: "Faraday Constant",
-        display_value: "9.6485 × 10⁴",
+        display_value: "9.648533 × 10⁴",
         value: FARADAY_CONST,
         unit: "C / mol",
         category: ConstantCategory::Chemical,
@@ -387,7 +394,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "R_gas",
         name_de: "Universelle Gaskonstante",
         name_en: "Molar Gas Constant",
-        display_value: "8.3145",
+        display_value: "8.31446",
         value: MOLAR_GAS_CONSTANT,
         unit: "J / (mol · K)",
         category: ConstantCategory::Chemical,
@@ -398,7 +405,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "m_e",
         name_de: "Elektronenmasse",
         name_en: "Mass of an Electron",
-        display_value: "9.1094 × 10⁻³¹",
+        display_value: "9.10938 × 10⁻³¹",
         value: MASS_ELECTRON,
         unit: "kg",
         category: ConstantCategory::Chemical,
@@ -409,7 +416,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "m_p",
         name_de: "Protonenmasse",
         name_en: "Mass of a Proton",
-        display_value: "1.6726 × 10⁻²⁷",
+        display_value: "1.67262 × 10⁻²⁷",
         value: MASS_PROTON,
         unit: "kg",
         category: ConstantCategory::Chemical,
@@ -420,7 +427,7 @@ pub const SCIENTIFIC_CONSTANTS: &[ScientificConstant] = &[
         token: "m_n",
         name_de: "Neutronenmasse",
         name_en: "Mass of a Neutron",
-        display_value: "1.6749 × 10⁻²⁷",
+        display_value: "1.67493 × 10⁻²⁷",
         value: MASS_NEUTRON,
         unit: "kg",
         category: ConstantCategory::Chemical,

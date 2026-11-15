@@ -375,7 +375,7 @@ public final class CalculatorRegressionTest {
             CalculatorEngine source = new CalculatorEngine();
             source.evaluateAndCommit("h");
             // A restart must preserve tiny nonzero values, without an absolute tolerance floor.
-            number(restoreAnswer(source).evaluate("ans"), 6.6261e-34, 0, 1e-12);
+            number(restoreAnswer(source).evaluate("ans"), 6.62607015e-34, 0, 1e-12);
         });
         add("persistence_tiny_variable", () -> {
             CalculatorEngine source = new CalculatorEngine();
@@ -569,6 +569,113 @@ public final class CalculatorRegressionTest {
                 rs.append(')');
             }
             rejects(() -> engine.evaluate(ls.toString() + "0" + rs.toString()));
+        });
+        add("self_checking_derivative_sweep_matches_symbolic", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            String[] funcs = {"sin(x)", "cos(x)", "exp(x)", "ln(x)", "sqrt(x)", "x^3", "tan(x)"};
+            double[][] points = {
+                    {1e-9, 1e-6, 1e-4, 0.5, 2.5, 100.0, 1e4, 1e6},
+                    {1e-9, 1e-6, 1e-4, 0.5, 2.5, 100.0, 1e4, 1e6},
+                    {1e-9, 1e-5, 0.5, 2.5, 5.0},
+                    {1e-4, 0.5, 2.5, 100.0, 1e4, 1e6},
+                    {1e-6, 1e-4, 0.5, 100.0, 1e4, 1e6},
+                    {1e-4, 1e-2, 0.5, 2.5, 100.0, 1e4},
+                    {1e-6, 0.25, 0.75, 1.2}
+            };
+            double[] relTols = {1e-5, 1e-5, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6};
+            for (int fi = 0; fi < funcs.length; fi++) {
+                String expr = funcs[fi];
+                String sym = engine.evaluate("deriv(" + expr + ",x)").exactText;
+                for (double x0 : points[fi]) {
+                    double actual = engine.evaluate("deriv(" + expr + ",x," + x0 + ")").value;
+                    double expected = engine.evaluateForX(sym, x0);
+                    close(actual, expected, 1e-11, relTols[fi]);
+                }
+            }
+        });
+        add("self_checking_matrix_identity_and_variables", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            String[] matrices = {
+                    "[[1,2],[3,4]]",
+                    "[[1e20,0],[0,1e-20]]",
+                    "[[1e-20,0],[0,1e20]]",
+                    "[[1e8,1],[1,2e-8]]",
+                    "[[1e10,1],[1,0]]"
+            };
+            for (String mat : matrices) {
+                CalculatorEngine.Result prod = engine.evaluate(mat + "*inv(" + mat + ")");
+                require(normalized(prod.decimalText).equals("[[1,0],[0,1]]"),
+                        "A*inv(A) failed for " + mat + ": " + prod.decimalText);
+                number(engine.evaluate("det(" + mat + "*inv(" + mat + "))"), 1.0, 1e-9, 1e-9);
+            }
+            engine.evaluateAndCommit("[[1,2],[3,4]]");
+            number(engine.evaluateAndCommit("det(ans)"), -2.0, 1e-12, 0.0);
+            engine.evaluateAndCommit("m := [[2,1],[5,3]]");
+            require(normalized(engine.evaluate("m * inv(m)").decimalText).equals("[[1,0],[0,1]]"),
+                    "m * inv(m) must be identity");
+            require(normalized(engine.evaluate("ans").decimalText).equals("[[2,1],[5,3]]"),
+                    "matrix ans must echo assigned matrix");
+            engine.evaluateAndCommit("unset(m)");
+            engine.evaluateAndCommit("m := [[1,0],[0,2]]");
+            engine.evaluateAndCommit("m := 7");
+            number(engine.evaluate("m"), 7.0, 0.0, 0.0);
+        });
+        add("self_checking_integral_additivity_and_calculus", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            String[] funcs = {"exp(-x^2)", "sin(x)^2", "1/(1+x^2)", "abs(x-1.3)"};
+            double[][] bounds = {
+                    {0.0, 1.3, 5.0, 1e-8},
+                    {0.0, 0.37, 1.0, 1e-8},
+                    {0.0, 1.0, 5.0, 1e-8},
+                    {0.0, 1.3, 4.0, 1e-7}
+            };
+            for (int i = 0; i < funcs.length; i++) {
+                String f = funcs[i];
+                double a = bounds[i][0], c = bounds[i][1], b = bounds[i][2], tol = bounds[i][3];
+                double iAb = engine.evaluate("int(" + f + ",x," + a + "," + b + ")").value;
+                double iAc = engine.evaluate("int(" + f + ",x," + a + "," + c + ")").value;
+                double iCb = engine.evaluate("int(" + f + ",x," + c + "," + b + ")").value;
+                close(iAc + iCb, iAb, tol, tol);
+            }
+            String[] symIntegrands = {"tan(x)", "sin(x)^2", "cos(x)^2", "x*exp(x)", "3/sqrt(2*x+1)"};
+            double[] samplePts = {0.4, 0.7, 0.7, 0.8, 1.5};
+            for (int i = 0; i < symIntegrands.length; i++) {
+                String f = symIntegrands[i];
+                double x0 = samplePts[i];
+                String anti = engine.evaluate("integral(" + f + ",x)").exactText;
+                double h = 1e-6;
+                double fp = engine.evaluateForX(anti, x0 + h);
+                double fm = engine.evaluateForX(anti, x0 - h);
+                double target = engine.evaluateForX(f, x0);
+                close((fp - fm) / (2.0 * h), target, 1e-6, 1e-6);
+            }
+            engine.unsetVariable("x");
+            String expanded = engine.evaluate("(x+1)^33").exactText;
+            require(!expanded.contains("("), "(x+1)^33 should expand cleanly: " + expanded);
+            close(engine.evaluateForX(expanded, 1.0), 8589934592.0, 1.0, 1e-10);
+        });
+        add("self_checking_nesting_depth_64_and_unset", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            StringBuilder lp60 = new StringBuilder();
+            StringBuilder rp60 = new StringBuilder();
+            for (int i = 0; i < 60; i++) {
+                lp60.append('(');
+                rp60.append(')');
+            }
+            number(engine.evaluate(lp60.toString() + "1" + rp60.toString()), 1.0, 0.0, 0.0);
+            StringBuilder lp65 = new StringBuilder();
+            StringBuilder rp65 = new StringBuilder();
+            for (int i = 0; i < 65; i++) {
+                lp65.append('(');
+                rp65.append(')');
+            }
+            rejects(() -> engine.evaluate(lp65.toString() + "1" + rp65.toString()));
+
+            engine.evaluateAndCommit("k := 12");
+            number(engine.evaluate("k+1"), 13.0, 0.0, 0.0);
+            CalculatorEngine.Result unsetOut = engine.evaluateAndCommit("unset(k)");
+            require(unsetOut.exactText.contains("k"), "unset message must reference k: " + unsetOut.exactText);
+            require(normalized(engine.evaluate("k+k").exactText).equals("2*k"), "unset k must evaluate symbolically");
         });
     }
 

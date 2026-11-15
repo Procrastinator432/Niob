@@ -26,7 +26,10 @@ $buildToolsDir = Get-ChildItem -Path "$sdk\build-tools" -Directory -ErrorAction 
     Select-Object -First 1
 if (-not $buildToolsDir) { throw "No Android build-tools found under $sdk\build-tools" }
 $buildTools = $buildToolsDir.FullName
-$androidJar = "$sdk\platforms\android-34\android.jar"
+$androidJar = "$sdk\platforms\android-36\android.jar"
+if (-not (Test-Path -LiteralPath $androidJar)) {
+    $androidJar = "$sdk\platforms\android-34\android.jar"
+}
 if (-not (Test-Path -LiteralPath $androidJar)) {
     $platformDir = Get-ChildItem -Path "$sdk\platforms\android-*" -Directory -ErrorAction SilentlyContinue |
         Where-Object { Test-Path (Join-Path $_.FullName 'android.jar') } |
@@ -46,7 +49,7 @@ New-Item -ItemType Directory -Path "$buildDir\compiled_res", "$buildDir\gen", "$
 Write-Host "1. Compiling resources with aapt2..."
 & "$buildTools\aapt2.exe" compile --dir "$androidDir\res" -o "$buildDir\compiled_res\res.zip"
 
-Write-Host "2. Linking resources & AndroidManifest.xml (minSdk=31 Android 12, targetSdk=34)..."
+Write-Host "2. Linking resources & AndroidManifest.xml (minSdk=31 Android 12, targetSdk=36)..."
 & "$buildTools\aapt2.exe" link `
     -o "$buildDir\unsigned.apk" `
     -I "$androidJar" `
