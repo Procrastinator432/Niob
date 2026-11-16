@@ -1427,6 +1427,134 @@ def forms2():
           'sign(sin(x^2)), abs(x^3-c*x), round(sqrt(abs(x))) and further building blocks.')
 
 
+# ---------------------------------------------------------------------------
+# Forms of the seventh review: divergence check, scaled poles, regularized peaks
+# ---------------------------------------------------------------------------
+def forms3():
+    """integral_forms3.tsv from the seventh review (BEWERTUNG-2026-11-16-3.md).
+
+    diverges: divergent integrals, also multiplied by small constants and with poles at roots of general
+    polynomials. integral_value: finite integrals of steep but bounded integrands and of singularities just
+    below order one; these need a value or "not converged", an error message such as "Integral divergiert"
+    is wrong there. integral: further convergent cases where an error message is acceptable."""
+    rnd = random.Random(3301)
+    rows = []
+
+    def add(kind, expr, check, ref=None, abs_tol=1e-12):
+        expected = 'divergent' if check == 'diverges' else num(ref)
+        tol = (num(abs_tol), '1e-7') if check != 'diverges' else ('0', '0')
+        rows.append([f'intform3_{kind}_{len(rows):04d}', expr, expr, check, expected, tol[0], tol[1], 'rad'])
+
+    def peak_tol(ref, center, width):
+        # Quadrature nodes near the center are doubles: spacing ulp(center) against a peak of this width.
+        ulp = mp.mpf(2) ** (mp.floor(mp.log(max(abs(mp.mpf(center)), mp.mpf('1e-300')), 2)) - 52)
+        return float(max(mp.mpf('1e-12'), 8 * abs(ref) * ulp / mp.mpf(width)))
+
+    # Cases named in the review: divergent ones and convergent ones near the threshold.
+    for expr in ['int(1e-7*abs(sin(x))^(-1.5),x,1,4)', 'int(1e-8*abs(sin(x))^(-1.5),x,1,4)', 'int(1/(x^3-x-1)^2,x,0,2)',
+                 'int(1/(x^3-2*x-5)^2,x,2,3)', 'int(1/(x^5-x-1)^2,x,0,2)', 'int(0.01/(x^5-x-1)^2,x,0,2)',
+                 'int(1e-9/abs(x-0.3)^1.5,x,0,1)', 'int(1e-4/abs(x^2-2),x,0,2)', 'int(1e-3*abs(x-0.3)^(-1.2),x,0,1)',
+                 'int(1e-6/sin(x)^2,x,1,4)', 'int(1e-12/(x-0.3)^2,x,0,1)', 'int(1/abs(x^3-2),x,0,2)', 'int(1/(x^3-2)^2,x,0,2)',
+                 'int(1/abs(x^3+x-1),x,0,1)', 'int(1/(sin(x)-x/2)^2,x,1,3)', 'int(1/abs(cos(x)-x),x,0,1)',
+                 'int(1/(exp(x)-x-2)^2,x,0,2)', 'int(1/abs(tan(x)-2),x,0,1.5)', 'int(1/abs(ln(x)-0.5),x,1,2)',
+                 'int(1/(x^4-5)^2,x,0,2)', 'int(1/(x*abs(ln(x))),x,0,0.5)', 'int(cos(1/x)/x^2,x,0,1)',
+                 'int(floor(x)/(x-1),x,0,2)', 'int(floor(x)/abs(x-1)^1.5,x,0,2)']:
+        add('review_divergent', expr, 'diverges')
+    half = mp.mpf('0.3')
+    for expr, ref, check in [
+        ('int(1/(abs(x-0.3)+1e-12),x,0,1)', mp.log((mp.mpf('0.7') + mp.mpf('1e-12')) / mp.mpf('1e-12')) + mp.log((half + mp.mpf('1e-12')) / mp.mpf('1e-12')), 'integral_value'),
+        ('int(1/((x-0.3)^2+1e-24),x,0,1)', (mp.atan(mp.mpf('0.7') / mp.mpf('1e-12')) + mp.atan(half / mp.mpf('1e-12'))) / mp.mpf('1e-12'), 'integral_value'),
+        ('int(abs(sin(x))^(-0.997),x,1,4)', mp.quad(lambda t: abs(mp.sin(t)) ** mp.mpf('-0.997'), [1, mp.pi, 4]), 'integral_value'),
+        ('int(abs(x^2-2)^(-0.998),x,0,2)', mp.quad(lambda t: abs(t * t - 2) ** mp.mpf('-0.998'), [0, mp.sqrt(2), 2]), 'integral_value'),
+        ('int(1e-8/((x-0.3)^2+1e-16),x,0,1)', mp.atan(mp.mpf('0.7') / mp.mpf('1e-8')) + mp.atan(half / mp.mpf('1e-8')), 'integral_value'),
+        ('int(1e-9/((x-0.3)^2+1e-18),x,0,1)', mp.atan(mp.mpf('0.7') / mp.mpf('1e-9')) + mp.atan(half / mp.mpf('1e-9')), 'integral_value'),
+        ('int(x^(-0.999),x,0,1)', mp.mpf(1000), 'integral'),
+        ('int(x^(-0.99),x,0,1)', mp.mpf(100), 'integral'),
+        ('int(abs(x-0.3)^(-0.998),x,0,1)', (half ** mp.mpf('0.002') + mp.mpf('0.7') ** mp.mpf('0.002')) / mp.mpf('0.002'), 'integral'),
+        ('int(1/(x*ln(x)^2),x,0,0.5)', 1 / abs(mp.log(mp.mpf('0.5'))), 'integral'),
+        ('int(sin(1/x)/x,x,0,1)', mp.pi / 2 - mp.si(1), 'integral'),
+        ('int(1/(1+1e12*(x-0.5)^2),x,0,1)', 2 * mp.atan(mp.mpf(10) ** 6 / 2) / mp.mpf(10) ** 6, 'integral'),
+    ]:
+        tol = 1e-12
+        if 'e-16' in expr or 'e-18' in expr or 'e-24' in expr or 'e-12),' in expr:
+            width = mp.mpf('1e-8') if 'e-16' in expr else mp.mpf('1e-9') if 'e-18' in expr else mp.mpf('1e-12')
+            tol = peak_tol(ref, '0.3', width)
+        add('review_convergent', expr, check, ref, tol)
+
+    # Scaled divergent integrals: the factor must not matter.
+    forms = [('abs(sin(x))^(-{p})', 1, 4), ('abs(cos(x))^(-{p})', 0, 3), ('abs(x^2-2)^(-{p})', 0, 2), ('abs(x-0.37)^(-{p})', 0, 1),
+             ('abs(exp(x)-2)^(-{p})', 0, 1)]
+    for _ in range(16):
+        f, lo, hi = rnd.choice(forms)
+        p = rnd.choice(['1', '1.2', '1.5', '2'])
+        k = rnd.randint(3, 12)
+        add('scaled_divergent', f'int(1e-{k}*{f.format(p=p)},x,{lo},{hi})', 'diverges')
+    # Poles at simple roots of random cubic and quintic polynomials.
+    made = 0
+    while made < 14:
+        deg = rnd.choice([3, 5])
+        coeffs = [rnd.randint(-5, 5) for _ in range(deg)] + [rnd.choice([-1, 1])]  # c0..c_deg
+        if coeffs[0] == 0:
+            continue
+        poly = lambda t: mp.fsum(c * t ** i for i, c in enumerate(coeffs))
+        lo, hi = -3, 3
+        real = [r for r in gtc_roots(poly, mp.mpf(lo), mp.mpf(hi)) if abs(mp.diff(poly, r)) > mp.mpf('0.1')]
+        if not real:
+            continue
+        r = real[0]
+        a, b = round(float(mp.floor(r * 10) / 10) - 0.5, 1) + 0.0, round(float(mp.floor(r * 10) / 10) + 0.6, 1) + 0.0
+        terms = []
+        for i in range(deg, -1, -1):
+            c = coeffs[i]
+            if c == 0:
+                continue
+            mono = '' if i == 0 else ('x' if i == 1 else f'x^{i}')
+            coef = str(abs(c)) if (abs(c) != 1 or i == 0) else ''
+            body = coef + ('*' if coef and mono else '') + mono
+            terms.append(('-' if c < 0 else '+') + body)
+        text = ''.join(terms).lstrip('+')
+        if abs(poly(mp.mpf(a))) < mp.mpf('1e-6') or abs(poly(mp.mpf(b))) < mp.mpf('1e-6'):
+            continue
+        form = rnd.choice(['1/({q})^2', '1/abs({q})', 'abs({q})^(-1.5)'])
+        add('polynomial_pole', f'int({form.format(q=text)},x,{a},{b})', 'diverges')
+        made += 1
+    # Steep but bounded integrands and normalized narrow peaks: a value is required.
+    for _ in range(10):
+        c = round(rnd.uniform(0.1, 0.9), 3)
+        e = rnd.choice([6, 8, 9, 10, 11, 12])
+        cm, eps = mp.mpf(str(c)), mp.mpf(10) ** -e
+        ref = mp.log((1 - cm + eps) / eps) + mp.log((cm + eps) / eps)
+        add('bounded_steep', f'int(1/(abs(x-{c})+1e-{e}),x,0,1)', 'integral_value', ref, peak_tol(ref, c, eps))
+    for _ in range(10):
+        c = round(rnd.uniform(0.1, 0.9), 3)
+        e = rnd.choice([6, 7, 8, 9, 10, 11])
+        cm, eps = mp.mpf(str(c)), mp.mpf(10) ** -e
+        ref = mp.atan((1 - cm) / eps) + mp.atan(cm / eps)
+        add('normalized_peak', f'int(1e-{e}/((x-{c})^2+1e-{2 * e}),x,0,1)', 'integral_value', ref, peak_tol(ref, c, eps))
+    write('integral_forms3.tsv', rows,
+          'Divergence check of the seventh review: divergent integrals multiplied by small constants and with poles at '
+          'roots of general polynomials (diverges), steep but bounded integrands and normalized narrow peaks '
+          '(integral_value: a value or "not converged" is required, an error message fails).')
+
+
+def gtc_roots(fun, lo, hi, n=6000):
+    """Sign changes of fun on [lo, hi], refined by bisection (for the polynomial poles of forms3)."""
+    out = []
+    xs = [lo + (hi - lo) * mp.mpf(i) / n for i in range(n + 1)]
+    vs = [fun(t) for t in xs]
+    for i in range(n):
+        if vs[i] * vs[i + 1] < 0:
+            a, b = xs[i], xs[i + 1]
+            for _ in range(120):
+                m = (a + b) / 2
+                if fun(a) * fun(m) <= 0:
+                    b = m
+                else:
+                    a = m
+            out.append((a + b) / 2)
+    return out
+
+
 if __name__ == '__main__':
     derivatives()
     integrals()
@@ -1440,3 +1568,4 @@ if __name__ == '__main__':
     integral_splits()
     forms()
     forms2()
+    forms3()

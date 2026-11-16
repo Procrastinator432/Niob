@@ -29,6 +29,7 @@ Jeder Fall startet mit einem neuen Rechenkern und hat 30 Sekunden Zeit.
 - `integral_split`: Selbstprüfung ohne Sollwert. Spalte 5 enthält die beiden Teilintegrale `int(f,x,a,m);int(f,x,m,b)`. Das ganze Integral und beide Teile werden jeweils mit einem neuen Rechenkern berechnet; es muss `|I − I₁ − I₂| <= 10·(Δ + Δ₁ + Δ₂) + absolut + relativ·max(|I|, |I₁|, |I₂|)` gelten, wobei Δ der gemeldete Fehler aus dem Integrationsbericht ist (0 ohne Bericht). Eine Fehlermeldung oder ein als nicht konvergiert gemeldetes Teilergebnis ist zulässig. Die Prüfung schlägt also an, wenn die Fehlerschätzung zu optimistisch ist, auch für Integranden, für die es keinen Sollwert gibt.
 
 - `diverges`: Das Integral divergiert. Verlangt ist eine Fehlermeldung oder ein als nicht konvergiert gemeldetes Ergebnis; ein als konvergiert gemeldeter Wert schlägt fehl. Spalte 5 ist ohne Bedeutung.
+- `integral_value`: Das Integral ist endlich, und eine Fehlermeldung wäre falsch (etwa „Integral divergiert“ bei einem beschränkten Integranden). Verlangt ist ein Wert wie bei `integral` oder ein als nicht konvergiert gemeldetes Ergebnis; eine Fehlermeldung schlägt fehl.
 
 Fehlermeldungen (bei `number_or_error`, `integral`, `integral_split` und `diverges`) und als nicht konvergiert gemeldete Integrale sind zulässig, werden aber in der Zusammenfassung gezählt, damit Lücken sichtbar bleiben, etwa „175 Fälle, 46 falsch, 18 mit Fehlermeldung, 7 als nicht konvergiert gemeldet“.
 
@@ -58,6 +59,16 @@ Die drei Tabellen stammen aus der [sechsten Nachprüfung](../../../../BEWERTUNG-
 - `derivative_forms2.tsv`: Ableitungen an Stellen ohne Ableitung (`abs(x)^0.7` und `x^(2/3)` bei 0, `abs(x-2)^(2/3)` bei 2, `floor(x^2)` bei 2, `x mod 1` bei 3, `ceil(x)-floor(x)` bei 1, `(x+1)!`) und mit Ableitung trotz nahem Knick oder Sprung (`abs(x)^1.2`, `x mod 1` bei 0,5, `round(x)-x`, `sqrt(x^4)` bei 0).
 - `split_forms2.tsv`: 60 Teilungsproben mit diesen Bausteinen.
 
+## Formen aus der siebten Nachprüfung
+
+`integral_forms3.tsv` stammt aus der [siebten Nachprüfung](../../../../BEWERTUNG-2026-11-16-3.md) und prüft die Erkennung divergenter Integrale (Startwert 3301):
+
+- 24 divergente Fälle aus der Nachprüfung (`diverges`), darunter `1e-7*abs(sin(x))^(-1.5)` und Pole an Nullstellen von `x^3-x-1` und `x^5-x-1`;
+- 12 konvergente Fälle aus der Nachprüfung; die sechs mit steilem, aber beschränktem Integranden oder einem Exponenten knapp über −1 mit `integral_value`, die übrigen mit `integral`;
+- 16 divergente Integrale, mit 10⁻³ bis 10⁻¹² multipliziert: Ein konstanter Faktor darf am Ergebnis nichts ändern;
+- 14 Pole an einfachen Nullstellen zufälliger Polynome 3. und 5. Grades (`1/p^2`, `1/abs(p)`, `abs(p)^(-1.5)`);
+- je 10 beschränkte steile Integranden `1/(abs(x-c)+ε)` und normierte schmale Spitzen `ε/((x-c)^2+ε^2)` mit ε von 10⁻⁶ bis 10⁻¹² (`integral_value`). Die absolute Toleranz enthält den Abstand der Gleitkomma-Stützstellen nahe c im Verhältnis zur Breite ε.
+
 ## Zufallsfolgen
 
 | Datei | Startwert |
@@ -73,5 +84,6 @@ Die drei Tabellen stammen aus der [sechsten Nachprüfung](../../../../BEWERTUNG-
 | `integral_splits.tsv` | 53 |
 | `integral_forms.tsv`, `derivative_forms.tsv`, `determinant_forms.tsv`, `split_forms.tsv` | 2611 (gemeinsam) |
 | `integral_forms2.tsv`, `derivative_forms2.tsv`, `split_forms2.tsv` | 3001 (gemeinsam) |
+| `integral_forms3.tsv` | 3301 |
 
 `derivatives.tsv` verwendet ein festes Raster ohne Zufall.

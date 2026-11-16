@@ -1659,6 +1659,50 @@ public final class CalculatorEngine {
         }
     }
 
+    private static boolean isDivergentPoleAt(IntegrandFunc f, double r, double lo, double hi) {
+        double s = Math.max(1.0, Math.abs(r));
+        Double vr = null;
+        try {
+            double y0 = Math.abs(f.eval(r));
+            if (Double.isFinite(y0)) vr = y0;
+        } catch (RuntimeException ignored) {
+            checkInterrupted();
+        }
+        for (double sign : new double[]{-1.0, 1.0}) {
+            double avail = sign > 0.0 ? (hi - r) : (r - lo);
+            if (avail <= 0.0) continue;
+            double d1 = Math.min(1e-5 * s, 0.1 * avail);
+            double d2 = d1 * 1e-2;
+            double d3 = d2 * 1e-2;
+            double d4 = d3 * 1e-2;
+            double d5 = d4 * 1e-2;
+            double d6 = d5 * 1e-1;
+            if (d6 <= 0.0 || r + sign * d6 == r) continue;
+            try {
+                double v1 = Math.abs(f.eval(r + sign * d1));
+                double v2 = Math.abs(f.eval(r + sign * d2));
+                double v3 = Math.abs(f.eval(r + sign * d3));
+                double v4 = Math.abs(f.eval(r + sign * d4));
+                double v5 = Math.abs(f.eval(r + sign * d5));
+                double v6 = Math.abs(f.eval(r + sign * d6));
+                if (Double.isFinite(v1) && Double.isFinite(v2) && Double.isFinite(v3)
+                        && Double.isFinite(v4) && Double.isFinite(v5) && Double.isFinite(v6)
+                        && v1 > 0.0 && v2 > 0.0 && v3 > 0.0 && v4 > 0.0 && v5 > 0.0
+                        && (v2 / v1) >= Math.pow(d1 / d2, 0.9995)
+                        && (v3 / v2) >= Math.pow(d2 / d3, 0.9995)
+                        && (v4 / v3) >= Math.pow(d3 / d4, 0.9995)
+                        && (v5 / v4) >= 20.0
+                        && (v6 / v5) >= 4.0
+                        && (vr == null || vr >= 10.0 * v5)) {
+                    return true;
+                }
+            } catch (RuntimeException ignored) {
+                checkInterrupted();
+            }
+        }
+        return false;
+    }
+
     private static IntegrationReport adaptiveGaussIntegrate(IntegrandFunc f, double a, double b, int initialSubintervals, double epsAbs, double epsRel, List<Double> extraAnchors, boolean anchorsTruncated) {
         if (a == b) {
             return new IntegrationReport(0.0, 0.0, true, 0, 0, "Konvergiert: Fehlerabschätzung 0.00e+00 <= Toleranz 1.00e-10 (0 Auswertungen)");
@@ -1700,30 +1744,8 @@ public final class CalculatorEngine {
             }
             poleCandidates.addAll(uniqueExtra);
             for (double r : poleCandidates) {
-                for (double sign : new double[]{-1.0, 1.0}) {
-                    double avail = sign > 0.0 ? (hi - r) : (r - lo);
-                    if (avail <= 0.0) continue;
-                    double d1 = Math.min(1e-5 * Math.max(1.0, Math.abs(r)), 0.1 * avail);
-                    double d2 = d1 * 1e-2;
-                    double d3 = d2 * 1e-2;
-                    if (d3 <= 0.0 || r + sign * d3 == r) continue;
-                    try {
-                        double v1 = Math.abs(f.eval(r + sign * d1));
-                        double v2 = Math.abs(f.eval(r + sign * d2));
-                        double v3 = Math.abs(f.eval(r + sign * d3));
-                        if (Double.isFinite(v1) && Double.isFinite(v2) && Double.isFinite(v3)
-                                && v1 > 0.0 && v2 > 0.0
-                                && (v2 / v1) >= 98.0
-                                && (v3 / v2) >= 98.0
-                                && v3 * d3 >= 0.01) {
-                            throw new RuntimeException("Integral divergiert (nicht integrierbare Polstelle)");
-                        }
-                    } catch (RuntimeException ex) {
-                        if (ex.getMessage() != null && ex.getMessage().contains("divergiert")) {
-                            throw ex;
-                        }
-                        checkInterrupted();
-                    }
+                if (isDivergentPoleAt(f, r, lo, hi)) {
+                    throw new RuntimeException("Integral divergiert (nicht integrierbare Polstelle)");
                 }
             }
         }
@@ -1750,8 +1772,8 @@ public final class CalculatorEngine {
                 if (!manyExtra) offsetAnchors.add(ea);
             }
             double[] offsets = new double[]{
-                    1e-7, 5e-7, 1e-6, 3e-6, 1e-5, 3e-5, 1e-4, 3e-4, 1e-3, 3e-3,
-                    1e-2, 3e-2, 1e-1, 1.0, 4.0, 16.0, 64.0, 256.0, 1024.0
+                    5e-12, 1e-11, 1e-10, 1e-9, 1e-8, 1e-7, 5e-7, 1e-6, 3e-6, 1e-5, 3e-5, 1e-4, 3e-4,
+                    1e-3, 3e-3, 1e-2, 3e-2, 1e-1, 1.0, 4.0, 16.0, 64.0, 256.0, 1024.0
             };
             for (double anchor : offsetAnchors) {
                 for (double off : offsets) {
@@ -1876,6 +1898,76 @@ public final class CalculatorEngine {
 
             if (totalErr <= targetTol) {
                 break;
+            }
+        }
+
+        ArrayList<double[]> suspectIvs = new ArrayList<>();
+        for (Subinterval iv : intervals) {
+            double w = Math.abs(iv.b - iv.a);
+            if (w > 0.0 && w <= 1e-5 * span && Math.abs(iv.val5) >= 1e-3 * Math.abs(totalVal)) {
+                suspectIvs.add(new double[]{Math.min(iv.a, iv.b), Math.max(iv.a, iv.b)});
+            }
+        }
+        suspectIvs.sort((x, y) -> Double.compare(x[1] - x[0], y[1] - y[0]));
+        int checkedSuspects = Math.min(4, suspectIvs.size());
+        for (int sIdx = 0; sIdx < checkedSuspects; sIdx++) {
+            double sa = suspectIvs.get(sIdx)[0];
+            double sb = suspectIvs.get(sIdx)[1];
+            double la = sa;
+            double lb = sb;
+            double bestX = 0.5 * (la + lb);
+            double firstMaxV = 0.0;
+            boolean suspectFlat = false;
+            for (int iter = 0; iter < 40; iter++) {
+                double stepS = (lb - la) / 8.0;
+                if (stepS <= 0.0 || la + stepS == la) break;
+                double maxV = -1.0;
+                double minV = Double.POSITIVE_INFINITY;
+                int maxK = 4;
+                boolean hitErr = false;
+                for (int k = 0; k <= 8; k++) {
+                    double xk = la + k * stepS;
+                    try {
+                        double yk = f.eval(xk);
+                        if (Double.isFinite(yk)) {
+                            double ay = Math.abs(yk);
+                            if (ay < minV) {
+                                minV = ay;
+                            }
+                            if (ay > maxV) {
+                                maxV = ay;
+                                maxK = k;
+                            }
+                        } else {
+                            bestX = xk;
+                            hitErr = true;
+                            break;
+                        }
+                    } catch (RuntimeException ignored) {
+                        checkInterrupted();
+                        bestX = xk;
+                        hitErr = true;
+                        break;
+                    }
+                }
+                if (hitErr) break;
+                bestX = la + maxK * stepS;
+                if (iter == 0) {
+                    if (minV > 0.0 && maxV <= 1.5 * minV) {
+                        suspectFlat = true;
+                        break;
+                    }
+                    firstMaxV = maxV;
+                } else if (iter >= 2 && maxV <= 1.25 * firstMaxV) {
+                    break;
+                }
+                double newLa = maxK == 0 ? la : la + (maxK - 1) * stepS;
+                double newLb = maxK == 8 ? lb : la + (maxK + 1) * stepS;
+                la = newLa;
+                lb = newLb;
+            }
+            if (!suspectFlat && (isDivergentPoleAt(f, bestX, lo, hi) || isDivergentPoleAt(f, sa, lo, hi) || isDivergentPoleAt(f, sb, lo, hi))) {
+                throw new RuntimeException("Integral divergiert (nicht integrierbare Polstelle)");
             }
         }
 
@@ -2209,10 +2301,10 @@ public final class CalculatorEngine {
         }
         ArrayList<Double> innerPts = new ArrayList<>();
         boolean[] innerTrunc = new boolean[]{false};
-        collectCriticalPointsImpl(arg, var, lo, hi, ov, innerPts, innerTrunc, depth + 1);
+        collectCriticalPointsImpl(arg, var, lo, hi, ov, innerPts, innerTrunc, depth + 1, false);
         AstNode dArg = arg.diff(var, radiansMode);
         if (dArg != null) {
-            collectCriticalPointsImpl(dArg, var, lo, hi, ov, innerPts, innerTrunc, depth + 1);
+            collectCriticalPointsImpl(dArg, var, lo, hi, ov, innerPts, innerTrunc, depth + 1, false);
         }
         for (double p : innerPts) {
             if (Double.isFinite(p) && p > lo && p < hi) xs.add(p);
@@ -2301,11 +2393,85 @@ public final class CalculatorEngine {
         }
     }
 
-    private void collectCriticalPoints(AstNode node, String var, double lo, double hi, Map<String, Value> ov, List<Double> out, boolean[] truncated) {
-        collectCriticalPointsImpl(node, var, lo, hi, ov, out, truncated, 0);
+    private void pushZeroRoots(AstNode expr, String var, double lo, double hi, Map<String, Value> ov, List<Double> out, boolean[] truncated, int depth) {
+        if ((truncated != null && truncated[0]) || depth >= 2 || hi <= lo) return;
+        ArrayList<Double> xs = new ArrayList<>(280);
+        xs.add(lo);
+        xs.add(hi);
+        if (lo < 0.0 && hi > 0.0) xs.add(0.0);
+        int gridN = 128;
+        double span = hi - lo;
+        for (int i = 1; i < gridN; i++) {
+            xs.add(lo + span * ((double) i) / ((double) gridN));
+        }
+        ArrayList<Double> innerPts = new ArrayList<>();
+        boolean[] innerTrunc = new boolean[]{false};
+        AstNode dExpr = expr.diff(var, radiansMode);
+        if (dExpr != null) {
+            collectCriticalPointsImpl(dExpr, var, lo, hi, ov, innerPts, innerTrunc, depth + 1, false);
+        }
+        for (double p : innerPts) {
+            if (Double.isFinite(p) && p > lo && p < hi) xs.add(p);
+        }
+        java.util.Collections.sort(xs);
+        ArrayList<Double> uniqX = new ArrayList<>(xs.size());
+        for (double p : xs) {
+            if (uniqX.isEmpty() || Math.abs(p - uniqX.get(uniqX.size() - 1)) > 1e-13 * Math.max(1.0, Math.abs(p))) {
+                uniqX.add(p);
+            }
+        }
+        if (uniqX.size() < 2) return;
+        boolean hasPrev = false;
+        double prevX = 0.0;
+        double prevU = 0.0;
+        for (double x : uniqX) {
+            checkInterrupted();
+            Double uObj = evalAstWithDefaultZero(expr, var, x, ov);
+            if (uObj == null) {
+                pushCriticalPoint(out, x, lo, hi, truncated);
+                hasPrev = false;
+                continue;
+            }
+            double u = uObj;
+            if (u == 0.0) {
+                pushCriticalPoint(out, x, lo, hi, truncated);
+            }
+            if (hasPrev && ((prevU < 0.0 && u > 0.0) || (prevU > 0.0 && u < 0.0))) {
+                double aB = prevX;
+                double bB = x;
+                double dA = prevU;
+                for (int it = 0; it < 60; it++) {
+                    checkInterrupted();
+                    double mid = 0.5 * (aB + bB);
+                    if (mid == aB || mid == bB) break;
+                    Double um = evalAstWithDefaultZero(expr, var, mid, ov);
+                    if (um == null || um == 0.0) {
+                        aB = mid;
+                        bB = mid;
+                        break;
+                    }
+                    if ((dA < 0.0 && um < 0.0) || (dA > 0.0 && um > 0.0)) {
+                        aB = mid;
+                        dA = um;
+                    } else {
+                        bB = mid;
+                    }
+                    if ((bB - aB) <= 1e-15 * Math.max(1.0, Math.abs(mid))) break;
+                }
+                pushCriticalPoint(out, 0.5 * (aB + bB), lo, hi, truncated);
+            }
+            if (truncated != null && truncated[0]) return;
+            hasPrev = true;
+            prevX = x;
+            prevU = u;
+        }
     }
 
-    private void collectCriticalPointsImpl(AstNode node, String var, double lo, double hi, Map<String, Value> ov, List<Double> out, boolean[] truncated, int depth) {
+    private void collectCriticalPoints(AstNode node, String var, double lo, double hi, Map<String, Value> ov, List<Double> out, boolean[] truncated) {
+        collectCriticalPointsImpl(node, var, lo, hi, ov, out, truncated, 0, false);
+    }
+
+    private void collectCriticalPointsImpl(AstNode node, String var, double lo, double hi, Map<String, Value> ov, List<Double> out, boolean[] truncated, int depth, boolean findZeros) {
         if (node == null || (truncated != null && truncated[0])) return;
         if (out.size() >= MAX_CRITICAL_POINTS) {
             if (node.containsVar(var) && truncated != null) truncated[0] = true;
@@ -2321,7 +2487,7 @@ public final class CalculatorEngine {
                     if (mVal != null && Double.isFinite(mVal) && mVal != 0.0) {
                         pushPeriodicRoots(fn.args.get(0), var, 0.0, Math.abs(mVal), lo, hi, ov, out, truncated, depth);
                         if (depth == 0 && (truncated == null || !truncated[0])) {
-                            collectCriticalPointsImpl(fn.args.get(0), var, lo, hi, ov, out, truncated, depth + 1);
+                            collectCriticalPointsImpl(fn.args.get(0), var, lo, hi, ov, out, truncated, depth + 1, false);
                         }
                         return;
                     }
@@ -2336,33 +2502,33 @@ public final class CalculatorEngine {
                     case "sin":
                         pushPeriodicRoots(arg, var, 0.0, half, lo, hi, ov, out, truncated, depth);
                         if (depth == 0 && (truncated == null || !truncated[0]) && AstNode.matchLinear(arg, var) == null) {
-                            collectCriticalPointsImpl(arg, var, lo, hi, ov, out, truncated, depth + 1);
+                            collectCriticalPointsImpl(arg, var, lo, hi, ov, out, truncated, depth + 1, findZeros);
                         }
                         return;
                     case "cos":
                         pushPeriodicRoots(arg, var, 0.5 * half, half, lo, hi, ov, out, truncated, depth);
                         if (depth == 0 && (truncated == null || !truncated[0]) && AstNode.matchLinear(arg, var) == null) {
-                            collectCriticalPointsImpl(arg, var, lo, hi, ov, out, truncated, depth + 1);
+                            collectCriticalPointsImpl(arg, var, lo, hi, ov, out, truncated, depth + 1, findZeros);
                         }
                         return;
                     case "tan":
                         pushPeriodicRoots(arg, var, 0.0, half, lo, hi, ov, out, truncated, depth);
                         pushPeriodicRoots(arg, var, 0.5 * half, half, lo, hi, ov, out, truncated, depth);
                         if (depth == 0 && (truncated == null || !truncated[0]) && AstNode.matchLinear(arg, var) == null) {
-                            collectCriticalPointsImpl(arg, var, lo, hi, ov, out, truncated, depth + 1);
+                            collectCriticalPointsImpl(arg, var, lo, hi, ov, out, truncated, depth + 1, findZeros);
                         }
                         return;
                     case "floor":
                     case "ceil":
                         pushPeriodicRoots(arg, var, 0.0, 1.0, lo, hi, ov, out, truncated, depth);
                         if (depth == 0 && (truncated == null || !truncated[0]) && AstNode.matchLinear(arg, var) == null) {
-                            collectCriticalPointsImpl(arg, var, lo, hi, ov, out, truncated, depth + 1);
+                            collectCriticalPointsImpl(arg, var, lo, hi, ov, out, truncated, depth + 1, false);
                         }
                         return;
                     case "round":
                         pushPeriodicRoots(arg, var, 0.5, 1.0, lo, hi, ov, out, truncated, depth);
                         if (depth == 0 && (truncated == null || !truncated[0]) && AstNode.matchLinear(arg, var) == null) {
-                            collectCriticalPointsImpl(arg, var, lo, hi, ov, out, truncated, depth + 1);
+                            collectCriticalPointsImpl(arg, var, lo, hi, ov, out, truncated, depth + 1, false);
                         }
                         return;
                     default:
@@ -2370,12 +2536,14 @@ public final class CalculatorEngine {
                 }
             }
         }
+        boolean matchedAlgebraic = false;
         AstNode.LinearMatch lin = AstNode.matchLinear(node, var);
         if (lin != null) {
             Double av = evalAstWithDefaultZero(lin.a, var, null, ov);
             Double bv = evalAstWithDefaultZero(lin.b, var, null, ov);
             if (av != null && bv != null && av != 0.0) {
                 pushCriticalPoint(out, -bv / av, lo, hi, truncated);
+                matchedAlgebraic = true;
             }
         } else {
             Double f0 = evalAstWithDefaultZero(node, var, 0.0, ov);
@@ -2388,6 +2556,7 @@ public final class CalculatorEngine {
                 double qc = f0;
                 double f2Pred = 4.0 * qa + 2.0 * qb + qc;
                 if (Math.abs(qa) > 1e-12 && Math.abs(f2Pred - f2) <= 1e-6 * (1.0 + Math.abs(f2) + Math.abs(f0))) {
+                    matchedAlgebraic = true;
                     double xv = -qb / (2.0 * qa);
                     pushCriticalPoint(out, xv, lo, hi, truncated);
                     double disc = qb * qb - 4.0 * qa * qc;
@@ -2409,6 +2578,7 @@ public final class CalculatorEngine {
                         double bc = f0;
                         double f05Pred = ba * 0.0625 + bb * 0.25 + bc;
                         if (Math.abs(ba) > 1e-12 && Math.abs(f05Pred - f05) <= 1e-6 * (1.0 + Math.abs(f05) + Math.abs(f0))) {
+                            matchedAlgebraic = true;
                             double uVert = -bb / (2.0 * ba);
                             if (uVert > 0.0) {
                                 double s = Math.sqrt(uVert);
@@ -2431,6 +2601,9 @@ public final class CalculatorEngine {
                     }
                 }
             }
+        }
+        if (!matchedAlgebraic && findZeros && depth == 0 && !(node instanceof AstPow) && !(node instanceof AstDiv)) {
+            pushZeroRoots(node, var, lo, hi, ov, out, truncated, depth);
         }
         if (node instanceof AstAdd || node instanceof AstSub) {
             boolean isSub = node instanceof AstSub;
@@ -2507,28 +2680,34 @@ public final class CalculatorEngine {
             }
         }
         if (node instanceof AstNeg) {
-            collectCriticalPoints(((AstNeg) node).inner, var, lo, hi, ov, out, truncated);
+            collectCriticalPointsImpl(((AstNeg) node).inner, var, lo, hi, ov, out, truncated, depth, findZeros);
         } else if (node instanceof AstAdd) {
             AstAdd add = (AstAdd) node;
-            collectCriticalPoints(add.left, var, lo, hi, ov, out, truncated);
-            collectCriticalPoints(add.right, var, lo, hi, ov, out, truncated);
+            collectCriticalPointsImpl(add.left, var, lo, hi, ov, out, truncated, depth, false);
+            collectCriticalPointsImpl(add.right, var, lo, hi, ov, out, truncated, depth, false);
         } else if (node instanceof AstSub) {
             AstSub sub = (AstSub) node;
-            collectCriticalPoints(sub.left, var, lo, hi, ov, out, truncated);
-            collectCriticalPoints(sub.right, var, lo, hi, ov, out, truncated);
+            collectCriticalPointsImpl(sub.left, var, lo, hi, ov, out, truncated, depth, false);
+            collectCriticalPointsImpl(sub.right, var, lo, hi, ov, out, truncated, depth, false);
         } else if (node instanceof AstMul) {
             AstMul mul = (AstMul) node;
-            collectCriticalPoints(mul.left, var, lo, hi, ov, out, truncated);
-            collectCriticalPoints(mul.right, var, lo, hi, ov, out, truncated);
+            collectCriticalPointsImpl(mul.left, var, lo, hi, ov, out, truncated, depth, false);
+            collectCriticalPointsImpl(mul.right, var, lo, hi, ov, out, truncated, depth, false);
         } else if (node instanceof AstDiv) {
             AstDiv div = (AstDiv) node;
-            collectCriticalPoints(div.left, var, lo, hi, ov, out, truncated);
-            collectCriticalPoints(div.right, var, lo, hi, ov, out, truncated);
+            collectCriticalPointsImpl(div.left, var, lo, hi, ov, out, truncated, depth, findZeros);
+            collectCriticalPointsImpl(div.right, var, lo, hi, ov, out, truncated, depth, true);
         } else if (node instanceof AstPow) {
-            collectCriticalPoints(((AstPow) node).base, var, lo, hi, ov, out, truncated);
+            AstPow p = (AstPow) node;
+            Double ev = evalAstWithDefaultZero(p.exp, var, null, ov);
+            boolean negOrFrac = ev != null && (ev < 0.0 || Math.abs(ev - Math.rint(ev)) > 1e-12);
+            collectCriticalPointsImpl(p.base, var, lo, hi, ov, out, truncated, depth, findZeros || negOrFrac);
         } else if (node instanceof AstFunc) {
-            for (AstNode arg : ((AstFunc) node).args) {
-                collectCriticalPoints(arg, var, lo, hi, ov, out, truncated);
+            AstFunc fn = (AstFunc) node;
+            String n = fn.name.trim();
+            boolean singWrap = n.equals("abs") || n.equals("sqrt") || n.equals("ln") || n.equals("sign") || n.equals("sgn");
+            for (AstNode arg : fn.args) {
+                collectCriticalPointsImpl(arg, var, lo, hi, ov, out, truncated, depth, singWrap);
             }
         }
     }

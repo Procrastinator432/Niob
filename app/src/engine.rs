@@ -3147,9 +3147,9 @@ impl MathEngine {
         }
         let mut inner_pts = Vec::new();
         let mut inner_trunc = false;
-        self.collect_critical_points_impl(arg, var, lo, hi, ov, &mut inner_pts, &mut inner_trunc, depth + 1);
+        self.collect_critical_points_impl(arg, var, lo, hi, ov, &mut inner_pts, &mut inner_trunc, depth + 1, false);
         if let Some(d_arg) = arg.diff_with_mode(var, self.angle_mode) {
-            self.collect_critical_points_impl(&d_arg, var, lo, hi, ov, &mut inner_pts, &mut inner_trunc, depth + 1);
+            self.collect_critical_points_impl(&d_arg, var, lo, hi, ov, &mut inner_pts, &mut inner_trunc, depth + 1, false);
         }
         for p in inner_pts {
             if p.is_finite() && p > lo && p < hi {
@@ -3246,6 +3246,104 @@ impl MathEngine {
         }
     }
 
+    fn push_zero_roots(
+        &self,
+        expr: &AstNode,
+        var: &str,
+        lo: f64,
+        hi: f64,
+        ov: Option<&HashMap<String, Value>>,
+        out: &mut Vec<f64>,
+        truncated: &mut bool,
+        depth: usize,
+    ) {
+        if *truncated || depth >= 2 || hi <= lo {
+            return;
+        }
+        let mut xs: Vec<f64> = Vec::with_capacity(280);
+        xs.push(lo);
+        xs.push(hi);
+        if lo < 0.0 && hi > 0.0 {
+            xs.push(0.0);
+        }
+        let grid_n = 128usize;
+        let span = hi - lo;
+        for i in 1..grid_n {
+            xs.push(lo + span * (i as f64) / (grid_n as f64));
+        }
+        let mut inner_pts = Vec::new();
+        let mut inner_trunc = false;
+        if let Some(d_expr) = expr.diff_with_mode(var, self.angle_mode) {
+            self.collect_critical_points_impl(&d_expr, var, lo, hi, ov, &mut inner_pts, &mut inner_trunc, depth + 1, false);
+        }
+        for p in inner_pts {
+            if p.is_finite() && p > lo && p < hi {
+                xs.push(p);
+            }
+        }
+        xs.sort_by(f64::total_cmp);
+        xs.dedup_by(|b, a| (*b - *a).abs() <= 1e-13 * b.abs().max(1.0));
+        if xs.len() < 2 {
+            return;
+        }
+        let mut prev: Option<(f64, f64)> = None;
+        for &x in &xs {
+            if check_eval_deadline().is_err() {
+                *truncated = true;
+                return;
+            }
+            let Some(u) = self.eval_ast_with_x_default_zero(expr, var, Some(x), ov) else {
+                Self::push_critical_point(out, x, lo, hi, truncated);
+                prev = None;
+                continue;
+            };
+            if u == 0.0 {
+                Self::push_critical_point(out, x, lo, hi, truncated);
+            }
+            if let Some((x0, u0)) = prev {
+                if (u0 < 0.0 && u > 0.0) || (u0 > 0.0 && u < 0.0) {
+                    let mut a_b = x0;
+                    let mut b_b = x;
+                    let mut d_a = u0;
+                    for _ in 0..60 {
+                        if check_eval_deadline().is_err() {
+                            *truncated = true;
+                            return;
+                        }
+                        let mid = 0.5 * (a_b + b_b);
+                        if mid == a_b || mid == b_b {
+                            break;
+                        }
+                        let Some(um) = self.eval_ast_with_x_default_zero(expr, var, Some(mid), ov) else {
+                            a_b = mid;
+                            b_b = mid;
+                            break;
+                        };
+                        if um == 0.0 {
+                            a_b = mid;
+                            b_b = mid;
+                            break;
+                        }
+                        if (d_a < 0.0 && um < 0.0) || (d_a > 0.0 && um > 0.0) {
+                            a_b = mid;
+                            d_a = um;
+                        } else {
+                            b_b = mid;
+                        }
+                        if (b_b - a_b) <= 1e-15 * mid.abs().max(1.0) {
+                            break;
+                        }
+                    }
+                    Self::push_critical_point(out, 0.5 * (a_b + b_b), lo, hi, truncated);
+                }
+            }
+            if *truncated {
+                return;
+            }
+            prev = Some((x, u));
+        }
+    }
+
     fn collect_critical_points(
         &self,
         node: &AstNode,
@@ -3256,7 +3354,7 @@ impl MathEngine {
         out: &mut Vec<f64>,
         truncated: &mut bool,
     ) {
-        self.collect_critical_points_impl(node, var, lo, hi, ov, out, truncated, 0);
+        self.collect_critical_points_impl(node, var, lo, hi, ov, out, truncated, 0, false);
     }
 
     fn collect_critical_points_impl(
@@ -3269,6 +3367,7 @@ impl MathEngine {
         out: &mut Vec<f64>,
         truncated: &mut bool,
         depth: usize,
+        find_zeros: bool,
     ) {
         if *truncated || out.len() >= Self::MAX_CRITICAL_POINTS {
             if node.contains_var(var) && out.len() >= Self::MAX_CRITICAL_POINTS {
@@ -3299,7 +3398,7 @@ impl MathEngine {
                             );
                             if depth == 0 && !*truncated {
                                 self.collect_critical_points_impl(
-                                    &fargs[0], var, lo, hi, ov, out, truncated, depth + 1,
+                                    &fargs[0], var, lo, hi, ov, out, truncated, depth + 1, false,
                                 );
                             }
                             return;
@@ -3320,14 +3419,14 @@ impl MathEngine {
                     "sin" => {
                         self.push_periodic_roots(arg, var, 0.0, half, lo, hi, ov, out, truncated, depth);
                         if depth == 0 && !*truncated && arg.match_linear(var).is_none() {
-                            self.collect_critical_points_impl(arg, var, lo, hi, ov, out, truncated, depth + 1);
+                            self.collect_critical_points_impl(arg, var, lo, hi, ov, out, truncated, depth + 1, find_zeros);
                         }
                         return;
                     }
                     "cos" => {
                         self.push_periodic_roots(arg, var, 0.5 * half, half, lo, hi, ov, out, truncated, depth);
                         if depth == 0 && !*truncated && arg.match_linear(var).is_none() {
-                            self.collect_critical_points_impl(arg, var, lo, hi, ov, out, truncated, depth + 1);
+                            self.collect_critical_points_impl(arg, var, lo, hi, ov, out, truncated, depth + 1, find_zeros);
                         }
                         return;
                     }
@@ -3335,21 +3434,21 @@ impl MathEngine {
                         self.push_periodic_roots(arg, var, 0.0, half, lo, hi, ov, out, truncated, depth);
                         self.push_periodic_roots(arg, var, 0.5 * half, half, lo, hi, ov, out, truncated, depth);
                         if depth == 0 && !*truncated && arg.match_linear(var).is_none() {
-                            self.collect_critical_points_impl(arg, var, lo, hi, ov, out, truncated, depth + 1);
+                            self.collect_critical_points_impl(arg, var, lo, hi, ov, out, truncated, depth + 1, find_zeros);
                         }
                         return;
                     }
                     "floor" | "ceil" => {
                         self.push_periodic_roots(arg, var, 0.0, 1.0, lo, hi, ov, out, truncated, depth);
                         if depth == 0 && !*truncated && arg.match_linear(var).is_none() {
-                            self.collect_critical_points_impl(arg, var, lo, hi, ov, out, truncated, depth + 1);
+                            self.collect_critical_points_impl(arg, var, lo, hi, ov, out, truncated, depth + 1, false);
                         }
                         return;
                     }
                     "round" => {
                         self.push_periodic_roots(arg, var, 0.5, 1.0, lo, hi, ov, out, truncated, depth);
                         if depth == 0 && !*truncated && arg.match_linear(var).is_none() {
-                            self.collect_critical_points_impl(arg, var, lo, hi, ov, out, truncated, depth + 1);
+                            self.collect_critical_points_impl(arg, var, lo, hi, ov, out, truncated, depth + 1, false);
                         }
                         return;
                     }
@@ -3357,6 +3456,7 @@ impl MathEngine {
                 }
             }
         }
+        let mut matched_algebraic = false;
         if let Some((a_node, b_node)) = node.match_linear(var) {
             if let (Some(av), Some(bv)) = (
                 self.eval_ast_with_x_default_zero(&a_node, var, None, ov),
@@ -3365,6 +3465,7 @@ impl MathEngine {
                 if av != 0.0 {
                     Self::push_critical_point(out, -bv / av, lo, hi, truncated);
                 }
+                matched_algebraic = true;
             }
         } else if let (Some(f0), Some(f1), Some(fm1), Some(f2)) = (
             self.eval_ast_with_x_default_zero(node, var, Some(0.0), ov),
@@ -3377,6 +3478,7 @@ impl MathEngine {
             let qc = f0;
             let f2_pred = 4.0 * qa + 2.0 * qb + qc;
             if qa.abs() > 1e-12 && (f2_pred - f2).abs() <= 1e-6 * (1.0 + f2.abs() + f0.abs()) {
+                matched_algebraic = true;
                 let xv = -qb / (2.0 * qa);
                 Self::push_critical_point(out, xv, lo, hi, truncated);
                 let disc = qb * qb - 4.0 * qa * qc;
@@ -3399,6 +3501,7 @@ impl MathEngine {
                     let bc = f0;
                     let f05_pred = ba * 0.0625 + bb * 0.25 + bc;
                     if ba.abs() > 1e-12 && (f05_pred - f05).abs() <= 1e-6 * (1.0 + f05.abs() + f0.abs()) {
+                        matched_algebraic = true;
                         let u_vert = -bb / (2.0 * ba);
                         if u_vert > 0.0 {
                             let s = u_vert.sqrt();
@@ -3419,6 +3522,9 @@ impl MathEngine {
                     }
                 }
             }
+        }
+        if !matched_algebraic && find_zeros && depth == 0 && !matches!(node, AstNode::Pow(_, _) | AstNode::Div(_, _)) {
+            self.push_zero_roots(node, var, lo, hi, ov, out, truncated, depth);
         }
         if let AstNode::Add(l, r) | AstNode::Sub(l, r) = node {
             let is_sub = matches!(node, AstNode::Sub(_, _));
@@ -3493,18 +3599,25 @@ impl MathEngine {
             }
         }
         match node {
-            AstNode::Neg(inner) => self.collect_critical_points(inner, var, lo, hi, ov, out, truncated),
-            AstNode::Add(l, r)
-            | AstNode::Sub(l, r)
-            | AstNode::Mul(l, r)
-            | AstNode::Div(l, r) => {
-                self.collect_critical_points(l, var, lo, hi, ov, out, truncated);
-                self.collect_critical_points(r, var, lo, hi, ov, out, truncated);
+            AstNode::Neg(inner) => self.collect_critical_points_impl(inner, var, lo, hi, ov, out, truncated, depth, find_zeros),
+            AstNode::Add(l, r) | AstNode::Sub(l, r) | AstNode::Mul(l, r) => {
+                self.collect_critical_points_impl(l, var, lo, hi, ov, out, truncated, depth, false);
+                self.collect_critical_points_impl(r, var, lo, hi, ov, out, truncated, depth, false);
             }
-            AstNode::Pow(base, _) => self.collect_critical_points(base, var, lo, hi, ov, out, truncated),
-            AstNode::Func(_, args) => {
+            AstNode::Div(l, r) => {
+                self.collect_critical_points_impl(l, var, lo, hi, ov, out, truncated, depth, find_zeros);
+                self.collect_critical_points_impl(r, var, lo, hi, ov, out, truncated, depth, true);
+            }
+            AstNode::Pow(base, exp) => {
+                let is_neg_or_frac = self
+                    .eval_ast_with_x_default_zero(exp, var, None, ov)
+                    .is_some_and(|e| e < 0.0 || (e - e.round()).abs() > 1e-12);
+                self.collect_critical_points_impl(base, var, lo, hi, ov, out, truncated, depth, find_zeros || is_neg_or_frac);
+            }
+            AstNode::Func(name, args) => {
+                let is_sing_wrap = matches!(name.trim(), "abs" | "sqrt" | "ln" | "sign" | "sgn");
                 for a in args {
-                    self.collect_critical_points(a, var, lo, hi, ov, out, truncated);
+                    self.collect_critical_points_impl(a, var, lo, hi, ov, out, truncated, depth, is_sing_wrap);
                 }
             }
             _ => {}
@@ -4486,6 +4599,58 @@ where
         .collect();
     unique_extra.sort_by(f64::total_cmp);
     unique_extra.dedup_by(|b, a| (*b - *a).abs() <= 1e-12 * b.abs().max(1.0));
+    let is_divergent_pole_at = |r: f64| -> bool {
+        let s = r.abs().max(1.0);
+        let vr = f(r).ok().map(|v| v.abs()).filter(|v| v.is_finite());
+        for sign in [-1.0_f64, 1.0_f64] {
+            let avail = if sign > 0.0 { hi - r } else { r - lo };
+            if avail <= 0.0 {
+                continue;
+            }
+            let d1 = (1e-5 * s).min(0.1 * avail);
+            let d2 = d1 * 1e-2;
+            let d3 = d2 * 1e-2;
+            let d4 = d3 * 1e-2;
+            let d5 = d4 * 1e-2;
+            let d6 = d5 * 1e-1;
+            if d6 <= 0.0 || r + sign * d6 == r {
+                continue;
+            }
+            if let (Ok(y1), Ok(y2), Ok(y3), Ok(y4), Ok(y5), Ok(y6)) = (
+                f(r + sign * d1),
+                f(r + sign * d2),
+                f(r + sign * d3),
+                f(r + sign * d4),
+                f(r + sign * d5),
+                f(r + sign * d6),
+            ) {
+                let (v1, v2, v3, v4, v5, v6) = (
+                    y1.abs(), y2.abs(), y3.abs(), y4.abs(), y5.abs(), y6.abs(),
+                );
+                if v1.is_finite()
+                    && v2.is_finite()
+                    && v3.is_finite()
+                    && v4.is_finite()
+                    && v5.is_finite()
+                    && v6.is_finite()
+                    && v1 > 0.0
+                    && v2 > 0.0
+                    && v3 > 0.0
+                    && v4 > 0.0
+                    && v5 > 0.0
+                    && (v2 / v1) >= (d1 / d2).powf(0.9995)
+                    && (v3 / v2) >= (d2 / d3).powf(0.9995)
+                    && (v4 / v3) >= (d3 / d4).powf(0.9995)
+                    && (v5 / v4) >= 20.0
+                    && (v6 / v5) >= 4.0
+                    && vr.is_none_or(|vr_val| vr_val >= 10.0 * v5)
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    };
     if !anchors_truncated && unique_extra.len() <= 256 {
         let mut pole_candidates: Vec<f64> = Vec::with_capacity(unique_extra.len() + 3);
         pole_candidates.push(lo);
@@ -4495,35 +4660,8 @@ where
         }
         pole_candidates.extend_from_slice(&unique_extra);
         for r in pole_candidates {
-            for sign in [-1.0_f64, 1.0_f64] {
-                let avail = if sign > 0.0 { hi - r } else { r - lo };
-                if avail <= 0.0 {
-                    continue;
-                }
-                let d1 = (1e-5 * r.abs().max(1.0)).min(0.1 * avail);
-                let d2 = d1 * 1e-2;
-                let d3 = d2 * 1e-2;
-                if d3 <= 0.0 || r + sign * d3 == r {
-                    continue;
-                }
-                if let (Ok(y1), Ok(y2), Ok(y3)) = (
-                    f(r + sign * d1),
-                    f(r + sign * d2),
-                    f(r + sign * d3),
-                ) {
-                    let (v1, v2, v3) = (y1.abs(), y2.abs(), y3.abs());
-                    if v1.is_finite()
-                        && v2.is_finite()
-                        && v3.is_finite()
-                        && v1 > 0.0
-                        && v2 > 0.0
-                        && (v2 / v1) >= 98.0
-                        && (v3 / v2) >= 98.0
-                        && v3 * d3 >= 0.01
-                    {
-                        return Err("Integral divergiert (nicht integrierbare Polstelle)".to_string());
-                    }
-                }
+            if is_divergent_pole_at(r) {
+                return Err("Integral divergiert (nicht integrierbare Polstelle)".to_string());
             }
         }
     }
@@ -4543,8 +4681,8 @@ where
             }
         }
         let offsets = [
-            1e-7, 5e-7, 1e-6, 3e-6, 1e-5, 3e-5, 1e-4, 3e-4, 1e-3, 3e-3,
-            1e-2, 3e-2, 1e-1, 1.0, 4.0, 16.0, 64.0, 256.0, 1024.0,
+            5e-12, 1e-11, 1e-10, 1e-9, 1e-8, 1e-7, 5e-7, 1e-6, 3e-6, 1e-5, 3e-5, 1e-4, 3e-4,
+            1e-3, 3e-3, 1e-2, 3e-2, 1e-1, 1.0, 4.0, 16.0, 64.0, 256.0, 1024.0,
         ];
         for anchor in offset_anchors {
             for &off in &offsets {
@@ -4671,6 +4809,77 @@ where
 
         if total_err <= target_tol {
             break;
+        }
+    }
+
+    let mut suspect_ivs: Vec<(f64, f64)> = Vec::new();
+    for iv in &intervals {
+        let w = (iv.b - iv.a).abs();
+        if w > 0.0 && w <= 1e-5 * span && iv.val5.abs() >= 1e-3 * total_val.abs() {
+            suspect_ivs.push((iv.a.min(iv.b), iv.a.max(iv.b)));
+        }
+    }
+    suspect_ivs.sort_by(|x, y| (x.1 - x.0).total_cmp(&(y.1 - y.0)));
+    for &(sa, sb) in suspect_ivs.iter().take(4) {
+        let mut la = sa;
+        let mut lb = sb;
+        let mut best_x = 0.5 * (la + lb);
+        let mut first_max_v = 0.0_f64;
+        let mut suspect_flat = false;
+        for iter in 0..40 {
+            let step = (lb - la) / 8.0;
+            if step <= 0.0 || la + step == la {
+                break;
+            }
+            let mut max_v = -1.0_f64;
+            let mut min_v = f64::INFINITY;
+            let mut max_k = 4usize;
+            let mut hit_nonfinite = false;
+            for k in 0..=8 {
+                let xk = la + (k as f64) * step;
+                match f(xk) {
+                    Ok(yk) if yk.is_finite() => {
+                        let ay = yk.abs();
+                        if ay < min_v {
+                            min_v = ay;
+                        }
+                        if ay > max_v {
+                            max_v = ay;
+                            max_k = k;
+                        }
+                    }
+                    _ => {
+                        hit_nonfinite = true;
+                        max_k = k;
+                        best_x = xk;
+                        la = xk;
+                        lb = xk;
+                        break;
+                    }
+                }
+            }
+            if la == lb {
+                break;
+            }
+            best_x = la + (max_k as f64) * step;
+            if iter == 0 {
+                if !hit_nonfinite && min_v > 0.0 && max_v <= 1.5 * min_v {
+                    suspect_flat = true;
+                    break;
+                }
+                first_max_v = max_v;
+            } else if iter >= 2 && !hit_nonfinite && max_v <= 1.25 * first_max_v {
+                break;
+            }
+            let new_la = if max_k == 0 { la } else { la + ((max_k - 1) as f64) * step };
+            let new_lb = if max_k == 8 { lb } else { la + ((max_k + 1) as f64) * step };
+            la = new_la;
+            lb = new_lb;
+        }
+        if !suspect_flat
+            && (is_divergent_pole_at(best_x) || is_divergent_pole_at(sa) || is_divergent_pole_at(sb))
+        {
+            return Err("Integral divergiert (nicht integrierbare Polstelle)".to_string());
         }
     }
 

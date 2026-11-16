@@ -26,7 +26,7 @@ final class GeneratedCases {
         "derivatives", "integrals", "matrices", "exact_numbers", "antiderivatives", "polynomials",
         "integral_families", "derivative_families", "determinants", "integral_splits",
         "integral_forms", "derivative_forms", "determinant_forms", "split_forms",
-        "integral_forms2", "derivative_forms2", "split_forms2"
+        "integral_forms2", "derivative_forms2", "split_forms2", "integral_forms3"
     };
 
     private GeneratedCases() {}
@@ -227,6 +227,18 @@ final class GeneratedCases {
                 throw new Fail("Fehlermeldung erwartet, erhalten " + result.decimalText);
             case "integral": {
                 if (error != null) return REFUSED;
+                CalculatorEngine.IntegrationReport report = engine.getLastIntegrationReport();
+                if (report != null && !report.converged) return NOT_CONVERGED;
+                try {
+                    requireNumber(result, Double.parseDouble(row.expected), row.absTol, row.relTol);
+                } catch (Fail f) {
+                    throw new Fail(f.getMessage() + " (als konvergiert gemeldet)");
+                }
+                return PASS;
+            }
+            case "integral_value": {
+                // A finite integral: a value or "not converged" is required, an error message fails.
+                if (error != null) throw new Fail("Fehlermeldung statt Wert: " + error);
                 CalculatorEngine.IntegrationReport report = engine.getLastIntegrationReport();
                 if (report != null && !report.converged) return NOT_CONVERGED;
                 try {

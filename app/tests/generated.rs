@@ -27,6 +27,7 @@ const SPLIT_FORMS: &str = include_str!("data/generated/split_forms.tsv");
 const INTEGRAL_FORMS2: &str = include_str!("data/generated/integral_forms2.tsv");
 const DERIVATIVE_FORMS2: &str = include_str!("data/generated/derivative_forms2.tsv");
 const SPLIT_FORMS2: &str = include_str!("data/generated/split_forms2.tsv");
+const INTEGRAL_FORMS3: &str = include_str!("data/generated/integral_forms3.tsv");
 
 /// Generous per-case time limit so that slow debug builds do not turn into timeouts.
 const TIMEOUT_MS: u64 = 30_000;
@@ -248,6 +249,19 @@ fn check_row(row: &Row) -> Outcome {
         },
         "integral" => match result {
             Err(_) => Outcome::Refused,
+            Ok(out) => {
+                if out.integration_report.as_ref().is_some_and(|r| !r.converged) {
+                    return Outcome::NotConverged;
+                }
+                match number_problem(&out, row.expected.parse().unwrap(), row.abs_tol, row.rel_tol) {
+                    None => Outcome::Pass,
+                    Some(p) => fail(format!("{p} (als konvergiert gemeldet)")),
+                }
+            }
+        },
+        // A finite integral: a value or "not converged" is required, an error message fails.
+        "integral_value" => match result {
+            Err(e) => fail(format!("Fehlermeldung statt Wert: {e}")),
             Ok(out) => {
                 if out.integration_report.as_ref().is_some_and(|r| !r.converged) {
                     return Outcome::NotConverged;
@@ -555,4 +569,9 @@ fn generated_derivative_forms2() {
 #[test]
 fn generated_split_forms2() {
     run_table("generated_split_forms2", SPLIT_FORMS2);
+}
+
+#[test]
+fn generated_integral_forms3() {
+    run_table("generated_integral_forms3", INTEGRAL_FORMS3);
 }
