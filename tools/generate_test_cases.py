@@ -968,7 +968,11 @@ def forms():
         b = r4(rnd.uniform(5, 30)); bm = mp.mpf(repr(b))
         br = [s * mp.asin(mp.mpf(j) / 3) + 2 * mp.pi * n for n in range(-1, 8) for j in range(-3, 4) for s in (1,)] + \
              [mp.pi - mp.asin(mp.mpf(j) / 3) + 2 * mp.pi * n for n in range(-1, 8) for j in range(-3, 4)]
-        add('step_floor_sin', f'int(floor(3*sin(x)),x,0,{num(b)})', quad_with_breaks(lambda t: mp.floor(3 * mp.sin(t)), 0, bm, br))
+        # Near x = pi/2 + 2*pi*n, sin(x) rounds to exactly 1 in double on a strip about 2.1e-8 wide, so
+        # floor(3*sin(x)) is 3 there instead of 2. No integrator can undo that; allow 5e-8 per such point.
+        touches = sum(1 for n in range(8) if mp.pi / 2 + 2 * mp.pi * n < bm)
+        add('step_floor_sin', f'int(floor(3*sin(x)),x,0,{num(b)})', quad_with_breaks(lambda t: mp.floor(3 * mp.sin(t)), 0, bm, br),
+            max(1e-12, 5e-8 * touches))
     for _ in range(4):
         c = round(rnd.uniform(0.5, 20), 2); cm = mp.mpf(str(c))
         add('step_sign_x2', f'int(sign(x^2-{c}),x,-5,6)', quad_with_breaks(lambda t: mp.sign(t * t - cm), -5, 6, [-mp.sqrt(cm), mp.sqrt(cm)]))
@@ -1232,6 +1236,197 @@ def forms():
               'abs(sin(x^2)), ln(abs(sin(x))), 1/sqrt(abs(x^2-c)), sin(x^2) and more.')
 
 
+# ---------------------------------------------------------------------------
+# Forms of the sixth review: further nonlinear jumps, divergence of trigonometric singularities
+# ---------------------------------------------------------------------------
+def forms2():
+    """Three tables from the sixth review (BEWERTUNG-2026-11-16-2.md). One random generator in a fixed order."""
+    rnd = random.Random(3001)
+
+    def r4(v):
+        return float(f'{v:.4g}')
+
+
+    def roots(fun, lo, hi, n=20000):
+        """All sign changes of fun on [lo, hi] (dense scan, then bisection to full precision)."""
+        out = []
+        xs = [lo + (hi - lo) * mp.mpf(i) / n for i in range(n + 1)]
+        vs = [fun(t) for t in xs]
+        for i in range(n):
+            if vs[i] == 0:
+                out.append(xs[i])
+            elif vs[i] * vs[i + 1] < 0:
+                a, b = xs[i], xs[i + 1]
+                for _ in range(140):
+                    m = (a + b) / 2
+                    if fun(a) * fun(m) <= 0:
+                        b = m
+                    else:
+                        a = m
+                out.append((a + b) / 2)
+        return out
+
+
+    def jumps(arg, lo, hi, step=1, shift=0):
+        """Points where arg(x) crosses shift + k*step."""
+        pts = []
+        vals = [arg(lo + (hi - lo) * mp.mpf(i) / 4000) for i in range(4001)]
+        kmin, kmax = int(mp.floor((min(vals) - shift) / step)) - 1, int(mp.ceil((max(vals) - shift) / step)) + 1
+        for k in range(kmin, kmax + 1):
+            c = shift + k * step
+            pts += roots(lambda t: arg(t) - c, lo, hi, 4000)
+        return pts
+
+
+    rows = []
+
+
+    def add(kind, expr, ref, check='integral', abs_tol=1e-12):
+        rows.append([f'intform2_{kind}_{len(rows):04d}', expr, expr, check, 'divergent' if check == 'diverges' else num(ref),
+                     num(abs_tol) if check == 'integral' else '0', '1e-7' if check == 'integral' else '0', 'rad'])
+
+
+    def step_case(kind, expr, f, arg, lo, hi, step=1, shift=0):
+        lm, hm = mp.mpf(str(lo)), mp.mpf(str(hi))
+        # Extrema of the argument are break points too: where the argument only touches a level, the reference must not
+        # evaluate the step exactly there. At such a touch the double value of the argument equals the level on a strip
+        # about 2*sqrt(ulp(level)/|arg''|) wide, so the tolerance grows by that width times the largest jump height (2).
+        extrema = roots(lambda t: mp.diff(arg, t), lm + mp.mpf('1e-20'), hm - mp.mpf('1e-20'), 2000)
+        tol = mp.mpf('1e-12')
+        for t in extrema:
+            v = arg(t)
+            level = shift + step * mp.nint((v - shift) / step)
+            curv = abs(mp.diff(arg, t, 2))
+            if abs(v - level) < mp.mpf('1e-30') and curv > 0:
+                ulp = mp.mpf(2) ** (mp.floor(mp.log(abs(level), 2)) - 52) if level != 0 else mp.mpf(2) ** -1074
+                tol += 2 * 4 * mp.sqrt(ulp / curv)
+        add(kind, expr, quad_with_breaks(f, lm, hm, jumps(arg, lm, hm, step, shift) + extrema), abs_tol=float(tol))
+
+
+    # A. Further jumps with nonlinear argument
+    for _ in range(4):
+        b = r4(rnd.uniform(1.5, 4))
+        step_case('floor_x3', f'int(floor(x^3),x,0,{num(b)})', lambda t: mp.floor(t ** 3), lambda t: t ** 3, 0, b)
+    for _ in range(4):
+        b = r4(rnd.uniform(2, 2.5))
+        step_case('floor_cubic', f'int(floor(x^3-3*x),x,-2,{num(b)})', lambda t: mp.floor(t ** 3 - 3 * t), lambda t: t ** 3 - 3 * t, -2, b)
+    for _ in range(4):
+        a = r4(rnd.uniform(0.04, 0.2))
+        step_case('floor_inv', f'int(floor(1/x),x,{num(a)},1)', lambda t: mp.floor(1 / t), lambda t: 1 / t, a, 1)
+    for _ in range(4):
+        b = r4(rnd.uniform(5, 100))
+        step_case('floor_ln', f'int(floor(ln(x)),x,0.1,{num(b)})', lambda t: mp.floor(mp.log(t)), lambda t: mp.log(t), 0.1, b)
+    for _ in range(4):
+        b = r4(rnd.uniform(1.0, 1.45))
+        step_case('floor_tan', f'int(floor(tan(x)),x,0,{num(b)})', lambda t: mp.floor(mp.tan(t)), lambda t: mp.tan(t), 0, b)
+    for _ in range(4):
+        b = r4(rnd.uniform(1.5, 4))
+        step_case('ceil_x2', f'int(ceil(x^2),x,0,{num(b)})', lambda t: mp.ceil(t * t), lambda t: t * t, 0, b)
+    for _ in range(4):
+        b = r4(rnd.uniform(10, 200))
+        step_case('round_sqrt', f'int(round(sqrt(x)),x,0,{num(b)})', lambda t: mp.floor(mp.sqrt(t) + mp.mpf(1) / 2), lambda t: mp.sqrt(t), 0, b, 1, mp.mpf(1) / 2)
+    for _ in range(4):
+        b = r4(rnd.uniform(3, 30))
+        step_case('mod_07', f'int(x mod 0.7,x,0,{num(b)})', lambda t: t - mp.mpf('0.7') * mp.floor(t / mp.mpf('0.7')), lambda t: t, 0, b, mp.mpf('0.7'))
+    for _ in range(4):
+        b = r4(rnd.uniform(2, 5))
+        step_case('mod_x2', f'int(x^2 mod 1,x,0,{num(b)})', lambda t: t * t - mp.floor(t * t), lambda t: t * t, 0, b)
+    for _ in range(4):
+        b = r4(rnd.uniform(3, 20))
+        step_case('floor_sin2', f'int(floor(5*sin(x)^2),x,0,{num(b)})', lambda t: mp.floor(5 * mp.sin(t) ** 2), lambda t: 5 * mp.sin(t) ** 2, 0, b)
+    for _ in range(4):
+        b = r4(rnd.uniform(2, 6))
+        step_case('sign_sin_x2', f'int(sign(sin(x^2)),x,0,{num(b)})', lambda t: mp.sign(mp.sin(t * t)), lambda t: t * t, 0, b, mp.pi)
+    for _ in range(4):
+        b = r4(rnd.uniform(3, 15))
+        step_case('floor_cos_shift', f'int(floor(2*cos(3*x)+0.5),x,0,{num(b)})', lambda t: mp.floor(2 * mp.cos(3 * t) + mp.mpf('0.5')),
+                  lambda t: 2 * mp.cos(3 * t) + mp.mpf('0.5'), 0, b)
+
+    # B. Further kinks of nonlinear arguments (roots found numerically)
+    for kind, fe, fm, lo, hi in [
+        ('abs_sin_x3', 'abs(sin(x^3))', lambda t: mp.sin(t ** 3), 0, 2.6),
+        ('abs_cos_exp', 'abs(cos(exp(x/2)))', lambda t: mp.cos(mp.exp(t / 2)), 0, 6),
+        ('abs_cubic', 'abs(x^3-2*x)', lambda t: t ** 3 - 2 * t, -2, 2.5),
+        ('abs_transcendental', 'abs(sin(x)-x/10)', lambda t: mp.sin(t) - t / 10, -12, 12),
+        ('abs_ln', 'abs(ln(x)-1)', lambda t: mp.log(t) - 1, 0.5, 9),
+        ('abs_trig_sum', 'abs(sin(x)+cos(2*x))', lambda t: mp.sin(t) + mp.cos(2 * t), 0, 20),
+    ]:
+        for _ in range(3):
+            b = r4(rnd.uniform(lo + 0.6 * (hi - lo), hi))
+            lm, hm = mp.mpf(str(lo)), mp.mpf(repr(b))
+            add(kind, f'int({fe},x,{lo},{num(b)})', quad_with_breaks(lambda t, g=fm: abs(g(t)), lm, hm, roots(fm, lm, hm)))
+
+    # C. Divergent integrals of nonlinear forms
+    for expr in ['int(1/abs(x^2-2),x,0,2)', 'int(1/(x^3-1),x,0,2)', 'int(1/sin(x),x,1,4)', 'int(1/abs(ln(x)),x,0.5,2)',
+                 'int(abs(sin(x))^(-1.5),x,1,4)', 'int(1/(exp(x)-1),x,0,1)', 'int(x/(x^2-1),x,0,2)', 'int(1/abs(sin(x^2)),x,1,2)',
+                 'int(1/(x^2-3*x+2),x,0,3)', 'int(1/abs(cos(x)-0.5),x,0,2)', 'int(1/sqrt(abs(x-1))^2,x,0,2)', 'int(exp(x)/(exp(x)-2),x,0,1)']:
+        add('divergent', expr, None, check='diverges')
+
+    # Cases named in BEWERTUNG-2026-11-16-2.md
+    for expr in ['int(abs(cos(x))^(-1.5),x,0,3)', 'int(1/sin(x)^2,x,1,4)', 'int(1/cos(x)^2,x,0,3)']:
+        add('divergent', expr, None, check='diverges')
+    step_case('review', 'int(floor(3*sin(x)),x,0,8.531)', lambda t: mp.floor(3 * mp.sin(t)), lambda t: 3 * mp.sin(t), 0, 8.531)
+    write('integral_forms2.tsv', rows,
+          'Further jumps and kinks of nonlinear arguments (floor(x^3), floor(1/x), floor(tan(x)), x mod 0.7, x^2 mod 1, '
+          'floor(5*sin(x)^2), abs(sin(x)-x/10) ...) and divergent integrals whose singularity comes from a trigonometric '
+          'function (abs(sin(x))^(-1.5), 1/sin(x)^2). Where the argument of a step only touches a jump level, the '
+          'absolute tolerance includes the strip on which double evaluation reaches the level.')
+
+    # ----------------------------------------------------------------------------------------------
+    rows = []
+
+
+    def dadd(kind, expr, check, ref, abs_tol='1e-12', rel_tol='1e-6'):
+        rows.append([f'derivform2_{kind}_{len(rows):04d}', expr, expr, check, ref, abs_tol, rel_tol, 'rad'])
+
+
+    for txt, p in [('abs(x)^0.7', '0'), ('abs(x-2)^(2/3)', '2'), ('floor(x^2)', '2'), ('x mod 1', '3'), ('ceil(x)-floor(x)', '1'),
+                   ('sqrt(x^2)', '0'), ('sqrt(abs(x))^2', '0'), ('abs(x)+abs(-x)', '0'), ('x^(2/3)', '0'), ('(x+1)!', '2'),
+                   ('2*x!', '3'), ('floor(exp(x))', '0'), ('abs(x^2-1)^0.5', '1'), ('round(x^2/2)', '1'), ('x mod 0.5', '1')]:
+        dadd('no_derivative', f'deriv({txt},x,{p})', 'error', 'no derivative', '0', '0')
+    for txt, p, v in [('abs(x)^1.2', '0', 0), ('abs(x)^0.5*x^2', '0', 0), ('floor(x)+floor(-x)', '2.5', 0), ('floor(x^2)', '1.5', 0),
+                      ('x mod 1', '0.5', 1), ('ceil(x)-floor(x)', '0.5', 0), ('round(x)-x', '0.3', -1), ('sqrt(x^4)', '0', 0),
+                      ('abs(x)^(3/2)', '0', 0), ('sin(x)/x', '0', 0), ('floor(x)*0+x', '1', 1), ('abs(x)-abs(x)', '0', 0),
+                      ('abs(x-1)^2', '1', 0), ('x*abs(x)^0.5', '0', 0), ('floor(x)*(x-2)^2', '2', 0)]:
+        dadd('exists', f'deriv({txt},x,{p})', 'number_or_error', num(v), '1e-12', '0')
+    write('derivative_forms2.tsv', rows,
+          'Derivatives at points where none exists (abs(x)^0.7, abs(x-2)^(2/3), floor(x^2) at 2, x mod 1 at 3, (x+1)!) and '
+          'where one exists although a kink or jump is nearby (abs(x)^1.2, x mod 1 at 0.5, sqrt(x^4) at 0).')
+
+    # ----------------------------------------------------------------------------------------------
+    rows = []
+    seen = set()
+
+
+    def c3(lo, hi):
+        return round(rnd.uniform(lo, hi), 3)
+
+
+    def term():
+        return rnd.choice([
+            lambda: 'floor(x^3)', lambda: 'ceil(x^2)', lambda: 'x mod 0.7', lambda: 'x^2 mod 1', lambda: 'abs(sin(x^3))',
+            lambda: f'floor(5*sin(x)^2)', lambda: 'sign(sin(x^2))', lambda: f'abs(x^3-{c3(1, 5)}*x)', lambda: 'round(sqrt(abs(x)))',
+            lambda: f'floor(2*cos(3*x)+{c3(0, 1)})', lambda: 'abs(sin(x)-x/10)', lambda: 'abs(sin(x)+cos(2*x))', lambda: f'x^{rnd.randint(1, 3)}',
+            lambda: f'exp(-{10 ** rnd.choice([2, 4])}*(x-({c3(-2, 2)}))^2)', lambda: 'sin(3*x)',
+        ])()
+
+
+    while len(rows) < 60:
+        shape = rnd.random()
+        f = term() if shape < 0.4 else (f'{term()}+{rnd.randint(2, 5)}*{term()}' if shape < 0.8 else f'({term()})*({term()})')
+        lo = c3(-2.5, 0.5)
+        hi = round(lo + rnd.choice([1.5, 2.5, 4]) * rnd.uniform(0.6, 1.0), 3)
+        mid = round(lo + (hi - lo) * rnd.uniform(0.15, 0.85), 3)
+        whole = f'int({f},x,{lo},{hi})'
+        if whole in seen:
+            continue
+        seen.add(whole)
+        rows.append([f'splitform2_{len(rows):04d}', whole, whole, 'integral_split', f'int({f},x,{lo},{mid});int({f},x,{mid},{hi})', '1e-12', '1e-9', 'rad'])
+    write('split_forms2.tsv', rows,
+          'Self-check integral_split with floor(x^3), ceil(x^2), x mod 0.7, x^2 mod 1, abs(sin(x^3)), floor(5*sin(x)^2), '
+          'sign(sin(x^2)), abs(x^3-c*x), round(sqrt(abs(x))) and further building blocks.')
+
+
 if __name__ == '__main__':
     derivatives()
     integrals()
@@ -1244,3 +1439,4 @@ if __name__ == '__main__':
     determinants()
     integral_splits()
     forms()
+    forms2()

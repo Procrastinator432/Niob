@@ -1691,6 +1691,42 @@ public final class CalculatorEngine {
                 uniqueExtra.subList(write, uniqueExtra.size()).clear();
             }
         }
+        if (!anchorsTruncated && uniqueExtra.size() <= 256) {
+            ArrayList<Double> poleCandidates = new ArrayList<>(uniqueExtra.size() + 3);
+            poleCandidates.add(lo);
+            poleCandidates.add(hi);
+            if (lo < 0.0 && hi > 0.0) {
+                poleCandidates.add(0.0);
+            }
+            poleCandidates.addAll(uniqueExtra);
+            for (double r : poleCandidates) {
+                for (double sign : new double[]{-1.0, 1.0}) {
+                    double avail = sign > 0.0 ? (hi - r) : (r - lo);
+                    if (avail <= 0.0) continue;
+                    double d1 = Math.min(1e-5 * Math.max(1.0, Math.abs(r)), 0.1 * avail);
+                    double d2 = d1 * 1e-2;
+                    double d3 = d2 * 1e-2;
+                    if (d3 <= 0.0 || r + sign * d3 == r) continue;
+                    try {
+                        double v1 = Math.abs(f.eval(r + sign * d1));
+                        double v2 = Math.abs(f.eval(r + sign * d2));
+                        double v3 = Math.abs(f.eval(r + sign * d3));
+                        if (Double.isFinite(v1) && Double.isFinite(v2) && Double.isFinite(v3)
+                                && v1 > 0.0 && v2 > 0.0
+                                && (v2 / v1) >= 98.0
+                                && (v3 / v2) >= 98.0
+                                && v3 * d3 >= 0.01) {
+                            throw new RuntimeException("Integral divergiert (nicht integrierbare Polstelle)");
+                        }
+                    } catch (RuntimeException ex) {
+                        if (ex.getMessage() != null && ex.getMessage().contains("divergiert")) {
+                            throw ex;
+                        }
+                        checkInterrupted();
+                    }
+                }
+            }
+        }
         boolean manyExtra = uniqueExtra.size() > 64;
         java.util.ArrayList<AnchorPoint> pts = new java.util.ArrayList<>(initialSubintervals + uniqueExtra.size() + 128);
         for (int i = 0; i <= initialSubintervals; i++) {

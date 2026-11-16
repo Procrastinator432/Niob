@@ -24,6 +24,9 @@ const INTEGRAL_FORMS: &str = include_str!("data/generated/integral_forms.tsv");
 const DERIVATIVE_FORMS: &str = include_str!("data/generated/derivative_forms.tsv");
 const DETERMINANT_FORMS: &str = include_str!("data/generated/determinant_forms.tsv");
 const SPLIT_FORMS: &str = include_str!("data/generated/split_forms.tsv");
+const INTEGRAL_FORMS2: &str = include_str!("data/generated/integral_forms2.tsv");
+const DERIVATIVE_FORMS2: &str = include_str!("data/generated/derivative_forms2.tsv");
+const SPLIT_FORMS2: &str = include_str!("data/generated/split_forms2.tsv");
 
 /// Generous per-case time limit so that slow debug builds do not turn into timeouts.
 const TIMEOUT_MS: u64 = 30_000;
@@ -537,4 +540,19 @@ fn generated_determinant_forms() {
 #[test]
 fn generated_split_forms() {
     run_table("generated_split_forms", SPLIT_FORMS);
+}
+
+#[test]
+fn generated_integral_forms2() {
+    run_table("generated_integral_forms2", INTEGRAL_FORMS2);
+}
+
+#[test]
+fn generated_derivative_forms2() {
+    run_table("generated_derivative_forms2", DERIVATIVE_FORMS2);
+}
+
+#[test]
+fn generated_split_forms2() {
+    run_table("generated_split_forms2", SPLIT_FORMS2);
 }

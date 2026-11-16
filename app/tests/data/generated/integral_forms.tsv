@@ -60,11 +60,11 @@ intform_step_floor_exp_0055	int(floor(exp(x)),x,0,2.371)	int(floor(exp(x)),x,0,2
 intform_step_floor_exp_0056	int(floor(exp(x)),x,0,4.433)	int(floor(exp(x)),x,0,4.433)	integral	81.0480499057297	1e-12	1e-7	rad
 intform_step_floor_exp_0057	int(floor(exp(x)),x,0,2.998)	int(floor(exp(x)),x,0,2.998)	integral	17.624383539246516	1e-12	1e-7	rad
 intform_step_floor_exp_0058	int(floor(exp(x)),x,0,3.339)	int(floor(exp(x)),x,0,3.339)	integral	25.602256862818464	1e-12	1e-7	rad
-intform_step_floor_sin_0059	int(floor(3*sin(x)),x,0,12.28)	int(floor(3*sin(x)),x,0,12.28)	integral	-5.996814692820413	1e-12	1e-7	rad
-intform_step_floor_sin_0060	int(floor(3*sin(x)),x,0,29.42)	int(floor(3*sin(x)),x,0,29.42)	integral	-10.789748225936258	1e-12	1e-7	rad
-intform_step_floor_sin_0061	int(floor(3*sin(x)),x,0,16.24)	int(floor(3*sin(x)),x,0,16.24)	integral	-2.8633656860101224	1e-12	1e-7	rad
-intform_step_floor_sin_0062	int(floor(3*sin(x)),x,0,15.3)	int(floor(3*sin(x)),x,0,15.3)	integral	-2.2072554898570207	1e-12	1e-7	rad
-intform_step_floor_sin_0063	int(floor(3*sin(x)),x,0,9.198)	int(floor(3*sin(x)),x,0,9.198)	integral	1.0024635222276166	1e-12	1e-7	rad
+intform_step_floor_sin_0059	int(floor(3*sin(x)),x,0,12.28)	int(floor(3*sin(x)),x,0,12.28)	integral	-5.996814692820413	1e-07	1e-7	rad
+intform_step_floor_sin_0060	int(floor(3*sin(x)),x,0,29.42)	int(floor(3*sin(x)),x,0,29.42)	integral	-10.789748225936258	2.5e-07	1e-7	rad
+intform_step_floor_sin_0061	int(floor(3*sin(x)),x,0,16.24)	int(floor(3*sin(x)),x,0,16.24)	integral	-2.8633656860101224	1.5e-07	1e-7	rad
+intform_step_floor_sin_0062	int(floor(3*sin(x)),x,0,15.3)	int(floor(3*sin(x)),x,0,15.3)	integral	-2.2072554898570207	1.5e-07	1e-7	rad
+intform_step_floor_sin_0063	int(floor(3*sin(x)),x,0,9.198)	int(floor(3*sin(x)),x,0,9.198)	integral	1.0024635222276166	1e-07	1e-7	rad
 intform_step_sign_x2_0064	int(sign(x^2-4.31),x,-5,6)	int(sign(x^2-4.31),x,-5,6)	integral	2.6957842031893224	1e-12	1e-7	rad
 intform_step_sign_x2_0065	int(sign(x^2-2.67),x,-5,6)	int(sign(x^2-2.67),x,-5,6)	integral	4.4639461446527235	1e-12	1e-7	rad
 intform_step_sign_x2_0066	int(sign(x^2-19.26),x,-5,6)	int(sign(x^2-19.26),x,-5,6)	integral	-6.554486605993352	1e-12	1e-7	rad

@@ -4486,6 +4486,47 @@ where
         .collect();
     unique_extra.sort_by(f64::total_cmp);
     unique_extra.dedup_by(|b, a| (*b - *a).abs() <= 1e-12 * b.abs().max(1.0));
+    if !anchors_truncated && unique_extra.len() <= 256 {
+        let mut pole_candidates: Vec<f64> = Vec::with_capacity(unique_extra.len() + 3);
+        pole_candidates.push(lo);
+        pole_candidates.push(hi);
+        if lo < 0.0 && hi > 0.0 {
+            pole_candidates.push(0.0);
+        }
+        pole_candidates.extend_from_slice(&unique_extra);
+        for r in pole_candidates {
+            for sign in [-1.0_f64, 1.0_f64] {
+                let avail = if sign > 0.0 { hi - r } else { r - lo };
+                if avail <= 0.0 {
+                    continue;
+                }
+                let d1 = (1e-5 * r.abs().max(1.0)).min(0.1 * avail);
+                let d2 = d1 * 1e-2;
+                let d3 = d2 * 1e-2;
+                if d3 <= 0.0 || r + sign * d3 == r {
+                    continue;
+                }
+                if let (Ok(y1), Ok(y2), Ok(y3)) = (
+                    f(r + sign * d1),
+                    f(r + sign * d2),
+                    f(r + sign * d3),
+                ) {
+                    let (v1, v2, v3) = (y1.abs(), y2.abs(), y3.abs());
+                    if v1.is_finite()
+                        && v2.is_finite()
+                        && v3.is_finite()
+                        && v1 > 0.0
+                        && v2 > 0.0
+                        && (v2 / v1) >= 98.0
+                        && (v3 / v2) >= 98.0
+                        && v3 * d3 >= 0.01
+                    {
+                        return Err("Integral divergiert (nicht integrierbare Polstelle)".to_string());
+                    }
+                }
+            }
+        }
+    }
     let many_extra = unique_extra.len() > 64;
     if initial_subintervals >= 500 {
         let mid = 0.5 * (lo + hi);

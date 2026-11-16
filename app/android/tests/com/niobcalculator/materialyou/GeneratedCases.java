@@ -25,7 +25,8 @@ final class GeneratedCases {
     private static final String[] FILES = {
         "derivatives", "integrals", "matrices", "exact_numbers", "antiderivatives", "polynomials",
         "integral_families", "derivative_families", "determinants", "integral_splits",
-        "integral_forms", "derivative_forms", "determinant_forms", "split_forms"
+        "integral_forms", "derivative_forms", "determinant_forms", "split_forms",
+        "integral_forms2", "derivative_forms2", "split_forms2"
     };
 
     private GeneratedCases() {}

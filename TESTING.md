@@ -14,7 +14,7 @@ test.bat
 
 Der Aufruf führt die Rust-Tests und die Tests des Android-Rechenkerns aus. Alle ausgewählten Tests müssen bestehen, damit der Befehl Exitcode 0 liefert. Fehler sind normale fehlgeschlagene Tests: Sie sind weder ignoriert noch als erwartete Fehlschläge versteckt.
 
-Beim aktuellen Prüfstand vom 16.11.2026 bestanden **394 Tests** (187 Rust und 207 Android/JVM, 0 Fehler, inkl. `NIOB_GENERATED_ALL='1'` über alle 14 generierten Testsuiten mit 3 743 Fällen pro Kern). Die Ergebnisse der vorangegangenen Emulatorprüfungen stehen in der [Nachprüfung](CODE-SMELL-NACHPRUEFUNG.md); die Befunde und Nachprüfungen zu den Rechenkernen, Desktop-Persistenz und Release-Konfiguration sind in [BEWERTUNG-2026-11-15-2.md](BEWERTUNG-2026-11-15-2.md), [BEWERTUNG-2026-11-15-4.md](BEWERTUNG-2026-11-15-4.md) und [BEWERTUNG-2026-11-16.md](BEWERTUNG-2026-11-16.md) dokumentiert.
+Beim aktuellen Prüfstand vom 16.11.2026 bestanden **400 Tests** (190 Rust und 210 Android/JVM, 0 Fehler, inkl. `NIOB_GENERATED_ALL='1'` über alle 17 generierten Testsuiten mit 3 915 Fällen pro Kern). Die Ergebnisse der vorangegangenen Emulatorprüfungen stehen in der [Nachprüfung](CODE-SMELL-NACHPRUEFUNG.md); die Befunde und Nachprüfungen zu den Rechenkernen, Desktop-Persistenz und Release-Konfiguration sind in [BEWERTUNG-2026-11-15-2.md](BEWERTUNG-2026-11-15-2.md), [BEWERTUNG-2026-11-15-4.md](BEWERTUNG-2026-11-15-4.md), [BEWERTUNG-2026-11-16.md](BEWERTUNG-2026-11-16.md) und [BEWERTUNG-2026-11-16-2.md](BEWERTUNG-2026-11-16-2.md) dokumentiert.
 
 ## Einen Fix gezielt ausprobieren
 
@@ -78,7 +78,7 @@ Die Tests decken Rechenkern und Zahlenausgabe ab. Sie ersetzen keine Tests für 
 
 ## Generierte Fälle
 
-Zusätzlich zu den Einzelfällen prüfen vierzehn Tests je Implementierung zusammen rund 3 700 erzeugte Fälle, fast alle mit unabhängig berechneten Sollwerten:
+Zusätzlich zu den Einzelfällen prüfen siebzehn Tests je Implementierung zusammen rund 3 900 erzeugte Fälle, fast alle mit unabhängig berechneten Sollwerten:
 
 | Test | Fälle | Inhalt |
 |---|---:|---|
@@ -96,12 +96,15 @@ Zusätzlich zu den Einzelfällen prüfen vierzehn Tests je Implementierung zusam
 | `generated_derivative_forms` | 126 | Auslöschung nahe 0, nahe 1 und bei großem x, Knicke mit und ohne Ableitung, Fakultät, DEG-Modus |
 | `generated_determinant_forms` | 41 | 5×5 und 6×6 mit Einträgen bis 10⁹, Produkte, exakt singuläre Matrizen, Dezimalbrüche, Einträge 10⁹⁰ |
 | `generated_split_forms` | 80 | Teilungsprobe mit Bausteinen mit nichtlinearem Argument |
+| `generated_integral_forms2` | 82 | Weitere Sprünge und Knicke mit nichtlinearem Argument (`floor(x^3)`, `floor(1/x)`, `x mod 0.7` …), divergente Integrale mit Singularität einer Winkelfunktion |
+| `generated_derivative_forms2` | 30 | Stellen ohne Ableitung und Stellen mit Ableitung trotz nahem Knick oder Sprung |
+| `generated_split_forms2` | 60 | Teilungsprobe mit diesen Bausteinen |
 
 Die Fälle liegen in `app/tests/data/generated/`. Rust (`app/tests/generated.rs`) und Android (`GeneratedCases.java`) lesen dieselben Dateien; beide Rechenkerne werden also gegen dieselben Sollwerte geprüft. Die Sollwerte stammen nicht aus einem der beiden Kerne, sondern aus sympy, mpmath und exakter Python-Arithmetik. Für den Testlauf ist kein Python nötig.
 
 Grundsatz: Ein korrektes Ergebnis oder eine ausdrückliche Fehlermeldung ist in Ordnung, ein falsches Ergebnis nicht. Wo Gleitkomma an seine Grenzen kommt (nahe Polstellen, starke Auslöschung), ist deshalb auch eine Fehlermeldung zulässig; bei Integralen zusätzlich ein Ergebnis, das als nicht konvergiert gekennzeichnet ist. Die Prüfungen sind in [app/tests/data/generated/README.md](app/tests/data/generated/README.md) beschrieben.
 
-Jeder der vierzehn Tests meldet im Fehlerfall die Anzahl falscher Fälle und die ersten 30 davon. Zulässige Fehlermeldungen und als nicht konvergiert gemeldete Integrale werden mitgezählt, schlagen aber nicht fehl. Alle Fehlschläge zeigt:
+Jeder der siebzehn Tests meldet im Fehlerfall die Anzahl falscher Fälle und die ersten 30 davon. Zulässige Fehlermeldungen und als nicht konvergiert gemeldete Integrale werden mitgezählt, schlagen aber nicht fehl. Alle Fehlschläge zeigt:
 
 ```powershell
 $env:NIOB_GENERATED_ALL = '1'; .\test.ps1 -Filter generated_; Remove-Item Env:NIOB_GENERATED_ALL
@@ -140,7 +143,11 @@ Beim Einbau der vier Tests `integral_forms` bis `split_forms` am 16.11.2026, nac
 
 Nach Umsetzung der Korrekturen für nichtlineare Sprünge (`floor`/`ceil`/`round`/`mod`), periodische nichtlineare Knicke (`abs(sin(exp(x)))` etc.), Fakultät-/Knick-/Unstetigkeitsprüfungen in `deriv` sowie UI-Konvergenzhinweise bestehen alle 14 generierten Suiten und Regressionstests in beiden Kernen mit **0 Fehlern**.
 
-Die erzeugten Integrale brauchen in einem Rust-Debug-Build Zeit: Alle generierten Tests zusammen liefen auf einem Linux-Server in rund 85 Sekunden (Android-JVM rund 18 Sekunden). Das Standard-Zeitlimit von `test.ps1` beträgt deshalb 600 Sekunden.
+Beim Einbau der drei Tests `integral_forms2` bis `split_forms2` am 16.11.2026, nach der [sechsten Nachprüfung](BEWERTUNG-2026-11-16-2.md), schlug `generated_integral_forms2` in beiden Kernen mit denselben 4 Fällen fehl: `abs(sin(x))^(-1.5)`, `abs(cos(x))^(-1.5)`, `1/sin(x)^2` und `1/cos(x)^2` werden als konvergiert gemeldet, obwohl sie divergieren. `generated_derivative_forms2` und `generated_split_forms2` bestanden. Zugleich wurde in `integral_forms.tsv` die Toleranz der fünf `floor(3*sin(x))`-Fälle angepasst (siehe README der Tabellen); die Fälle bestanden schon vorher und bestehen weiter.
+
+Nach Umsetzung der asymptotischen Polstellen-Divergenzprüfung in beiden Rechenkernen bestehen nun alle 17 generierten Suiten (3 915 Fälle pro Kern) sowie alle Unit- und Regressionstests mit **0 Fehlern**.
+
+Die erzeugten Integrale brauchen in einem Rust-Debug-Build Zeit: Alle generierten Tests zusammen liefen auf einem Linux-Server in rund 130 Sekunden (Android-JVM rund 25 Sekunden). Das Standard-Zeitlimit von `test.ps1` beträgt deshalb 600 Sekunden.
 
 Neue Fälle entstehen nicht von Hand, sondern im Generator `tools/generate_test_cases.py` (benötigt Python 3.9 oder neuer sowie `pip install sympy mpmath`):
 

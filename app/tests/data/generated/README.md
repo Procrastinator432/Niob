@@ -48,6 +48,16 @@ Die vier Tabellen stammen aus der [fünften Nachprüfung](../../../../BEWERTUNG-
 - `determinant_forms.tsv`: 5×5- und 6×6-Matrizen mit Einträgen bis 10⁹, Produkte, Transponierte, exakt singuläre Matrizen mit Einträgen bis 10¹², Dezimalbrüche, Einträge 10⁹⁰, `det(inv(A))` und 4×4-Potenzen.
 - `split_forms.tsv`: 80 Teilungsproben mit Bausteinen wie `floor(x^2)`, `floor(exp(x/3))`, `x mod 1`, `abs(sin(x^2))`, `ln(abs(sin(x)))`, `1/sqrt(abs(x^2-c))` und `sin(x^2)`.
 
+Bei `floor(3*sin(x))` enthält die absolute Toleranz 5·10⁻⁸ je Stelle x = π/2 + 2πn im Intervall: Dort ist `sin(x)` in Gleitkomma auf einem etwa 2·10⁻⁸ breiten Streifen genau 1 und `floor(3*sin(x))` damit 3 statt 2. Das kann kein Integrationsverfahren ausgleichen.
+
+## Formen aus der sechsten Nachprüfung
+
+Die drei Tabellen stammen aus der [sechsten Nachprüfung](../../../../BEWERTUNG-2026-11-16-2.md) und enthalten die dort genannten Beispiele. Sie teilen sich einen Zufallsgenerator (Startwert 3001) in fester Reihenfolge.
+
+- `integral_forms2.tsv`: weitere Sprünge und Knicke mit nichtlinearem Argument (`floor(x^3)`, `floor(x^3-3*x)`, `floor(1/x)`, `floor(ln(x))`, `floor(tan(x))`, `ceil(x^2)`, `round(sqrt(x))`, `x mod 0.7`, `x^2 mod 1`, `floor(5*sin(x)^2)`, `sign(sin(x^2))`, `abs(sin(x^3))`, `abs(sin(x)-x/10)` …) und 15 divergente Integrale, darunter solche mit Singularität einer Winkelfunktion (`abs(sin(x))^(-1.5)`, `1/sin(x)^2`, `1/cos(x)^2`). Extremstellen des Arguments sind Teilungspunkte der Referenz. Berührt das Argument dort eine Sprungstufe, wächst die absolute Toleranz um die Breite des Streifens, auf dem die Gleitkomma-Auswertung die Stufe erreicht (etwa 2·√(ulp(Stufe)/|f''|), mit Sicherheitsfaktor).
+- `derivative_forms2.tsv`: Ableitungen an Stellen ohne Ableitung (`abs(x)^0.7` und `x^(2/3)` bei 0, `abs(x-2)^(2/3)` bei 2, `floor(x^2)` bei 2, `x mod 1` bei 3, `ceil(x)-floor(x)` bei 1, `(x+1)!`) und mit Ableitung trotz nahem Knick oder Sprung (`abs(x)^1.2`, `x mod 1` bei 0,5, `round(x)-x`, `sqrt(x^4)` bei 0).
+- `split_forms2.tsv`: 60 Teilungsproben mit diesen Bausteinen.
+
 ## Zufallsfolgen
 
 | Datei | Startwert |
@@ -62,5 +72,6 @@ Die vier Tabellen stammen aus der [fünften Nachprüfung](../../../../BEWERTUNG-
 | `determinants.tsv` | 47 |
 | `integral_splits.tsv` | 53 |
 | `integral_forms.tsv`, `derivative_forms.tsv`, `determinant_forms.tsv`, `split_forms.tsv` | 2611 (gemeinsam) |
+| `integral_forms2.tsv`, `derivative_forms2.tsv`, `split_forms2.tsv` | 3001 (gemeinsam) |
 
 `derivatives.tsv` verwendet ein festes Raster ohne Zufall.

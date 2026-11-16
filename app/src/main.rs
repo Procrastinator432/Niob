@@ -1201,7 +1201,7 @@ impl NiobCalculatorApp {
                         ui.painter().circle_stroke(
                             rect.center(),
                             size * 0.48,
-                            Stroke::new(2.0, pal.on_surface),
+                            Stroke::new(2.0_f32, pal.on_surface),
                         );
                     }
                     if resp.on_hover_text(seed.name_de()).clicked() {
@@ -1331,7 +1331,7 @@ impl NiobCalculatorApp {
                     )
                     .fill(fill)
                     .stroke(if is_active {
-                        Stroke::new(1.5, pal.primary)
+                        Stroke::new(1.5_f32, pal.primary)
                     } else {
                         Stroke::NONE
                     })
@@ -1368,7 +1368,7 @@ impl NiobCalculatorApp {
             .fill(pal.surface_container_low)
             .corner_radius(CornerRadius::same(16))
             .inner_margin(egui::Margin::same(10))
-            .stroke(Stroke::new(1.0, pal.outline_variant))
+            .stroke(Stroke::new(1.0_f32, pal.outline_variant))
             .show(ui, |ui| {
                 ui.set_height(history_height);
                 ui.horizontal(|ui| {
@@ -1628,7 +1628,7 @@ impl NiobCalculatorApp {
             .fill(pal.surface_container)
             .corner_radius(CornerRadius::same(16))
             .inner_margin(egui::Margin::symmetric(12, 8))
-            .stroke(Stroke::new(1.5, pal.primary))
+            .stroke(Stroke::new(1.5_f32, pal.primary))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let pretty = if self.input_expr.is_empty() {
@@ -1783,7 +1783,7 @@ impl NiobCalculatorApp {
             .fill(pal.surface_container)
             .corner_radius(CornerRadius::same(KEYBOARD_CARD_CORNER_RADIUS as u8))
             .inner_margin(egui::Margin::same(10))
-            .stroke(Stroke::new(1.0, pal.outline_variant))
+            .stroke(Stroke::new(1.0_f32, pal.outline_variant))
             .show(ui, |ui| {
                 // Centered 64dp Android Drag Handle Bar (`@id/main_keyboard_drag_bar` from `main_keyboard_layout.xml`)
                 ui.vertical_centered(|ui| {
@@ -2497,13 +2497,13 @@ impl NiobCalculatorApp {
         if x0_screen >= rect.left() && x0_screen <= rect.right() {
             painter.line_segment(
                 [Pos2::new(x0_screen, rect.top()), Pos2::new(x0_screen, rect.bottom())],
-                Stroke::new(2.0, pal.on_surface_variant),
+                Stroke::new(2.0_f32, pal.on_surface_variant),
             );
         }
         if y0_screen >= rect.top() && y0_screen <= rect.bottom() {
             painter.line_segment(
                 [Pos2::new(rect.left(), y0_screen), Pos2::new(rect.right(), y0_screen)],
-                Stroke::new(2.0, pal.on_surface_variant),
+                Stroke::new(2.0_f32, pal.on_surface_variant),
             );
         }
 
@@ -2526,7 +2526,7 @@ impl NiobCalculatorApp {
                     if sy >= rect.top() - 200.0 && sy <= rect.bottom() + 200.0 {
                         if let Some(p) = prev_pt {
                             if (cur_pt.y - p.y).abs() < rect.height() * 0.9 {
-                                painter.line_segment([p, cur_pt], Stroke::new(2.4, pf.color));
+                                painter.line_segment([p, cur_pt], Stroke::new(2.4_f32, pf.color));
                             }
                         }
                         prev_pt = Some(cur_pt);
@@ -2562,7 +2562,7 @@ impl NiobCalculatorApp {
                     painter.circle_stroke(
                         Pos2::new(tx_s, ty_s),
                         5.5,
-                        Stroke::new(1.5, pal.bg_surface),
+                        Stroke::new(1.5_f32, pal.bg_surface),
                     );
                 }
             }
@@ -2571,7 +2571,7 @@ impl NiobCalculatorApp {
         painter.rect_stroke(
             rect,
             CornerRadius::same(16),
-            Stroke::new(1.0, pal.outline_variant),
+            Stroke::new(1.0_f32, pal.outline_variant),
             StrokeKind::Inside,
         );
     }
@@ -3198,7 +3198,7 @@ impl eframe::App for NiobCalculatorApp {
                 Frame::new()
                     .fill(pal.surface_container)
                     .inner_margin(egui::Margin::symmetric(14, 8))
-                    .stroke(Stroke::new(1.0, pal.outline_variant)),
+                    .stroke(Stroke::new(1.0_f32, pal.outline_variant)),
             )
             .show_inside(ui, |ui| {
                 self.render_top_bar(ui, &pal);
@@ -3209,7 +3209,7 @@ impl eframe::App for NiobCalculatorApp {
                 Frame::new()
                     .fill(pal.surface_container)
                     .inner_margin(egui::Margin::symmetric(12, 8))
-                    .stroke(Stroke::new(1.0, pal.outline_variant)),
+                    .stroke(Stroke::new(1.0_f32, pal.outline_variant)),
             )
             .show_inside(ui, |ui| {
                 self.render_bottom_nav(ui, &pal);
