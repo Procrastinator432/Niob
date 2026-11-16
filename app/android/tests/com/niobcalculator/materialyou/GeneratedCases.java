@@ -24,7 +24,8 @@ final class GeneratedCases {
     private static final double EPS = Math.ulp(1.0);
     private static final String[] FILES = {
         "derivatives", "integrals", "matrices", "exact_numbers", "antiderivatives", "polynomials",
-        "integral_families", "derivative_families", "determinants", "integral_splits"
+        "integral_families", "derivative_families", "determinants", "integral_splits",
+        "integral_forms", "derivative_forms", "determinant_forms", "split_forms"
     };
 
     private GeneratedCases() {}
@@ -233,6 +234,13 @@ final class GeneratedCases {
                     throw new Fail(f.getMessage() + " (als konvergiert gemeldet)");
                 }
                 return PASS;
+            }
+            case "diverges": {
+                // A divergent integral: an error or "not converged" is required, a converged value fails.
+                if (error != null) return REFUSED;
+                CalculatorEngine.IntegrationReport report = engine.getLastIntegrationReport();
+                if (report != null && !report.converged) return NOT_CONVERGED;
+                throw new Fail("divergentes Integral als Wert " + result.decimalText + " ohne Warnung");
             }
             case "exact_integer":
                 if (error != null) throw new Fail("Fehler: " + error);

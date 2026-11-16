@@ -434,8 +434,10 @@ public class MainActivity extends Activity {
         if (expr != null && (expr.contains("int(") || expr.contains("defint("))) {
             CalculatorEngine.IntegrationReport r = targetEngine.getLastIntegrationReport();
             if (r != null) {
-                String badge = r.converged ? "konvergiert" : "langsame Konv.";
-                return String.format(java.util.Locale.US, "%s  •  Δ ≈ %.1e  •  n = %d", badge, r.absErr, r.subintervals);
+                if (!r.converged) {
+                    return String.format(java.util.Locale.US, "nicht konvergiert  •  n = %d", r.subintervals);
+                }
+                return String.format(java.util.Locale.US, "konvergiert  •  Δ ≈ %.1e  •  n = %d", r.absErr, r.subintervals);
             }
         }
         return null;

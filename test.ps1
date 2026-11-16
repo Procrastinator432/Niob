@@ -4,7 +4,7 @@ param(
     [string]$Target = 'All',
     [string]$Filter = '',
     [ValidateRange(1, 3600)]
-    [int]$TimeoutSeconds = 300
+    [int]$TimeoutSeconds = 600
 )
 
 $ErrorActionPreference = 'Stop'

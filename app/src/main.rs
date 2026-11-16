@@ -4,11 +4,85 @@ mod theme;
 mod verification;
 
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 
 type PreviewKey = (String, AngleMode, bool, u64);
 type AsyncPreviewMsg = (PreviewKey, Result<EvalOutput, String>);
 type AsyncCommitMsg = (String, MathEngine, Result<EvalOutput, String>);
+
+struct PreviewJob {
+    key: PreviewKey,
+    engine: MathEngine,
+    gen: u64,
+    ctx: egui::Context,
+}
+
+struct PreviewWorker {
+    latest_gen: Arc<AtomicU64>,
+    closed: Arc<AtomicBool>,
+    shared: Arc<(Mutex<Option<PreviewJob>>, Condvar)>,
+}
+
+impl PreviewWorker {
+    fn new(tx: mpsc::Sender<AsyncPreviewMsg>) -> Self {
+        let latest_gen = Arc::new(AtomicU64::new(0));
+        let closed = Arc::new(AtomicBool::new(false));
+        let shared = Arc::new((Mutex::new(None::<PreviewJob>), Condvar::new()));
+        let worker_gen = Arc::clone(&latest_gen);
+        let worker_closed = Arc::clone(&closed);
+        let worker_shared = Arc::clone(&shared);
+        std::thread::spawn(move || {
+            loop {
+                let job = {
+                    let (lock, cvar) = &*worker_shared;
+                    let mut guard = match lock.lock() {
+                        Ok(g) => g,
+                        Err(_) => break,
+                    };
+                    while guard.is_none() && !worker_closed.load(Ordering::Relaxed) {
+                        guard = match cvar.wait(guard) {
+                            Ok(g) => g,
+                            Err(_) => return,
+                        };
+                    }
+                    if worker_closed.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    guard.take()
+                };
+                if let Some(mut j) = job {
+                    let res = j.engine.evaluate_preview_cancellable(&j.key.0, j.gen, &worker_gen);
+                    if worker_gen.load(Ordering::Relaxed) == j.gen {
+                        let _ = tx.send((j.key, res));
+                        j.ctx.request_repaint();
+                    }
+                }
+            }
+        });
+        Self { latest_gen, closed, shared }
+    }
+
+    fn submit(&self, key: PreviewKey, engine: MathEngine, ctx: egui::Context) {
+        let gen = self.latest_gen.fetch_add(1, Ordering::Relaxed) + 1;
+        let (lock, cvar) = &*self.shared;
+        if let Ok(mut guard) = lock.lock() {
+            *guard = Some(PreviewJob { key, engine, gen, ctx });
+            cvar.notify_one();
+        }
+    }
+}
+
+impl Drop for PreviewWorker {
+    fn drop(&mut self) {
+        self.closed.store(true, Ordering::Relaxed);
+        self.latest_gen.fetch_add(1, Ordering::Relaxed);
+        let (lock, cvar) = &*self.shared;
+        if let Ok(_guard) = lock.lock() {
+            cvar.notify_one();
+        }
+    }
+}
 use egui::{
     Align, Color32, CornerRadius, FontId, Frame, Layout, Pos2, RichText, ScrollArea, Sense,
     Stroke, StrokeKind, Ui, Vec2,
@@ -730,6 +804,7 @@ struct NiobCalculatorApp {
     preview_cache_result: Option<Result<EvalOutput, String>>,
     preview_pending_key: Option<PreviewKey>,
     preview_rx: Option<mpsc::Receiver<AsyncPreviewMsg>>,
+    preview_worker: Option<PreviewWorker>,
     commit_pending: bool,
     commit_rx: Option<mpsc::Receiver<AsyncCommitMsg>>,
 
@@ -823,6 +898,7 @@ impl NiobCalculatorApp {
             preview_cache_result: None,
             preview_pending_key: None,
             preview_rx: None,
+            preview_worker: None,
             commit_pending: false,
             commit_rx: None,
             screenshot_path,
@@ -916,20 +992,27 @@ impl NiobCalculatorApp {
 
     fn poll_async_eval(&mut self) {
         if let Some(ref rx) = self.preview_rx {
-            match rx.try_recv() {
-                Ok((key, res)) => {
-                    if self.preview_pending_key.as_ref() == Some(&key) {
-                        self.preview_pending_key = None;
+            let mut disconnected = false;
+            loop {
+                match rx.try_recv() {
+                    Ok((key, res)) => {
+                        if self.preview_pending_key.as_ref() == Some(&key) {
+                            self.preview_pending_key = None;
+                        }
+                        self.preview_cache_key = Some(key);
+                        self.preview_cache_result = Some(res);
                     }
-                    self.preview_cache_key = Some(key);
-                    self.preview_cache_result = Some(res);
-                    self.preview_rx = None;
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
                 }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.preview_pending_key = None;
-                    self.preview_rx = None;
-                }
-                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            if disconnected {
+                self.preview_pending_key = None;
+                self.preview_rx = None;
+                self.preview_worker = None;
             }
         }
         if let Some(ref rx) = self.commit_rx {
@@ -1496,20 +1579,23 @@ impl NiobCalculatorApp {
 
                                     if let Some(ref rep) = item.integration_report {
                                         ui.horizontal(|ui| {
-                                            let badge = if rep.converged {
-                                                "✓ conv."
+                                            let (info, color) = if rep.converged {
+                                                (
+                                                    format!(
+                                                        "✓ conv. | err ≈ {:.1e} | {} subintervals",
+                                                        rep.abs_err, rep.subintervals
+                                                    ),
+                                                    pal.on_surface_variant,
+                                                )
                                             } else {
-                                                "⚠ slow conv."
+                                                (
+                                                    format!(
+                                                        "⚠ not converged | {} subintervals",
+                                                        rep.subintervals
+                                                    ),
+                                                    pal.error,
+                                                )
                                             };
-                                            let color = if rep.converged {
-                                                pal.on_surface_variant
-                                            } else {
-                                                pal.error
-                                            };
-                                            let info = format!(
-                                                "{} | err ≈ {:.1e} | {} subintervals",
-                                                badge, rep.abs_err, rep.subintervals
-                                            );
                                             ui.label(
                                                 RichText::new(info)
                                                     .font(FontId::proportional(11.0))
@@ -1634,18 +1720,15 @@ impl NiobCalculatorApp {
                             } else if self.preview_cache_key.as_ref() != Some(&key)
                                 && self.preview_pending_key.as_ref() != Some(&key)
                             {
-                                let mut bg_engine = self.engine.clone();
-                                let expr = key.0.clone();
-                                let key_clone = key.clone();
-                                let ctx_clone = ui.ctx().clone();
-                                let (tx, rx) = mpsc::channel();
-                                self.preview_pending_key = Some(key.clone());
-                                self.preview_rx = Some(rx);
-                                std::thread::spawn(move || {
-                                    let res = bg_engine.evaluate_preview(&expr, false);
-                                    let _ = tx.send((key_clone, res));
-                                    ctx_clone.request_repaint();
-                                });
+                                if self.preview_worker.is_none() || self.preview_rx.is_none() {
+                                    let (tx, rx) = mpsc::channel();
+                                    self.preview_rx = Some(rx);
+                                    self.preview_worker = Some(PreviewWorker::new(tx));
+                                }
+                                if let Some(ref worker) = self.preview_worker {
+                                    self.preview_pending_key = Some(key.clone());
+                                    worker.submit(key.clone(), self.engine.clone(), ui.ctx().clone());
+                                }
                             }
                             if self.preview_cache_key.as_ref() != Some(&key) {
                                 ui.label(

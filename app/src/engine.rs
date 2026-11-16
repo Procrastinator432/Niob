@@ -6,6 +6,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::ops::Deref;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 const MAX_NESTING_DEPTH: usize = 64;
 
@@ -13,9 +15,18 @@ thread_local! {
     static INTEGRATION_DEPTH: Cell<usize> = const { Cell::new(0) };
     static EVAL_DEADLINE: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
     static EVAL_DEPTH: Cell<usize> = const { Cell::new(0) };
+    static EVAL_CANCEL_TOKEN: RefCell<Option<(u64, Arc<AtomicU64>)>> = const { RefCell::new(None) };
 }
 
 fn check_eval_deadline() -> Result<(), String> {
+    let cancelled = EVAL_CANCEL_TOKEN.with(|c| {
+        c.borrow()
+            .as_ref()
+            .is_some_and(|(gen, latest)| latest.load(Ordering::Relaxed) != *gen)
+    });
+    if cancelled {
+        return Err("Berechnung abgebrochen".to_string());
+    }
     if let Some(deadline) = EVAL_DEADLINE.with(|d| d.get()) {
         if std::time::Instant::now() > deadline {
             return Err("Zeitlimit überschritten".to_string());
@@ -1864,6 +1875,30 @@ impl MathEngine {
     }
 
     #[allow(dead_code)]
+    pub fn evaluate_preview_cancellable(
+        &mut self,
+        raw_input: &str,
+        expected_gen: u64,
+        latest_gen: &Arc<AtomicU64>,
+    ) -> Result<EvalOutput, String> {
+        let prev_tok = EVAL_CANCEL_TOKEN.with(|c| {
+            c.borrow_mut()
+                .replace((expected_gen, Arc::clone(latest_gen)))
+        });
+        struct CancelGuard(Option<(u64, Arc<AtomicU64>)>);
+        impl Drop for CancelGuard {
+            fn drop(&mut self) {
+                EVAL_CANCEL_TOKEN.with(|c| {
+                    *c.borrow_mut() = self.0.take();
+                });
+            }
+        }
+        let _guard = CancelGuard(prev_tok);
+        let timeout_ms = crate::constants::SYMBOLIC_WATCHDOG_TIMEOUT_MS as u64;
+        self.evaluate_with_timeout(raw_input, false, timeout_ms)
+    }
+
+    #[allow(dead_code)]
     pub fn evaluate_with_timeout(&mut self, raw_input: &str, allow_mutation: bool, timeout_ms: u64) -> Result<EvalOutput, String> {
         let prev = EVAL_DEADLINE.with(|d| {
             let old = d.get();
@@ -3054,7 +3089,7 @@ impl MathEngine {
         }
     }
 
-    fn push_linear_periodic_roots(
+    fn push_periodic_roots(
         &self,
         arg: &AstNode,
         var: &str,
@@ -3065,13 +3100,17 @@ impl MathEngine {
         ov: Option<&HashMap<String, Value>>,
         out: &mut Vec<f64>,
         truncated: &mut bool,
+        depth: usize,
     ) {
+        if *truncated || period <= 0.0 || !period.is_finite() {
+            return;
+        }
         if let Some((a_node, b_node)) = arg.match_linear(var) {
             if let (Some(a), Some(b)) = (
                 self.eval_ast_with_x_default_zero(&a_node, var, None, ov),
                 self.eval_ast_with_x_default_zero(&b_node, var, None, ov),
             ) {
-                if a != 0.0 && period > 0.0 {
+                if a != 0.0 {
                     let u_lo = a * lo + b;
                     let u_hi = a * hi + b;
                     let m_min = ((u_lo.min(u_hi) - base_sol) / period).floor() as i64 - 1;
@@ -3089,12 +3128,121 @@ impl MathEngine {
                     }
                 }
             }
-        } else {
-            let shifted = AstNode::Sub(
-                Box::new(arg.clone()),
-                Box::new(AstNode::Num(Value::from_f64(base_sol))),
-            );
-            self.collect_critical_points(&shifted, var, lo, hi, ov, out, truncated);
+            return;
+        }
+        if depth >= 2 {
+            *truncated = true;
+            return;
+        }
+        let mut xs: Vec<f64> = Vec::with_capacity(280);
+        xs.push(lo);
+        xs.push(hi);
+        if lo < 0.0 && hi > 0.0 {
+            xs.push(0.0);
+        }
+        let grid_n = 128usize;
+        let span = hi - lo;
+        for i in 1..grid_n {
+            xs.push(lo + span * (i as f64) / (grid_n as f64));
+        }
+        let mut inner_pts = Vec::new();
+        let mut inner_trunc = false;
+        self.collect_critical_points_impl(arg, var, lo, hi, ov, &mut inner_pts, &mut inner_trunc, depth + 1);
+        if let Some(d_arg) = arg.diff_with_mode(var, self.angle_mode) {
+            self.collect_critical_points_impl(&d_arg, var, lo, hi, ov, &mut inner_pts, &mut inner_trunc, depth + 1);
+        }
+        for p in inner_pts {
+            if p.is_finite() && p > lo && p < hi {
+                xs.push(p);
+            }
+        }
+        xs.sort_by(f64::total_cmp);
+        xs.dedup_by(|b, a| (*b - *a).abs() <= 1e-13 * b.abs().max(1.0));
+        if xs.len() < 2 {
+            return;
+        }
+        let mut samples: Vec<(f64, f64)> = Vec::with_capacity(xs.len());
+        for (idx, &x) in xs.iter().enumerate() {
+            if check_eval_deadline().is_err() {
+                *truncated = true;
+                return;
+            }
+            let val = self.eval_ast_with_x_default_zero(arg, var, Some(x), ov).or_else(|| {
+                if idx == 0 {
+                    let eps = 1e-12 * (xs[1] - x).max(1e-12);
+                    self.eval_ast_with_x_default_zero(arg, var, Some(x + eps), ov)
+                } else if idx + 1 == xs.len() {
+                    let eps = 1e-12 * (x - xs[idx - 1]).max(1e-12);
+                    self.eval_ast_with_x_default_zero(arg, var, Some(x - eps), ov)
+                } else {
+                    None
+                }
+            });
+            let Some(u) = val else {
+                *truncated = true;
+                return;
+            };
+            samples.push((x, u));
+        }
+        for w in samples.windows(2) {
+            let (x0, u0) = w[0];
+            let (x1, u1) = w[1];
+            let u_min = u0.min(u1);
+            let u_max = u0.max(u1);
+            let span_periods = (u_max - u_min) / period;
+            if !span_periods.is_finite() || span_periods > 4096.0 {
+                *truncated = true;
+                return;
+            }
+            let m_start = ((u_min - base_sol) / period).floor() as i64 - 1;
+            let m_end = ((u_max - base_sol) / period).ceil() as i64 + 1;
+            for m in m_start..=m_end {
+                let target = base_sol + (m as f64) * period;
+                let d0_orig = u0 - target;
+                let d1_orig = u1 - target;
+                if d0_orig == 0.0 {
+                    Self::push_critical_point(out, x0, lo, hi, truncated);
+                } else if d1_orig == 0.0 {
+                    Self::push_critical_point(out, x1, lo, hi, truncated);
+                } else if (d0_orig < 0.0 && d1_orig > 0.0) || (d0_orig > 0.0 && d1_orig < 0.0) {
+                    let mut a_b = x0;
+                    let mut b_b = x1;
+                    let mut d_a = d0_orig;
+                    for _ in 0..60 {
+                        if check_eval_deadline().is_err() {
+                            *truncated = true;
+                            return;
+                        }
+                        let mid = 0.5 * (a_b + b_b);
+                        if mid == a_b || mid == b_b {
+                            break;
+                        }
+                        let Some(um) = self.eval_ast_with_x_default_zero(arg, var, Some(mid), ov) else {
+                            *truncated = true;
+                            return;
+                        };
+                        let dm = um - target;
+                        if dm == 0.0 {
+                            a_b = mid;
+                            b_b = mid;
+                            break;
+                        }
+                        if (d_a < 0.0 && dm < 0.0) || (d_a > 0.0 && dm > 0.0) {
+                            a_b = mid;
+                            d_a = dm;
+                        } else {
+                            b_b = mid;
+                        }
+                        if (b_b - a_b) <= 1e-15 * mid.abs().max(1.0) {
+                            break;
+                        }
+                    }
+                    Self::push_critical_point(out, 0.5 * (a_b + b_b), lo, hi, truncated);
+                }
+                if *truncated {
+                    return;
+                }
+            }
         }
     }
 
@@ -3108,6 +3256,20 @@ impl MathEngine {
         out: &mut Vec<f64>,
         truncated: &mut bool,
     ) {
+        self.collect_critical_points_impl(node, var, lo, hi, ov, out, truncated, 0);
+    }
+
+    fn collect_critical_points_impl(
+        &self,
+        node: &AstNode,
+        var: &str,
+        lo: f64,
+        hi: f64,
+        ov: Option<&HashMap<String, Value>>,
+        out: &mut Vec<f64>,
+        truncated: &mut bool,
+        depth: usize,
+    ) {
         if *truncated || out.len() >= Self::MAX_CRITICAL_POINTS {
             if node.contains_var(var) && out.len() >= Self::MAX_CRITICAL_POINTS {
                 *truncated = true;
@@ -3118,33 +3280,77 @@ impl MathEngine {
             return;
         }
         if let AstNode::Func(fname, fargs) = node {
-            if fargs.len() == 1 && fargs[0].match_linear(var).is_some() {
+            let trimmed_fn = fname.trim();
+            if trimmed_fn == "mod" && fargs.len() == 2 {
+                if !fargs[1].contains_var(var) {
+                    if let Some(m_val) = self.eval_ast_with_x_default_zero(&fargs[1], var, None, ov) {
+                        if m_val.is_finite() && m_val != 0.0 {
+                            self.push_periodic_roots(
+                                &fargs[0],
+                                var,
+                                0.0,
+                                m_val.abs(),
+                                lo,
+                                hi,
+                                ov,
+                                out,
+                                truncated,
+                                depth,
+                            );
+                            if depth == 0 && !*truncated {
+                                self.collect_critical_points_impl(
+                                    &fargs[0], var, lo, hi, ov, out, truncated, depth + 1,
+                                );
+                            }
+                            return;
+                        }
+                    }
+                }
+                *truncated = true;
+                return;
+            }
+            if fargs.len() == 1 {
                 let arg = &fargs[0];
                 let half = if self.angle_mode == AngleMode::Degrees {
                     180.0
                 } else {
                     std::f64::consts::PI
                 };
-                match fname.as_str() {
+                match trimmed_fn {
                     "sin" => {
-                        self.push_linear_periodic_roots(arg, var, 0.0, half, lo, hi, ov, out, truncated);
+                        self.push_periodic_roots(arg, var, 0.0, half, lo, hi, ov, out, truncated, depth);
+                        if depth == 0 && !*truncated && arg.match_linear(var).is_none() {
+                            self.collect_critical_points_impl(arg, var, lo, hi, ov, out, truncated, depth + 1);
+                        }
                         return;
                     }
                     "cos" => {
-                        self.push_linear_periodic_roots(arg, var, 0.5 * half, half, lo, hi, ov, out, truncated);
+                        self.push_periodic_roots(arg, var, 0.5 * half, half, lo, hi, ov, out, truncated, depth);
+                        if depth == 0 && !*truncated && arg.match_linear(var).is_none() {
+                            self.collect_critical_points_impl(arg, var, lo, hi, ov, out, truncated, depth + 1);
+                        }
                         return;
                     }
                     "tan" => {
-                        self.push_linear_periodic_roots(arg, var, 0.0, half, lo, hi, ov, out, truncated);
-                        self.push_linear_periodic_roots(arg, var, 0.5 * half, half, lo, hi, ov, out, truncated);
+                        self.push_periodic_roots(arg, var, 0.0, half, lo, hi, ov, out, truncated, depth);
+                        self.push_periodic_roots(arg, var, 0.5 * half, half, lo, hi, ov, out, truncated, depth);
+                        if depth == 0 && !*truncated && arg.match_linear(var).is_none() {
+                            self.collect_critical_points_impl(arg, var, lo, hi, ov, out, truncated, depth + 1);
+                        }
                         return;
                     }
                     "floor" | "ceil" => {
-                        self.push_linear_periodic_roots(arg, var, 0.0, 1.0, lo, hi, ov, out, truncated);
+                        self.push_periodic_roots(arg, var, 0.0, 1.0, lo, hi, ov, out, truncated, depth);
+                        if depth == 0 && !*truncated && arg.match_linear(var).is_none() {
+                            self.collect_critical_points_impl(arg, var, lo, hi, ov, out, truncated, depth + 1);
+                        }
                         return;
                     }
                     "round" => {
-                        self.push_linear_periodic_roots(arg, var, 0.5, 1.0, lo, hi, ov, out, truncated);
+                        self.push_periodic_roots(arg, var, 0.5, 1.0, lo, hi, ov, out, truncated, depth);
+                        if depth == 0 && !*truncated && arg.match_linear(var).is_none() {
+                            self.collect_critical_points_impl(arg, var, lo, hi, ov, out, truncated, depth + 1);
+                        }
                         return;
                     }
                     _ => {}
@@ -3234,19 +3440,19 @@ impl MathEngine {
                             let u0 = self.angle_mode.from_radians(target.asin());
                             let half = if self.angle_mode == AngleMode::Degrees { 180.0 } else { pi };
                             let full = 2.0 * half;
-                            self.push_linear_periodic_roots(arg, var, u0, full, lo, hi, ov, out, truncated);
-                            self.push_linear_periodic_roots(arg, var, half - u0, full, lo, hi, ov, out, truncated);
+                            self.push_periodic_roots(arg, var, u0, full, lo, hi, ov, out, truncated, depth);
+                            self.push_periodic_roots(arg, var, half - u0, full, lo, hi, ov, out, truncated, depth);
                         }
                         "cos" if target.abs() <= 1.0 => {
                             let u0 = self.angle_mode.from_radians(target.acos());
                             let full = if self.angle_mode == AngleMode::Degrees { 360.0 } else { 2.0 * pi };
-                            self.push_linear_periodic_roots(arg, var, u0, full, lo, hi, ov, out, truncated);
-                            self.push_linear_periodic_roots(arg, var, -u0, full, lo, hi, ov, out, truncated);
+                            self.push_periodic_roots(arg, var, u0, full, lo, hi, ov, out, truncated, depth);
+                            self.push_periodic_roots(arg, var, -u0, full, lo, hi, ov, out, truncated, depth);
                         }
                         "tan" => {
                             let u0 = self.angle_mode.from_radians(target.atan());
                             let half = if self.angle_mode == AngleMode::Degrees { 180.0 } else { pi };
-                            self.push_linear_periodic_roots(arg, var, u0, half, lo, hi, ov, out, truncated);
+                            self.push_periodic_roots(arg, var, u0, half, lo, hi, ov, out, truncated, depth);
                         }
                         "exp" if target > 0.0 => {
                             let shifted = AstNode::Sub(
@@ -4280,7 +4486,7 @@ where
         .collect();
     unique_extra.sort_by(f64::total_cmp);
     unique_extra.dedup_by(|b, a| (*b - *a).abs() <= 1e-12 * b.abs().max(1.0));
-    let many_extra = unique_extra.len() > 32;
+    let many_extra = unique_extra.len() > 64;
     if initial_subintervals >= 500 {
         let mid = 0.5 * (lo + hi);
         let mut offset_anchors: Vec<f64> = vec![lo, mid, hi];
@@ -4551,6 +4757,26 @@ impl AstNode {
 
     fn contains_step_or_abs(&self) -> bool {
         self.contains_nonsmooth_function(true)
+    }
+
+    fn contains_discrete_domain_of(&self, var: &str) -> bool {
+        match self {
+            AstNode::Num(_) | AstNode::BigInt(_) | AstNode::Var(_) => false,
+            AstNode::Neg(a) => a.contains_discrete_domain_of(var),
+            AstNode::Add(a, b)
+            | AstNode::Sub(a, b)
+            | AstNode::Mul(a, b)
+            | AstNode::Div(a, b)
+            | AstNode::Pow(a, b) => {
+                a.contains_discrete_domain_of(var) || b.contains_discrete_domain_of(var)
+            }
+            AstNode::Func(name, args) => {
+                let n = name.trim();
+                ((n == "factorial" || n == "fact" || n == "!")
+                    && args.iter().any(|arg| arg.contains_var(var)))
+                    || args.iter().any(|arg| arg.contains_discrete_domain_of(var))
+            }
+        }
     }
 
     #[allow(dead_code)]
@@ -7650,7 +7876,17 @@ impl<'a> ExprParser<'a> {
                     }
                     Ok(val.c.re)
                 };
+                let parsed_ast = AstParser::parse(&raw_args[0]).ok();
+                if parsed_ast
+                    .as_ref()
+                    .is_some_and(|ast| ast.contains_discrete_domain_of(var))
+                {
+                    return Err("Funktion an der Stelle nicht reell differenzierbar".to_string());
+                }
                 let f0 = eval_real_at(x0)?;
+                let jump_checked = parsed_ast
+                    .as_ref()
+                    .is_some_and(|ast| ast.contains_step_or_abs());
                 let check_jump_or_kink = || -> Result<bool, String> {
                     let h1 = 1e-7 * x0.abs().max(1.0);
                     let h2 = 1e-5 * x0.abs().max(1.0);
@@ -7662,8 +7898,15 @@ impl<'a> ExprParser<'a> {
                     ) {
                         let jump1 = (fp1_k - fm1_k).abs();
                         let jump2 = (fp2_k - fm2_k).abs();
+                        let d0_p1 = (fp1_k - f0).abs();
+                        let d0_p2 = (fp2_k - f0).abs();
+                        let d0_m1 = (fm1_k - f0).abs();
+                        let d0_m2 = (fm2_k - f0).abs();
                         let val_scale = f0.abs().max(fp1_k.abs()).max(fm1_k.abs()).max(1.0);
-                        if jump1 > 1e-4 * val_scale && jump2 < 2.5 * jump1 {
+                        if (jump1 > 1e-4 * val_scale && jump2 < 2.5 * jump1)
+                            || (d0_p1 > 1e-4 * val_scale && d0_p2 < 2.5 * d0_p1)
+                            || (d0_m1 > 1e-4 * val_scale && d0_m2 < 2.5 * d0_m1)
+                        {
                             return Err("Funktion an der Stelle nicht stetig / nicht differenzierbar".to_string());
                         }
                         let dr1 = (fp1_k - f0) / h1;
@@ -7671,20 +7914,50 @@ impl<'a> ExprParser<'a> {
                         let dr2 = (fp2_k - f0) / h2;
                         let dl2 = (f0 - fm2_k) / h2;
                         let slope_scale = dr1.abs().max(dl1.abs()).max(1.0);
+                        if (d0_p1 > 1e-9 * val_scale && dr1.abs() > 3.0 * dr2.abs() && dr1.abs() > 10.0 * val_scale)
+                            || (d0_m1 > 1e-9 * val_scale && dl1.abs() > 3.0 * dl2.abs() && dl1.abs() > 10.0 * val_scale)
+                        {
+                            return Err("Funktion an der Stelle nicht differenzierbar".to_string());
+                        }
                         if (dr1 - dr2).abs() <= 1e-2 * slope_scale
                             && (dl1 - dl2).abs() <= 1e-2 * slope_scale
                             && (dr1 - dl1).abs() > 1e-3 * slope_scale
                         {
                             return Err("Funktion an der Stelle nicht differenzierbar".to_string());
                         }
+                        if jump_checked
+                            && dr1.abs() <= 0.35 * dr2.abs()
+                            && dl1.abs() <= 0.35 * dl2.abs()
+                            && dr1.abs().max(dl1.abs()) <= 1e-2 * slope_scale
+                        {
+                            let h0 = 1e-9 * x0.abs().max(1.0);
+                            if let (Ok(fp0_k), Ok(fm0_k)) = (eval_real_at(x0 + h0), eval_real_at(x0 - h0)) {
+                                let dr0 = (fp0_k - f0) / h0;
+                                let dl0 = (f0 - fm0_k) / h0;
+                                if dr0.abs() <= 0.35 * dr1.abs()
+                                    && dl0.abs() <= 0.35 * dl1.abs()
+                                    && dr0.abs().max(dl0.abs()) <= 1e-3 * slope_scale
+                                {
+                                    let aitken = |s2: f64, s1: f64, s0: f64| -> f64 {
+                                        let den = s2 - 2.0 * s1 + s0;
+                                        if den == 0.0 {
+                                            s0
+                                        } else {
+                                            s0 - (s1 - s0) * (s1 - s0) / den
+                                        }
+                                    };
+                                    let lim_r = aitken(dr2, dr1, dr0);
+                                    let lim_l = aitken(dl2, dl1, dl0);
+                                    if lim_r.abs() <= 1e-9 && lim_l.abs() <= 1e-9 {
+                                        return Ok(true);
+                                    }
+                                }
+                            }
+                        }
                         return Ok(fp1_k == f0 && fm1_k == f0 && fp2_k == f0 && fm2_k == f0);
                     }
                     Ok(false)
                 };
-                let parsed_ast = AstParser::parse(&raw_args[0]).ok();
-                let jump_checked = parsed_ast
-                    .as_ref()
-                    .is_some_and(|ast| ast.contains_step_or_abs());
                 let mut is_flat = if jump_checked {
                     check_jump_or_kink()?
                 } else {

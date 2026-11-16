@@ -28,7 +28,9 @@ Jeder Fall startet mit einem neuen Rechenkern und hat 30 Sekunden Zeit.
 - `polynomial`: Sollwert `y=…,z=…,w=…:Wert;…`. Das Ergebnis darf kein `)^`, `)*(` oder `)(` enthalten und muss an den Stützstellen mit dem Ausgangsausdruck übereinstimmen.
 - `integral_split`: Selbstprüfung ohne Sollwert. Spalte 5 enthält die beiden Teilintegrale `int(f,x,a,m);int(f,x,m,b)`. Das ganze Integral und beide Teile werden jeweils mit einem neuen Rechenkern berechnet; es muss `|I − I₁ − I₂| <= 10·(Δ + Δ₁ + Δ₂) + absolut + relativ·max(|I|, |I₁|, |I₂|)` gelten, wobei Δ der gemeldete Fehler aus dem Integrationsbericht ist (0 ohne Bericht). Eine Fehlermeldung oder ein als nicht konvergiert gemeldetes Teilergebnis ist zulässig. Die Prüfung schlägt also an, wenn die Fehlerschätzung zu optimistisch ist, auch für Integranden, für die es keinen Sollwert gibt.
 
-Fehlermeldungen (bei `number_or_error`, `integral` und `integral_split`) und als nicht konvergiert gemeldete Integrale sind zulässig, werden aber in der Zusammenfassung gezählt, damit Lücken sichtbar bleiben, etwa „175 Fälle, 46 falsch, 18 mit Fehlermeldung, 7 als nicht konvergiert gemeldet“.
+- `diverges`: Das Integral divergiert. Verlangt ist eine Fehlermeldung oder ein als nicht konvergiert gemeldetes Ergebnis; ein als konvergiert gemeldeter Wert schlägt fehl. Spalte 5 ist ohne Bedeutung.
+
+Fehlermeldungen (bei `number_or_error`, `integral`, `integral_split` und `diverges`) und als nicht konvergiert gemeldete Integrale sind zulässig, werden aber in der Zusammenfassung gezählt, damit Lücken sichtbar bleiben, etwa „175 Fälle, 46 falsch, 18 mit Fehlermeldung, 7 als nicht konvergiert gemeldet“.
 
 ## Weitere Familien
 
@@ -36,6 +38,15 @@ Fehlermeldungen (bei `number_or_error`, `integral` und `integral_split`) und als
 - `derivative_families.tsv`: Ableitungen von 18 weiteren glatten Funktionen an Zufallsstellen, von Funktionen mit Knick oder Sprung abseits und an der Knickstelle (dort ist eine Fehlermeldung Pflicht, außer wo die Ableitung existiert, etwa `x*abs(x)` bei 0) und von Differenzen mit starker Auslöschung (`x-sin(x)`, `tan(x)-x`, `cosh(x)-x^2/2` nahe 0). Bei der Auslöschung gibt es keine absolute Toleranz: Ein Wert muss relativ auf 10⁻⁶ stimmen, sonst ist eine Fehlermeldung nötig.
 - `determinants.tsv`: Determinanten ganzzahliger Matrizen mit Einträgen bis 10¹² (Produkte über 2⁵³), von Matrixpotenzen bis zur 24., von Matrizen mit Brüchen, von gut konditionierten Matrizen mit Einträgen von 10⁻³⁰ bis 10³⁰ und `det(A)*det(inv(A))`. Für ganzzahlige und rationale Eingaben gilt `exact_fraction` mit 10⁻¹⁰: exakt, oder als Dezimalzahl auf 10 Stellen richtig.
 - `integral_splits.tsv`: 60 zufällige Kombinationen aus Knicken, Sprüngen, Spitzen, Singularitäten und glatten Termen für die Prüfung `integral_split`.
+
+## Formen aus der fünften Nachprüfung
+
+Die vier Tabellen stammen aus der [fünften Nachprüfung](../../../../BEWERTUNG-2026-11-16.md) und enthalten die dort genannten Beispiele. Sie teilen sich einen Zufallsgenerator (Startwert 2611) in fester Reihenfolge.
+
+- `integral_forms.tsv`: Knicke, Sprünge und Singularitäten mit nichtlinearem Argument (`abs(sin(x^2))`, `abs(sin(exp(x)))`, `floor(x^2)`, `floor(sqrt(x))`, `floor(exp(x))`, `floor(3*sin(x))`, `x mod 1`, `ln(abs(sin(x)))`, `1/sqrt(abs(x^2-c))`), 18 divergente Integrale mit der Prüfung `diverges`, mehrere Spitzen, Spitzen anderer Form und Schwingungen.
+- `derivative_forms.tsv`: Ableitungen mit Auslöschung bei kleinem x, nahe 1 und bei großem x; an Knicken, wo die Ableitung existiert (`abs(x)^0.5*x` bei 0) oder nicht (`sqrt(abs(x))` und `abs(x)^(1/3)` bei 0, `floor(x)+floor(-x)` bei 3); die Fakultät (`deriv(x!,x,3)` muss abgelehnt werden); Sonderfälle und DEG-Modus.
+- `determinant_forms.tsv`: 5×5- und 6×6-Matrizen mit Einträgen bis 10⁹, Produkte, Transponierte, exakt singuläre Matrizen mit Einträgen bis 10¹², Dezimalbrüche, Einträge 10⁹⁰, `det(inv(A))` und 4×4-Potenzen.
+- `split_forms.tsv`: 80 Teilungsproben mit Bausteinen wie `floor(x^2)`, `floor(exp(x/3))`, `x mod 1`, `abs(sin(x^2))`, `ln(abs(sin(x)))`, `1/sqrt(abs(x^2-c))` und `sin(x^2)`.
 
 ## Zufallsfolgen
 
@@ -50,5 +61,6 @@ Fehlermeldungen (bei `number_or_error`, `integral` und `integral_split`) und als
 | `derivative_families.tsv` | 43 |
 | `determinants.tsv` | 47 |
 | `integral_splits.tsv` | 53 |
+| `integral_forms.tsv`, `derivative_forms.tsv`, `determinant_forms.tsv`, `split_forms.tsv` | 2611 (gemeinsam) |
 
 `derivatives.tsv` verwendet ein festes Raster ohne Zufall.

@@ -231,30 +231,30 @@ impl MaterialYouPalette {
 
         visuals.widgets.noninteractive.bg_fill = self.surface_container;
         visuals.widgets.noninteractive.weak_bg_fill = self.surface_container;
-        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, self.outline_variant);
-        visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, self.on_surface);
+        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, self.outline_variant);
+        visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, self.on_surface);
         visuals.widgets.noninteractive.corner_radius = r12;
 
         visuals.widgets.inactive.bg_fill = self.surface_container_high;
         visuals.widgets.inactive.weak_bg_fill = self.surface_container_high;
-        visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, self.outline_variant);
-        visuals.widgets.inactive.fg_stroke = Stroke::new(1.2, self.on_surface);
+        visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, self.outline_variant);
+        visuals.widgets.inactive.fg_stroke = Stroke::new(1.2_f32, self.on_surface);
         visuals.widgets.inactive.corner_radius = r12;
 
         visuals.widgets.hovered.bg_fill = self.secondary_container;
         visuals.widgets.hovered.weak_bg_fill = self.secondary_container;
-        visuals.widgets.hovered.bg_stroke = Stroke::new(1.5, self.primary);
-        visuals.widgets.hovered.fg_stroke = Stroke::new(1.5, self.on_surface);
+        visuals.widgets.hovered.bg_stroke = Stroke::new(1.5_f32, self.primary);
+        visuals.widgets.hovered.fg_stroke = Stroke::new(1.5_f32, self.on_surface);
         visuals.widgets.hovered.corner_radius = r16;
 
         visuals.widgets.active.bg_fill = self.primary_container;
         visuals.widgets.active.weak_bg_fill = self.primary_container;
-        visuals.widgets.active.bg_stroke = Stroke::new(1.5, self.primary);
-        visuals.widgets.active.fg_stroke = Stroke::new(1.5, self.on_primary_container);
+        visuals.widgets.active.bg_stroke = Stroke::new(1.5_f32, self.primary);
+        visuals.widgets.active.fg_stroke = Stroke::new(1.5_f32, self.on_primary_container);
         visuals.widgets.active.corner_radius = r16;
 
         visuals.selection.bg_fill = self.primary_container;
-        visuals.selection.stroke = Stroke::new(1.5, self.primary);
+        visuals.selection.stroke = Stroke::new(1.5_f32, self.primary);
 
         style.visuals = visuals;
         style.spacing.item_spacing = egui::vec2(6.0, 6.0);

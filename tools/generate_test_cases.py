@@ -904,6 +904,334 @@ def integral_splits():
           'are accepted.')
 
 
+# ---------------------------------------------------------------------------
+# Forms of the fifth review: nonlinear arguments, divergence, larger matrices
+# ---------------------------------------------------------------------------
+def forms():
+    """Four tables from the fifth review. One random generator in a fixed order, so that the cases named in
+    BEWERTUNG-2026-11-16.md are among them."""
+    rnd = random.Random(2611)
+
+    def r4(v):
+        return float(f'{v:.4g}')
+
+
+    # ----------------------------------------------------------------------------------------------
+    # Integrals
+    # ----------------------------------------------------------------------------------------------
+    rows = []
+
+
+    def add(kind, expr, ref, abs_tol=1e-12, check='integral', expected=None):
+        rows.append([f'intform_{kind}_{len(rows):04d}', expr, expr, check, expected if expected is not None else num(ref),
+                         num(abs_tol) if check == 'integral' else '0', '1e-7' if check == 'integral' else '0', 'rad'])
+
+
+    # A. Kinks of nonlinear periodic arguments
+    for _ in range(8):
+        b = r4(rnd.uniform(3, 12)); bm = mp.mpf(repr(b))
+        add('kink_sin_x2', f'int(abs(sin(x^2)),x,0,{num(b)})', quad_with_breaks(lambda t: abs(mp.sin(t * t)), 0, bm, [mp.sqrt(n * mp.pi) for n in range(1, 60)]))
+    for _ in range(5):
+        b = r4(rnd.uniform(1, 4.5)); bm = mp.mpf(repr(b))
+        add('kink_sin_exp', f'int(abs(sin(exp(x))),x,0,{num(b)})', quad_with_breaks(lambda t: abs(mp.sin(mp.exp(t))), 0, bm, [mp.log(n * mp.pi) for n in range(1, 40)]))
+    for _ in range(5):
+        a = r4(rnd.uniform(0.03, 0.2)); am = mp.mpf(repr(a))
+        add('kink_sin_inv', f'int(abs(sin(1/x)),x,{num(a)},1)', quad_with_breaks(lambda t: abs(mp.sin(1 / t)), am, 1, [1 / (n * mp.pi) for n in range(1, 40)]))
+    for _ in range(8):
+        k = rnd.choice(['2.5', '0.7', '1.3', '3.7']); s = rnd.choice(['-0.3', '1.1', '2']); b = r4(rnd.uniform(20, 300))
+        km, sm, bm = mp.mpf(k), mp.mpf(s), mp.mpf(repr(b))
+        # |sin(k x + s)| with k not an integer and a shift; closed form, shifted so that the argument stays >= 0
+        ref = (abs_sin_integral(km, sm + 10 * mp.pi, 0, bm))
+        add('kink_noninteger_k', f'int(abs(sin({k}*x+({s}))),x,0,{num(b)})', ref)
+    for _ in range(6):
+        b = r4(rnd.uniform(10, 120)); bm = mp.mpf(repr(b))
+        add('kink_sum', f'int(abs(sin(x))+abs(cos(2*x)),x,0,{num(b)})', abs_sin_integral(1, 0, 0, bm) + abs_sin_integral(2, mp.pi / 2, 0, bm))
+    for _ in range(6):
+        b = r4(rnd.uniform(5, 60)); bm = mp.mpf(repr(b))
+        br = [n * mp.pi for n in range(30)] + [(n + mp.mpf(1) / 2) * mp.pi / 3 for n in range(70)]
+        add('kink_product', f'int(abs(sin(x)*cos(3*x)),x,0,{num(b)})', quad_with_breaks(lambda t: abs(mp.sin(t) * mp.cos(3 * t)), 0, bm, br))
+    for _ in range(5):
+        b = r4(rnd.uniform(10, 100)); bm = mp.mpf(repr(b))
+        add('kink_times_x', f'int(x*abs(sin(x)),x,0,{num(b)})', quad_with_breaks(lambda t: t * abs(mp.sin(t)), 0, bm, [n * mp.pi for n in range(40)]))
+
+    # B. Jumps of nonlinear arguments
+    for _ in range(6):
+        b = r4(rnd.uniform(2, 9)); bm = mp.mpf(repr(b))
+        add('step_floor_x2', f'int(floor(x^2),x,0,{num(b)})', quad_with_breaks(lambda t: mp.floor(t * t), 0, bm, [mp.sqrt(n) for n in range(1, 100)]))
+    for _ in range(5):
+        b = r4(rnd.uniform(10, 300)); bm = mp.mpf(repr(b))
+        add('step_floor_sqrt', f'int(floor(sqrt(x)),x,0,{num(b)})', quad_with_breaks(lambda t: mp.floor(mp.sqrt(t)), 0, bm, [n * n for n in range(1, 20)]))
+    for _ in range(5):
+        b = r4(rnd.uniform(1, 4.5)); bm = mp.mpf(repr(b))
+        add('step_floor_exp', f'int(floor(exp(x)),x,0,{num(b)})', quad_with_breaks(lambda t: mp.floor(mp.exp(t)), 0, bm, [mp.log(n) for n in range(1, 100)]))
+    for _ in range(5):
+        b = r4(rnd.uniform(5, 30)); bm = mp.mpf(repr(b))
+        br = [s * mp.asin(mp.mpf(j) / 3) + 2 * mp.pi * n for n in range(-1, 8) for j in range(-3, 4) for s in (1,)] + \
+             [mp.pi - mp.asin(mp.mpf(j) / 3) + 2 * mp.pi * n for n in range(-1, 8) for j in range(-3, 4)]
+        add('step_floor_sin', f'int(floor(3*sin(x)),x,0,{num(b)})', quad_with_breaks(lambda t: mp.floor(3 * mp.sin(t)), 0, bm, br))
+    for _ in range(4):
+        c = round(rnd.uniform(0.5, 20), 2); cm = mp.mpf(str(c))
+        add('step_sign_x2', f'int(sign(x^2-{c}),x,-5,6)', quad_with_breaks(lambda t: mp.sign(t * t - cm), -5, 6, [-mp.sqrt(cm), mp.sqrt(cm)]))
+    for _ in range(5):
+        lo = Fraction(str(round(rnd.uniform(-5, 0), 2))); hi = lo + Fraction(str(round(rnd.uniform(1, 10), 2)))
+        add('step_negative_k', f'int(floor(-2.5*x+0.3),x,{num(float(lo))},{num(float(hi))})',
+            float(floor_integral(Fraction(-5, 2), Fraction(3, 10), lo, hi)))
+    for _ in range(5):
+        b = r4(rnd.uniform(3, 30)); bm = mp.mpf(repr(b))
+        add('step_times_x', f'int(x*floor(x),x,0,{num(b)})', quad_with_breaks(lambda t: t * mp.floor(t), 0, bm, list(range(1, 40))))
+    for _ in range(5):
+        b = r4(rnd.uniform(3, 30)); bm = mp.mpf(repr(b))
+        add('step_mod', f'int(x mod 1,x,0,{num(b)})', quad_with_breaks(lambda t: t - mp.floor(t), 0, bm, list(range(1, 40))))
+
+    # C. Singularities of nonlinear arguments and several singularities
+    for _ in range(6):
+        c = round(rnd.uniform(0.5, 20), 2); cm = mp.mpf(str(c)); b = r4(math.sqrt(c) + rnd.uniform(0.5, 3))
+        add('sing_sqrt_x2', f'int(1/sqrt(abs(x^2-{c})),x,0,{num(b)})', quad_with_breaks(lambda t: 1 / mp.sqrt(abs(t * t - cm)), 0, mp.mpf(repr(b)), [mp.sqrt(cm)]))
+    for _ in range(5):
+        b = r4(rnd.uniform(4, 30)); bm = mp.mpf(repr(b))
+        add('sing_ln_sin', f'int(ln(abs(sin(x))),x,0.5,{num(b)})', quad_with_breaks(lambda t: mp.log(abs(mp.sin(t))), mp.mpf('0.5'), bm, [n * mp.pi for n in range(1, 12)]))
+    for _ in range(5):
+        b = r4(rnd.uniform(4, 20)); bm = mp.mpf(repr(b))
+        add('sing_inv_sqrt_sin', f'int(1/sqrt(abs(sin(x))),x,0.3,{num(b)})', quad_with_breaks(lambda t: 1 / mp.sqrt(abs(mp.sin(t))), mp.mpf('0.3'), bm, [n * mp.pi for n in range(1, 8)]))
+    for _ in range(5):
+        c1 = round(rnd.uniform(0.1, 0.45), 3); c2 = round(rnd.uniform(0.55, 0.9), 3)
+        m1, m2 = mp.mpf(str(c1)), mp.mpf(str(c2))
+        ref = 2 * (mp.sqrt(m1) + mp.sqrt(1 - m1)) + 2 * (mp.sqrt(m2) + mp.sqrt(1 - m2))
+        add('sing_two', f'int(abs(x-{c1})^(-0.5)+abs(x-{c2})^(-0.5),x,0,1)', ref)
+    for _ in range(4):
+        c = round(rnd.uniform(0.5, 10), 2); cm = mp.mpf(str(c)); b = r4(math.sqrt(c) + rnd.uniform(0.5, 3))
+        add('sing_ln_x2', f'int(ln(abs(x^2-{c})),x,0,{num(b)})', quad_with_breaks(lambda t: mp.log(abs(t * t - cm)), 0, mp.mpf(repr(b)), [mp.sqrt(cm)]))
+    for _ in range(4):
+        b = r4(rnd.uniform(3, 20)); bm = mp.mpf(repr(b))
+        add('sing_cos_pow', f'int(abs(cos(x))^(-0.5),x,0,{num(b)})', quad_with_breaks(lambda t: abs(mp.cos(t)) ** mp.mpf(-0.5), 0, bm, [(n + mp.mpf(1) / 2) * mp.pi for n in range(8)]))
+
+    # D. Divergent integrals: an error or "not converged" is required, never a converged finite value.
+    for expr in ['int(abs(x-0.3)^(-1.2),x,0,1)', 'int(1/abs(x-0.3),x,0,1)', 'int(1/(x-0.3)^2,x,0,1)', 'int(1/abs(sin(x)),x,1,4)',
+                 'int(1/(x^2-2),x,0,2)', 'int(1/x,x,-1,1)', 'int(tan(x),x,0,2)', 'int(1/x^2,x,-1,1)', 'int(1/abs(x^2-4),x,0,3)',
+                 'int(1/(1-x),x,0,1)', 'int(x^(-1),x,0,1)', 'int(x^(-1.0001),x,0,1)', 'int(abs(x-0.5)^(-1),x,0,1)',
+                 'int(1/sqrt(abs(x-0.3))^3,x,0,1)', 'int(1/(x-0.3),x,0,1)', 'int(exp(1/x),x,0,1)', 'int(1/abs(cos(x)),x,0,3)',
+                 'int(1/(x*ln(x)),x,0.5,2)']:
+        add('divergent', expr, None, check='diverges', expected='divergent')
+
+    # E. Several peaks and peaks of other shapes
+    for _ in range(6):
+        k = 10 ** rnd.choice([2, 4, 6]); b = r4(rnd.uniform(5, 60)); bm = mp.mpf(repr(b))
+        w = 1 / mp.sqrt(k)
+        br = [n * mp.pi + t * w for n in range(1, 20) for t in (-20, -3, 0, 3, 20)]
+        add('peaks_periodic', f'int(exp(-{k}*sin(x)^2),x,0.1,{num(b)})', quad_with_breaks(lambda t: mp.exp(-k * mp.sin(t) ** 2), mp.mpf('0.1'), bm, br))
+    for _ in range(6):
+        lo, hi = 0, 100000
+        c1 = round(rnd.uniform(1000, 49000), 1); c2 = round(rnd.uniform(51000, 99000), 1); k = 10 ** rnd.choice([2, 4, 6])
+        m1, m2 = mp.mpf(str(c1)), mp.mpf(str(c2)); w = 1 / mp.sqrt(k)
+        br = [m + t * w for m in (m1, m2) for t in (-30, -5, 0, 5, 30)]
+        add('peaks_two', f'int(exp(-{k}*(x-{c1})^2)+exp(-{k}*(x-{c2})^2),x,0,100000)', quad_with_breaks(lambda t: mp.exp(-k * (t - m1) ** 2) + mp.exp(-k * (t - m2) ** 2), 0, 100000, br))
+    for _ in range(10):
+        form = rnd.choice(['quartic', 'lorentz2', 'sech2', 'osc'])
+        c = round(rnd.uniform(5, 995), 2); cm = mp.mpf(str(c)); k = 10 ** rnd.choice([2, 4, 6])
+        if form == 'quartic':
+            e, f, w = f'int(exp(-{k}*(x-{c})^4),x,0,1000)', (lambda t: mp.exp(-k * (t - cm) ** 4)), k ** -0.25
+        elif form == 'lorentz2':
+            e, f, w = f'int(1/(1+{k}*(x-{c})^2)^2,x,0,1000)', (lambda t: 1 / (1 + k * (t - cm) ** 2) ** 2), k ** -0.5
+        elif form == 'sech2':
+            s = int(math.sqrt(k))
+            e, f, w = f'int(1/cosh({s}*(x-{c}))^2,x,0,1000)', (lambda t: 1 / mp.cosh(s * (t - cm)) ** 2), 1 / s
+        else:
+            e, f, w = f'int(exp(-{k}*(x-{c})^2)*cos(50*x),x,0,1000)', (lambda t: mp.exp(-k * (t - cm) ** 2) * mp.cos(50 * t)), k ** -0.5
+        br = [cm + t * w for t in (-40, -10, -3, -1, 0, 1, 3, 10, 40)]
+        add('peak_' + form, e, quad_with_breaks(f, 0, 1000, br))
+
+    # F. Oscillation
+    for _ in range(5):
+        b = r4(rnd.uniform(5, 30)); bm = mp.mpf(repr(b))
+        add('osc_fresnel', f'int(sin(x^2),x,0,{num(b)})', mp.sqrt(mp.pi / 2) * mp.fresnels(bm * mp.sqrt(2 / mp.pi)))
+    for _ in range(5):
+        b = r4(rnd.uniform(50, 1000)); bm = mp.mpf(repr(b))
+        add('osc_sinc', f'int(sin(x)/x,x,1,{num(b)})', mp.si(bm) - mp.si(1))
+    for _ in range(5):
+        w_ = rnd.choice([50, 100, 300]); b = r4(rnd.uniform(5, 50)); bm = mp.mpf(repr(b))
+        ref = (1 - mp.exp(-bm) * (mp.cos(w_ * bm) - w_ * mp.sin(w_ * bm))) / (1 + w_ * w_)
+        add('osc_damped', f'int(cos({w_}*x)*exp(-x),x,0,{num(b)})', ref)
+    write('integral_forms.tsv', rows,
+              'Kinks, jumps and singularities of nonlinear arguments (abs(sin(x^2)), floor(x^2), x mod 1, ln(abs(sin(x)))), '
+              'divergent integrals (diverges: an error or "not converged" is required), several peaks, peaks of other shapes '
+              'and oscillation. Same rule as integrals.tsv otherwise.')
+
+    # ----------------------------------------------------------------------------------------------
+    # Derivatives
+    # ----------------------------------------------------------------------------------------------
+    rows = []
+
+
+    def dadd(kind, expr, check, ref, abs_tol, rel_tol, mode='rad'):
+        rows.append([f'derivform_{kind}_{len(rows):04d}', expr, expr, check, ref, abs_tol, rel_tol, mode])
+
+
+    def val(e, p):
+        v = complex(e.subs(X, sp.Float(repr(p), 50)).evalf(40))
+        return v.real
+
+
+    cancel = [('sin(x)-x', sp.sin(X) - X), ('exp(x)-1-x', sp.exp(X) - 1 - X), ('atan(x)-x', sp.atan(X) - X),
+              ('sinh(x)-x', sp.sinh(X) - X), ('x-ln(1+x)', X - sp.log(1 + X)), ('1-cos(x)-x^2/2', 1 - sp.cos(X) - X ** 2 / 2)]
+    for txt, f in cancel:
+        df = sp.diff(f, X)
+        for _ in range(8):
+            p = float(f'{10 ** rnd.uniform(-8, -2):.6g}')
+            dadd('cancel_small', f'deriv({txt},x,{num(p)})', 'number_or_error', num(val(df, p)), '0', '1e-6')
+    near_one = [('x^3-3*x', X ** 3 - 3 * X), ('x^3-3*x^2+3*x-1', X ** 3 - 3 * X ** 2 + 3 * X - 1), ('(x-1)^3', (X - 1) ** 3),
+                ('x^4-4*x', X ** 4 - 4 * X)]
+    for txt, f in near_one:
+        df = sp.diff(f, X)
+        for _ in range(6):
+            d = float(f'{10 ** rnd.uniform(-9, -3):.4g}')
+            p = 1 + d
+            dadd('cancel_near_1', f'deriv({txt},x,{num(p)})', 'number_or_error', num(val(df, p)), '0', '1e-6')
+    large = [('sqrt(x^2+1)-x', sp.sqrt(X ** 2 + 1) - X), ('ln(x+1)-ln(x)', sp.log(X + 1) - sp.log(X)), ('atan(x)', sp.atan(X))]
+    for txt, f in large:
+        df = sp.diff(f, X)
+        for _ in range(6):
+            p = float(f'{10 ** rnd.uniform(3, 9):.5g}')
+            dadd('large_x', f'deriv({txt},x,{num(p)})', 'number_or_error', num(val(df, p)), '0', '1e-6')
+    # At a kink where the derivative exists: the right value or an error
+    for txt, p in [('abs(x-1)^1.5', '1'), ('abs(x)^0.5*x', '0'), ('sign(x)*x^2', '0'), ('floor(x)*(x-1)^2', '1'), ('abs(x^3)', '0'),
+                   ('abs(sin(x))*sin(x)', '0'), ('max(x,0)^2', '0')]:
+        dadd('kink_exists', f'deriv({txt},x,{p})', 'number_or_error', '0', '1e-12', '0')
+    # At a jump or kink where no derivative exists: an error is required
+    for txt, p in [('floor(4*x)', '0.25'), ('ceil(x/4)', '8'), ('sign(x^2-4)', '2'), ('abs(x^3-8)', '2'), ('floor(x)+floor(-x)', '3'),
+                   ('sqrt(abs(x))', '0'), ('abs(sin(x))', '0'), ('x mod 1', '2'), ('abs(x)^0.5', '0'), ('round(2*x)', '0.75'),
+                   ('abs(x)^(1/3)', '0')]:
+        dadd('jump', f'deriv({txt},x,{p})', 'error', 'no derivative', '0', '0')
+    # Functions that are not differentiable anywhere they are defined (integers only)
+    dadd('integer_only', 'deriv(x!,x,3)', 'error', 'factorial is defined for integers only', '0', '0')
+    dadd('integer_only', 'deriv(x!,x,5)', 'error', 'factorial is defined for integers only', '0', '0')
+    # Smooth special cases
+    for txt, p, ref in [('x^x', '3', 27 * (mp.log(3) + 1)), ('sin(x)', '1e10', mp.cos(mp.mpf(10) ** 10)), ('exp(x)', '700', mp.exp(700)),
+                        ('int(t^2,t,0,x)', '2', 4), ('ln(abs(x))', '-2', -0.5), ('asin(x)', '0.999999', 1 / mp.sqrt(1 - mp.mpf('0.999999') ** 2)),
+                        ('x^1000', '1.001', 1000 * mp.mpf('1.001') ** 999), ('sin(1/x)', '0.0001', -mp.cos(10000) / mp.mpf('1e-8')),
+                        ('acos(x)', '-0.9999', -1 / mp.sqrt(1 - mp.mpf('0.9999') ** 2)), ('sqrt(x)', '1e-300', 1 / (2 * mp.sqrt(mp.mpf('1e-300'))))]:
+        dadd('special', f'deriv({txt},x,{p})', 'number_or_error' if 'int(' in txt else 'number', num(ref), '1e-12', '1e-6')
+    # Degree mode
+    for txt, f, p in [('sin(x)', sp.sin(X * sp.pi / 180), 30), ('tan(x)', sp.tan(X * sp.pi / 180), 45), ('sin(x)^2', sp.sin(X * sp.pi / 180) ** 2, 60),
+                      ('cos(2*x)', sp.cos(2 * X * sp.pi / 180), 10), ('asin(x)', 180 / sp.pi * sp.asin(X), 0.5), ('atan(x)', 180 / sp.pi * sp.atan(X), 2)]:
+        dadd('degrees', f'deriv({txt},x,{p})', 'number', num(val(sp.diff(f, X), p)), '1e-12', '1e-9', 'deg')
+    write('derivative_forms.tsv', rows,
+              'Derivatives with cancellation near 0, near 1 and at large x, at kinks where the derivative exists or not '
+              '(abs(x)^p with p < 1 at 0 has none), of the factorial (integers only), special cases and degree mode.')
+
+    # ----------------------------------------------------------------------------------------------
+    # Determinants
+    # ----------------------------------------------------------------------------------------------
+    rows = []
+
+
+    def text(m):
+        return '[' + ','.join('[' + ','.join(str(v) for v in r) + ']' for r in m) + ']'
+
+
+    def exact(v):
+        v = sp.Rational(v)
+        return str(v.p) if v.q == 1 else f'{v.p}/{v.q}'
+
+
+    def madd(kind, expr, check, expected, rel='1e-10'):
+        rows.append([f'detform_{kind}_{len(rows):04d}', expr, expr, check, expected, '0', rel, 'rad'])
+
+
+    for n in (5, 5, 6, 6, 5, 6):
+        m = [[rnd.randint(-10 ** 9, 10 ** 9) for _ in range(n)] for _ in range(n)]
+        m[2] = [v + rnd.randint(-2, 2) for v in m[1]]
+        madd('big_5x5_6x6', f'det({text(m)})', 'exact_fraction', exact(sp.Matrix(m).det()))
+    for _ in range(6):
+        a = [[rnd.randint(-10 ** 6, 10 ** 6) for _ in range(3)] for _ in range(3)]
+        b = [[rnd.randint(-10 ** 6, 10 ** 6) for _ in range(3)] for _ in range(3)]
+        madd('product', f'det({text(a)}*{text(b)})', 'exact_fraction', exact((sp.Matrix(a) * sp.Matrix(b)).det()))
+    for _ in range(4):
+        a = [[rnd.randint(-10 ** 9, 10 ** 9) for _ in range(4)] for _ in range(4)]
+        madd('transpose', f'det(transpose({text(a)}))', 'exact_fraction', exact(sp.Matrix(a).det()))
+    for _ in range(6):
+        n = rnd.choice([3, 4])
+        a = [[rnd.randint(-10 ** 12, 10 ** 12) for _ in range(n)] for _ in range(n - 1)]
+        a.append([x + y for x, y in zip(a[0], a[1])])
+        madd('singular', f'det({text(a)})', 'exact_fraction', '0', rel='0')
+    for _ in range(6):
+        n = rnd.choice([2, 3])
+        a = [[sp.Rational(rnd.randint(-999, 999), 1000) for _ in range(n)] for _ in range(n)]
+        if sp.Matrix(a).det() == 0:
+            continue
+        madd('decimals', f'det({text([[str(float(v)) for v in r] for r in a])})', 'exact_fraction', exact(sp.Matrix(a).det()))
+    for _ in range(4):
+        a = [[rnd.randint(1, 9) * 10 ** 90 if i == j else rnd.randint(-1, 1) * 10 ** 90 for j in range(3)] for i in range(3)]
+        for i in range(3):
+            a[i][i] += 3 * 10 ** 90
+        madd('huge', f'det({text([[f"{v // 10 ** 90}e90" for v in r] for r in a])})', 'number', num(float(sp.Matrix(a).det())), rel='1e-9')
+    for _ in range(6):
+        n = rnd.choice([2, 3, 4])
+        a = [[rnd.randint(-9, 9) for _ in range(n)] for _ in range(n)]
+        d = sp.Matrix(a).det()
+        if d == 0:
+            continue
+        madd('det_of_inverse', f'det(inv({text(a)}))', 'exact_fraction', exact(1 / d))
+    for _ in range(4):
+        a = [[rnd.randint(-3, 3) for _ in range(4)] for _ in range(4)]
+        d = sp.Matrix(a).det()
+        if d == 0:
+            continue
+        e = rnd.randint(6, 12)
+        madd('power_4x4', f'det({text(a)}^{e})', 'exact_fraction', exact(d ** e))
+    write('determinant_forms.tsv', rows,
+              'Determinants of 5x5 and 6x6 integer matrices with entries up to 1e9, of products and transposes, of exactly '
+              'singular matrices with entries up to 1e12, of decimal matrices, with entries 1e90, det(inv(A)) and 4x4 powers.')
+
+    # ----------------------------------------------------------------------------------------------
+    # Splits with new building blocks
+    # ----------------------------------------------------------------------------------------------
+    rows = []
+    seen = set()
+
+
+    def c3(lo, hi):
+        return round(rnd.uniform(lo, hi), 3)
+
+
+    def term():
+        kind = rnd.choice(['abs_sin_x2', 'floor_x2', 'floor_exp', 'ln_abs_sin', 'inv_sqrt_x2', 'sign_cos', 'abs_sin_nonint',
+                           'peaks_sin', 'x_floor', 'floor_neg', 'pow_abs', 'sin_x2', 'sqrt_abs_sin', 'mod', 'poly', 'gauss'])
+        return {
+            'abs_sin_x2': lambda: 'abs(sin(x^2))',
+            'floor_x2': lambda: 'floor(x^2)',
+            'floor_exp': lambda: 'floor(exp(x/3))',
+            'ln_abs_sin': lambda: 'ln(abs(sin(x)))',
+            'inv_sqrt_x2': lambda: f'1/sqrt(abs(x^2-{c3(0.5, 9)}))',
+            'sign_cos': lambda: f'sign(cos(x)-({c3(-0.9, 0.9)}))',
+            'abs_sin_nonint': lambda: f'abs(sin(2.5*x-({c3(-1, 1)})))',
+            'peaks_sin': lambda: f'exp(-{10 ** rnd.choice([2, 4])}*sin(x)^2)',
+            'x_floor': lambda: 'x*floor(x)',
+            'floor_neg': lambda: f'floor(-2.5*x+({c3(-1, 1)}))',
+            'pow_abs': lambda: f'abs(x-({c3(-3, 3)}))^(-0.5)',
+            'sin_x2': lambda: 'sin(x^2)',
+            'sqrt_abs_sin': lambda: 'sqrt(abs(sin(x)))',
+            'mod': lambda: 'x mod 1',
+            'poly': lambda: f'x^{rnd.randint(1, 3)}',
+            'gauss': lambda: f'exp(-{10 ** rnd.choice([2, 4, 6])}*(x-({c3(-3, 3)}))^2)',
+        }[kind]()
+
+
+    while len(rows) < 80:
+        shape = rnd.random()
+        f = term() if shape < 0.4 else (f'{term()}+{rnd.randint(2, 5)}*{term()}' if shape < 0.8 else f'({term()})*({term()})')
+        lo = c3(-4, 1)
+        hi = round(lo + rnd.choice([2, 4, 7, 10]) * rnd.uniform(0.5, 1.0), 3)
+        mid = round(lo + (hi - lo) * rnd.uniform(0.15, 0.85), 3)
+        whole = f'int({f},x,{lo},{hi})'
+        if whole in seen:
+            continue
+        seen.add(whole)
+        rows.append([f'splitform_{len(rows):04d}', whole, whole, 'integral_split', f'int({f},x,{lo},{mid});int({f},x,{mid},{hi})', '1e-12', '1e-9', 'rad'])
+    write('split_forms.tsv', rows,
+              'Self-check integral_split with building blocks of nonlinear arguments: floor(x^2), floor(exp(x/3)), x mod 1, '
+              'abs(sin(x^2)), ln(abs(sin(x))), 1/sqrt(abs(x^2-c)), sin(x^2) and more.')
+
+
 if __name__ == '__main__':
     derivatives()
     integrals()
@@ -915,3 +1243,4 @@ if __name__ == '__main__':
     derivative_families()
     determinants()
     integral_splits()
+    forms()

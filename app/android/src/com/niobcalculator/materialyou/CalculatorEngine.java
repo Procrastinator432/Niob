@@ -628,10 +628,13 @@ public final class CalculatorEngine {
                 }
                 double x0 = x0Val.c.re;
                 Map<String, Value> local = ov != null ? new HashMap<>(ov) : new HashMap<>();
+                if (containsDiscreteDomainOf(f.args.get(0), v)) {
+                    throw new RuntimeException("Funktion an der Stelle nicht reell differenzierbar");
+                }
                 RealSampler sampler = x -> evalRealDerivativeSample(f.args.get(0), local, v, x);
                 double f0 = sampler.sample(x0);
                 boolean jumpChecked = containsStepOrAbs(f.args.get(0));
-                boolean isFlat = jumpChecked && checkDerivativeJumpOrKink(sampler, x0, f0);
+                boolean isFlat = jumpChecked && checkDerivativeJumpOrKink(sampler, x0, f0, true);
                 AstNode dNode = f.args.get(0).diff(v, radiansMode);
                 if (dNode != null) {
                     ValErr ve = null;
@@ -1688,7 +1691,7 @@ public final class CalculatorEngine {
                 uniqueExtra.subList(write, uniqueExtra.size()).clear();
             }
         }
-        boolean manyExtra = uniqueExtra.size() > 32;
+        boolean manyExtra = uniqueExtra.size() > 64;
         java.util.ArrayList<AnchorPoint> pts = new java.util.ArrayList<>(initialSubintervals + uniqueExtra.size() + 128);
         for (int i = 0; i <= initialSubintervals; i++) {
             double p = i == initialSubintervals ? hi : (lo + i * step);
@@ -2131,13 +2134,14 @@ public final class CalculatorEngine {
         }
     }
 
-    private void pushLinearPeriodicRoots(AstNode arg, String var, double baseSol, double period,
-                                         double lo, double hi, Map<String, Value> ov, List<Double> out, boolean[] truncated) {
+    private void pushPeriodicRoots(AstNode arg, String var, double baseSol, double period,
+                                   double lo, double hi, Map<String, Value> ov, List<Double> out, boolean[] truncated, int depth) {
+        if ((truncated != null && truncated[0]) || period <= 0.0 || !Double.isFinite(period)) return;
         AstNode.LinearMatch lin = AstNode.matchLinear(arg, var);
         if (lin != null) {
             Double a = evalAstWithDefaultZero(lin.a, var, null, ov);
             Double b = evalAstWithDefaultZero(lin.b, var, null, ov);
-            if (a != null && b != null && a != 0.0 && period > 0.0) {
+            if (a != null && b != null && a != 0.0) {
                 double uLo = a * lo + b;
                 double uHi = a * hi + b;
                 long mMin = (long) Math.floor((Math.min(uLo, uHi) - baseSol) / period) - 1;
@@ -2152,12 +2156,120 @@ public final class CalculatorEngine {
                     truncated[0] = true;
                 }
             }
-        } else {
-            collectCriticalPoints(new AstSub(arg, new AstNum(Value.fromFloat(baseSol))), var, lo, hi, ov, out, truncated);
+            return;
+        }
+        if (depth >= 2) {
+            if (truncated != null) truncated[0] = true;
+            return;
+        }
+        ArrayList<Double> xs = new ArrayList<>(280);
+        xs.add(lo);
+        xs.add(hi);
+        if (lo < 0.0 && hi > 0.0) xs.add(0.0);
+        int gridN = 128;
+        double span = hi - lo;
+        for (int i = 1; i < gridN; i++) {
+            xs.add(lo + span * ((double) i) / ((double) gridN));
+        }
+        ArrayList<Double> innerPts = new ArrayList<>();
+        boolean[] innerTrunc = new boolean[]{false};
+        collectCriticalPointsImpl(arg, var, lo, hi, ov, innerPts, innerTrunc, depth + 1);
+        AstNode dArg = arg.diff(var, radiansMode);
+        if (dArg != null) {
+            collectCriticalPointsImpl(dArg, var, lo, hi, ov, innerPts, innerTrunc, depth + 1);
+        }
+        for (double p : innerPts) {
+            if (Double.isFinite(p) && p > lo && p < hi) xs.add(p);
+        }
+        java.util.Collections.sort(xs);
+        ArrayList<Double> uniqX = new ArrayList<>(xs.size());
+        for (double p : xs) {
+            if (uniqX.isEmpty() || Math.abs(p - uniqX.get(uniqX.size() - 1)) > 1e-13 * Math.max(1.0, Math.abs(p))) {
+                uniqX.add(p);
+            }
+        }
+        if (uniqX.size() < 2) return;
+        double[] sampleX = new double[uniqX.size()];
+        double[] sampleU = new double[uniqX.size()];
+        for (int i = 0; i < uniqX.size(); i++) {
+            checkInterrupted();
+            double x = uniqX.get(i);
+            Double u = evalAstWithDefaultZero(arg, var, x, ov);
+            if (u == null && i == 0) {
+                double eps = 1e-12 * Math.max(1e-12, uniqX.get(1) - x);
+                u = evalAstWithDefaultZero(arg, var, x + eps, ov);
+            } else if (u == null && i + 1 == uniqX.size()) {
+                double eps = 1e-12 * Math.max(1e-12, x - uniqX.get(i - 1));
+                u = evalAstWithDefaultZero(arg, var, x - eps, ov);
+            }
+            if (u == null) {
+                if (truncated != null) truncated[0] = true;
+                return;
+            }
+            sampleX[i] = x;
+            sampleU[i] = u;
+        }
+        for (int i = 0; i + 1 < sampleX.length; i++) {
+            double x0 = sampleX[i];
+            double u0 = sampleU[i];
+            double x1 = sampleX[i + 1];
+            double u1 = sampleU[i + 1];
+            double uMin = Math.min(u0, u1);
+            double uMax = Math.max(u0, u1);
+            double spanPeriods = (uMax - uMin) / period;
+            if (!Double.isFinite(spanPeriods) || spanPeriods > 4096.0) {
+                if (truncated != null) truncated[0] = true;
+                return;
+            }
+            long mStart = (long) Math.floor((uMin - baseSol) / period) - 1;
+            long mEnd = (long) Math.ceil((uMax - baseSol) / period) + 1;
+            for (long m = mStart; m <= mEnd; m++) {
+                double target = baseSol + m * period;
+                double d0Orig = u0 - target;
+                double d1Orig = u1 - target;
+                if (d0Orig == 0.0) {
+                    pushCriticalPoint(out, x0, lo, hi, truncated);
+                } else if (d1Orig == 0.0) {
+                    pushCriticalPoint(out, x1, lo, hi, truncated);
+                } else if ((d0Orig < 0.0 && d1Orig > 0.0) || (d0Orig > 0.0 && d1Orig < 0.0)) {
+                    double aB = x0;
+                    double bB = x1;
+                    double dA = d0Orig;
+                    for (int it = 0; it < 60; it++) {
+                        checkInterrupted();
+                        double mid = 0.5 * (aB + bB);
+                        if (mid == aB || mid == bB) break;
+                        Double um = evalAstWithDefaultZero(arg, var, mid, ov);
+                        if (um == null) {
+                            if (truncated != null) truncated[0] = true;
+                            return;
+                        }
+                        double dm = um - target;
+                        if (dm == 0.0) {
+                            aB = mid;
+                            bB = mid;
+                            break;
+                        }
+                        if ((dA < 0.0 && dm < 0.0) || (dA > 0.0 && dm > 0.0)) {
+                            aB = mid;
+                            dA = dm;
+                        } else {
+                            bB = mid;
+                        }
+                        if ((bB - aB) <= 1e-15 * Math.max(1.0, Math.abs(mid))) break;
+                    }
+                    pushCriticalPoint(out, 0.5 * (aB + bB), lo, hi, truncated);
+                }
+                if (truncated != null && truncated[0]) return;
+            }
         }
     }
 
     private void collectCriticalPoints(AstNode node, String var, double lo, double hi, Map<String, Value> ov, List<Double> out, boolean[] truncated) {
+        collectCriticalPointsImpl(node, var, lo, hi, ov, out, truncated, 0);
+    }
+
+    private void collectCriticalPointsImpl(AstNode node, String var, double lo, double hi, Map<String, Value> ov, List<Double> out, boolean[] truncated, int depth) {
         if (node == null || (truncated != null && truncated[0])) return;
         if (out.size() >= MAX_CRITICAL_POINTS) {
             if (node.containsVar(var) && truncated != null) truncated[0] = true;
@@ -2166,26 +2278,56 @@ public final class CalculatorEngine {
         if (!node.containsVar(var)) return;
         if (node instanceof AstFunc) {
             AstFunc fn = (AstFunc) node;
-            if (fn.args.size() == 1 && AstNode.matchLinear(fn.args.get(0), var) != null) {
+            String trimmedFn = fn.name.trim();
+            if (trimmedFn.equals("mod") && fn.args.size() == 2) {
+                if (!fn.args.get(1).containsVar(var)) {
+                    Double mVal = evalAstWithDefaultZero(fn.args.get(1), var, null, ov);
+                    if (mVal != null && Double.isFinite(mVal) && mVal != 0.0) {
+                        pushPeriodicRoots(fn.args.get(0), var, 0.0, Math.abs(mVal), lo, hi, ov, out, truncated, depth);
+                        if (depth == 0 && (truncated == null || !truncated[0])) {
+                            collectCriticalPointsImpl(fn.args.get(0), var, lo, hi, ov, out, truncated, depth + 1);
+                        }
+                        return;
+                    }
+                }
+                if (truncated != null) truncated[0] = true;
+                return;
+            }
+            if (fn.args.size() == 1) {
                 AstNode arg = fn.args.get(0);
                 double half = radiansMode ? Math.PI : 180.0;
-                switch (fn.name) {
+                switch (trimmedFn) {
                     case "sin":
-                        pushLinearPeriodicRoots(arg, var, 0.0, half, lo, hi, ov, out, truncated);
+                        pushPeriodicRoots(arg, var, 0.0, half, lo, hi, ov, out, truncated, depth);
+                        if (depth == 0 && (truncated == null || !truncated[0]) && AstNode.matchLinear(arg, var) == null) {
+                            collectCriticalPointsImpl(arg, var, lo, hi, ov, out, truncated, depth + 1);
+                        }
                         return;
                     case "cos":
-                        pushLinearPeriodicRoots(arg, var, 0.5 * half, half, lo, hi, ov, out, truncated);
+                        pushPeriodicRoots(arg, var, 0.5 * half, half, lo, hi, ov, out, truncated, depth);
+                        if (depth == 0 && (truncated == null || !truncated[0]) && AstNode.matchLinear(arg, var) == null) {
+                            collectCriticalPointsImpl(arg, var, lo, hi, ov, out, truncated, depth + 1);
+                        }
                         return;
                     case "tan":
-                        pushLinearPeriodicRoots(arg, var, 0.0, half, lo, hi, ov, out, truncated);
-                        pushLinearPeriodicRoots(arg, var, 0.5 * half, half, lo, hi, ov, out, truncated);
+                        pushPeriodicRoots(arg, var, 0.0, half, lo, hi, ov, out, truncated, depth);
+                        pushPeriodicRoots(arg, var, 0.5 * half, half, lo, hi, ov, out, truncated, depth);
+                        if (depth == 0 && (truncated == null || !truncated[0]) && AstNode.matchLinear(arg, var) == null) {
+                            collectCriticalPointsImpl(arg, var, lo, hi, ov, out, truncated, depth + 1);
+                        }
                         return;
                     case "floor":
                     case "ceil":
-                        pushLinearPeriodicRoots(arg, var, 0.0, 1.0, lo, hi, ov, out, truncated);
+                        pushPeriodicRoots(arg, var, 0.0, 1.0, lo, hi, ov, out, truncated, depth);
+                        if (depth == 0 && (truncated == null || !truncated[0]) && AstNode.matchLinear(arg, var) == null) {
+                            collectCriticalPointsImpl(arg, var, lo, hi, ov, out, truncated, depth + 1);
+                        }
                         return;
                     case "round":
-                        pushLinearPeriodicRoots(arg, var, 0.5, 1.0, lo, hi, ov, out, truncated);
+                        pushPeriodicRoots(arg, var, 0.5, 1.0, lo, hi, ov, out, truncated, depth);
+                        if (depth == 0 && (truncated == null || !truncated[0]) && AstNode.matchLinear(arg, var) == null) {
+                            collectCriticalPointsImpl(arg, var, lo, hi, ov, out, truncated, depth + 1);
+                        }
                         return;
                     default:
                         break;
@@ -2285,22 +2427,22 @@ public final class CalculatorEngine {
                                 double u0 = radiansMode ? Math.asin(target) : Math.toDegrees(Math.asin(target));
                                 double half = radiansMode ? pi : 180.0;
                                 double full = 2.0 * half;
-                                pushLinearPeriodicRoots(arg, var, u0, full, lo, hi, ov, out, truncated);
-                                pushLinearPeriodicRoots(arg, var, half - u0, full, lo, hi, ov, out, truncated);
+                                pushPeriodicRoots(arg, var, u0, full, lo, hi, ov, out, truncated, depth);
+                                pushPeriodicRoots(arg, var, half - u0, full, lo, hi, ov, out, truncated, depth);
                             }
                             break;
                         case "cos":
                             if (Math.abs(target) <= 1.0) {
                                 double u0 = radiansMode ? Math.acos(target) : Math.toDegrees(Math.acos(target));
                                 double full = radiansMode ? 2.0 * pi : 360.0;
-                                pushLinearPeriodicRoots(arg, var, u0, full, lo, hi, ov, out, truncated);
-                                pushLinearPeriodicRoots(arg, var, -u0, full, lo, hi, ov, out, truncated);
+                                pushPeriodicRoots(arg, var, u0, full, lo, hi, ov, out, truncated, depth);
+                                pushPeriodicRoots(arg, var, -u0, full, lo, hi, ov, out, truncated, depth);
                             }
                             break;
                         case "tan": {
                             double u0 = radiansMode ? Math.atan(target) : Math.toDegrees(Math.atan(target));
                             double half = radiansMode ? pi : 180.0;
-                            pushLinearPeriodicRoots(arg, var, u0, half, lo, hi, ov, out, truncated);
+                            pushPeriodicRoots(arg, var, u0, half, lo, hi, ov, out, truncated, depth);
                             break;
                         }
                         case "exp":
@@ -2551,12 +2693,46 @@ public final class CalculatorEngine {
         return false;
     }
 
+    private static boolean containsDiscreteDomainOf(AstNode node, String var) {
+        if (node == null) return false;
+        if (node instanceof AstNeg) return containsDiscreteDomainOf(((AstNeg) node).inner, var);
+        if (node instanceof AstAdd) {
+            AstAdd a = (AstAdd) node;
+            return containsDiscreteDomainOf(a.left, var) || containsDiscreteDomainOf(a.right, var);
+        }
+        if (node instanceof AstSub) {
+            AstSub s = (AstSub) node;
+            return containsDiscreteDomainOf(s.left, var) || containsDiscreteDomainOf(s.right, var);
+        }
+        if (node instanceof AstMul) {
+            AstMul m = (AstMul) node;
+            return containsDiscreteDomainOf(m.left, var) || containsDiscreteDomainOf(m.right, var);
+        }
+        if (node instanceof AstDiv) {
+            AstDiv d = (AstDiv) node;
+            return containsDiscreteDomainOf(d.left, var) || containsDiscreteDomainOf(d.right, var);
+        }
+        if (node instanceof AstPow) {
+            AstPow p = (AstPow) node;
+            return containsDiscreteDomainOf(p.base, var) || containsDiscreteDomainOf(p.exp, var);
+        }
+        if (node instanceof AstFunc) {
+            AstFunc f = (AstFunc) node;
+            String n = f.name.trim();
+            boolean isFact = n.equals("factorial") || n.equals("fact") || n.equals("!");
+            for (AstNode arg : f.args) {
+                if ((isFact && arg.containsVar(var)) || containsDiscreteDomainOf(arg, var)) return true;
+            }
+        }
+        return false;
+    }
+
     private double computeNumericalDerivative(RealSampler sampler, double x0) {
         return computeNumericalDerivative(sampler, x0, sampler.sample(x0), false);
     }
 
-    /** Returns true when symmetric h1/h2 samples equal f0 identically. */
-    private boolean checkDerivativeJumpOrKink(RealSampler sampler, double x0, double f0) {
+    /** Returns true when symmetric h1/h2 samples equal f0 identically (or vanish smoothly by Aitken). */
+    private boolean checkDerivativeJumpOrKink(RealSampler sampler, double x0, double f0, boolean checkSublinearZero) {
         double h1 = 1e-7 * Math.max(1.0, Math.abs(x0));
         double h2 = 1e-5 * Math.max(1.0, Math.abs(x0));
         try {
@@ -2566,8 +2742,14 @@ public final class CalculatorEngine {
             double fm2k = sampler.sample(x0 - h2);
             double jump1 = Math.abs(fp1k - fm1k);
             double jump2 = Math.abs(fp2k - fm2k);
+            double d0p1 = Math.abs(fp1k - f0);
+            double d0p2 = Math.abs(fp2k - f0);
+            double d0m1 = Math.abs(fm1k - f0);
+            double d0m2 = Math.abs(fm2k - f0);
             double valScale = Math.max(1.0, Math.max(Math.abs(f0), Math.max(Math.abs(fp1k), Math.abs(fm1k))));
-            if (jump1 > 1e-4 * valScale && jump2 < 2.5 * jump1) {
+            if ((jump1 > 1e-4 * valScale && jump2 < 2.5 * jump1)
+                    || (d0p1 > 1e-4 * valScale && d0p2 < 2.5 * d0p1)
+                    || (d0m1 > 1e-4 * valScale && d0m2 < 2.5 * d0m1)) {
                 throw new RuntimeException("Funktion an der Stelle nicht stetig / nicht differenzierbar");
             }
             double dr1 = (fp1k - f0) / h1;
@@ -2575,10 +2757,35 @@ public final class CalculatorEngine {
             double dr2 = (fp2k - f0) / h2;
             double dl2 = (f0 - fm2k) / h2;
             double slopeScale = Math.max(1.0, Math.max(Math.abs(dr1), Math.abs(dl1)));
+            if ((d0p1 > 1e-9 * valScale && Math.abs(dr1) > 3.0 * Math.abs(dr2) && Math.abs(dr1) > 10.0 * valScale)
+                    || (d0m1 > 1e-9 * valScale && Math.abs(dl1) > 3.0 * Math.abs(dl2) && Math.abs(dl1) > 10.0 * valScale)) {
+                throw new RuntimeException("Funktion an der Stelle nicht differenzierbar");
+            }
             if (Math.abs(dr1 - dr2) <= 1e-2 * slopeScale
                     && Math.abs(dl1 - dl2) <= 1e-2 * slopeScale
                     && Math.abs(dr1 - dl1) > 1e-3 * slopeScale) {
                 throw new RuntimeException("Funktion an der Stelle nicht differenzierbar");
+            }
+            if (checkSublinearZero
+                    && Math.abs(dr1) <= 0.35 * Math.abs(dr2)
+                    && Math.abs(dl1) <= 0.35 * Math.abs(dl2)
+                    && Math.max(Math.abs(dr1), Math.abs(dl1)) <= 1e-2 * slopeScale) {
+                double h0 = 1e-9 * Math.max(1.0, Math.abs(x0));
+                double fp0k = sampler.sample(x0 + h0);
+                double fm0k = sampler.sample(x0 - h0);
+                double dr0 = (fp0k - f0) / h0;
+                double dl0 = (f0 - fm0k) / h0;
+                if (Math.abs(dr0) <= 0.35 * Math.abs(dr1)
+                        && Math.abs(dl0) <= 0.35 * Math.abs(dl1)
+                        && Math.max(Math.abs(dr0), Math.abs(dl0)) <= 1e-3 * slopeScale) {
+                    double denR = dr2 - 2.0 * dr1 + dr0;
+                    double limR = denR == 0.0 ? dr0 : dr0 - (dr1 - dr0) * (dr1 - dr0) / denR;
+                    double denL = dl2 - 2.0 * dl1 + dl0;
+                    double limL = denL == 0.0 ? dl0 : dl0 - (dl1 - dl0) * (dl1 - dl0) / denL;
+                    if (Math.abs(limR) <= 1e-9 && Math.abs(limL) <= 1e-9) {
+                        return true;
+                    }
+                }
             }
             return fp1k == f0 && fm1k == f0 && fp2k == f0 && fm2k == f0;
         } catch (RuntimeException ex) {
@@ -2591,7 +2798,7 @@ public final class CalculatorEngine {
     }
 
     private double computeNumericalDerivative(RealSampler sampler, double x0, double f0, boolean jumpChecked) {
-        if (!jumpChecked && checkDerivativeJumpOrKink(sampler, x0, f0)) {
+        if (!jumpChecked && checkDerivativeJumpOrKink(sampler, x0, f0, false)) {
             return 0.0;
         }
         double h = 1e-4 * Math.max(1.0, Math.abs(x0));
@@ -2774,10 +2981,13 @@ public final class CalculatorEngine {
             double x0 = x0Val.c.re;
             Map<String, Value> local = ov != null ? new HashMap<>(ov) : new HashMap<>();
             RealSampler sampler = x -> evalRealDerivativeSampleExpr(args.get(0), local, v, x);
-            double f0 = sampler.sample(x0);
             AstNode parsedAst = AstParser.tryParse(args.get(0));
+            if (parsedAst != null && containsDiscreteDomainOf(parsedAst, v)) {
+                throw new RuntimeException("Funktion an der Stelle nicht reell differenzierbar");
+            }
+            double f0 = sampler.sample(x0);
             boolean jumpChecked = parsedAst != null && containsStepOrAbs(parsedAst);
-            boolean isFlat = jumpChecked && checkDerivativeJumpOrKink(sampler, x0, f0);
+            boolean isFlat = jumpChecked && checkDerivativeJumpOrKink(sampler, x0, f0, true);
             if (parsedAst != null) {
                 AstNode dNode = parsedAst.diff(v, radiansMode);
                 if (dNode != null) {

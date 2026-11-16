@@ -20,6 +20,10 @@ const INTEGRAL_FAMILIES: &str = include_str!("data/generated/integral_families.t
 const DERIVATIVE_FAMILIES: &str = include_str!("data/generated/derivative_families.tsv");
 const DETERMINANTS: &str = include_str!("data/generated/determinants.tsv");
 const INTEGRAL_SPLITS: &str = include_str!("data/generated/integral_splits.tsv");
+const INTEGRAL_FORMS: &str = include_str!("data/generated/integral_forms.tsv");
+const DERIVATIVE_FORMS: &str = include_str!("data/generated/derivative_forms.tsv");
+const DETERMINANT_FORMS: &str = include_str!("data/generated/determinant_forms.tsv");
+const SPLIT_FORMS: &str = include_str!("data/generated/split_forms.tsv");
 
 /// Generous per-case time limit so that slow debug builds do not turn into timeouts.
 const TIMEOUT_MS: u64 = 30_000;
@@ -248,6 +252,17 @@ fn check_row(row: &Row) -> Outcome {
                 match number_problem(&out, row.expected.parse().unwrap(), row.abs_tol, row.rel_tol) {
                     None => Outcome::Pass,
                     Some(p) => fail(format!("{p} (als konvergiert gemeldet)")),
+                }
+            }
+        },
+        // A divergent integral: an error or "not converged" is required, a converged value fails.
+        "diverges" => match result {
+            Err(_) => Outcome::Refused,
+            Ok(out) => {
+                if out.integration_report.as_ref().is_some_and(|r| !r.converged) {
+                    Outcome::NotConverged
+                } else {
+                    fail(format!("divergentes Integral als Wert {} ohne Warnung", out.decimal_text))
                 }
             }
         },
@@ -502,4 +517,24 @@ fn generated_determinants() {
 #[test]
 fn generated_integral_splits() {
     run_table("generated_integral_splits", INTEGRAL_SPLITS);
+}
+
+#[test]
+fn generated_integral_forms() {
+    run_table("generated_integral_forms", INTEGRAL_FORMS);
+}
+
+#[test]
+fn generated_derivative_forms() {
+    run_table("generated_derivative_forms", DERIVATIVE_FORMS);
+}
+
+#[test]
+fn generated_determinant_forms() {
+    run_table("generated_determinant_forms", DETERMINANT_FORMS);
+}
+
+#[test]
+fn generated_split_forms() {
+    run_table("generated_split_forms", SPLIT_FORMS);
 }
