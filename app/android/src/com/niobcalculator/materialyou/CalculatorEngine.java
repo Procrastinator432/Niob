@@ -1659,6 +1659,29 @@ public final class CalculatorEngine {
         }
     }
 
+    // A pole keeps its sign on one side and grows steadily towards it. Oscillating integrands such
+    // as sin(1/x)/x can pass the six-point test by chance, so check the sign and the growth at the
+    // points in between as well.
+    private static boolean keepsSignAndGrows(IntegrandFunc f, double r, double sign, double[] ds) {
+        double prevAbs = 0.0;
+        int sgn = 0;
+        for (int i = 0; i < ds.length; i++) {
+            for (int k = 0; k < 2; k++) {
+                if (k == 1 && i + 1 >= ds.length) break;
+                double d = k == 0 ? ds[i] : Math.sqrt(ds[i] * ds[i + 1]);
+                double v = f.eval(r + sign * d);
+                if (!Double.isFinite(v) || v == 0.0) return false;
+                int sv = v > 0.0 ? 1 : -1;
+                if (sgn != 0 && sv != sgn) return false;
+                sgn = sv;
+                double av = Math.abs(v);
+                if (av <= prevAbs) return false;
+                prevAbs = av;
+            }
+        }
+        return true;
+    }
+
     private static boolean isDivergentPoleAt(IntegrandFunc f, double r, double lo, double hi) {
         double s = Math.max(1.0, Math.abs(r));
         Double vr = null;
@@ -1693,7 +1716,8 @@ public final class CalculatorEngine {
                         && (v4 / v3) >= Math.pow(d3 / d4, 0.9995)
                         && (v5 / v4) >= 20.0
                         && (v6 / v5) >= 4.0
-                        && (vr == null || vr >= 10.0 * v5)) {
+                        && (vr == null || vr >= 10.0 * v5)
+                        && keepsSignAndGrows(f, r, sign, new double[]{d1, d2, d3, d4, d5, d6})) {
                     return true;
                 }
             } catch (RuntimeException ignored) {
@@ -2421,14 +2445,25 @@ public final class CalculatorEngine {
             }
         }
         if (uniqX.size() < 2) return;
+        int nPts = uniqX.size();
+        Double[] vals = new Double[nPts];
+        for (int i = 0; i < nPts; i++) {
+            checkInterrupted();
+            vals[i] = evalAstWithDefaultZero(expr, var, uniqX.get(i), ov);
+        }
         boolean hasPrev = false;
         double prevX = 0.0;
         double prevU = 0.0;
-        for (double x : uniqX) {
+        for (int i = 0; i < nPts; i++) {
             checkInterrupted();
-            Double uObj = evalAstWithDefaultZero(expr, var, x, ov);
+            double x = uniqX.get(i);
+            Double uObj = vals[i];
             if (uObj == null) {
-                pushCriticalPoint(out, x, lo, hi, truncated);
+                // A lone non-finite value marks an inner singularity. A run of them is overflow
+                // (e.g. cosh(k*(x-c)) away from a narrow peak) and says nothing about roots;
+                // splitting there would put the peak between the quadrature nodes.
+                boolean isolated = i > 0 && i + 1 < nPts && vals[i - 1] != null && vals[i + 1] != null;
+                if (isolated) pushCriticalPoint(out, x, lo, hi, truncated);
                 hasPrev = false;
                 continue;
             }

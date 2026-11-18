@@ -445,15 +445,24 @@ def polynomials():
         if t in seen:
             continue
         seen.add(t)
+        terms = sp.Poly(sp.expand(e), y, z, w).terms()
         pts = []
+        term_sum = 0
         for _ in range(3):
             sub = {s: sp.Rational(rnd.randint(-200, 200), 100) for s in (y, z, w)}
             val = e.subs(sub)
+            # Sum of the absolute values of the expanded terms. Evaluating a correct expansion in floating
+            # point can be off by a few ulps of this sum, which matters where the terms nearly cancel.
+            term_sum = max(term_sum, sum(abs(c) * abs(sub[y]) ** m[0] * abs(sub[z]) ** m[1] * abs(sub[w]) ** m[2]
+                                         for m, c in terms))
             pts.append(','.join(f'{s}={num(sub[s])}' for s in (y, z, w)) + ':' + num(val))
-        rows.append([f'poly_{len(rows):04d}', t, t, 'polynomial', ';'.join(pts), '1e-9', '1e-9', 'rad'])
+        round_off = 64 * EPS * float(term_sum)
+        abs_tol = '1e-9' if round_off <= 1e-9 else num(round_off)
+        rows.append([f'poly_{len(rows):04d}', t, t, 'polynomial', ';'.join(pts), abs_tol, '1e-9', 'rad'])
     write('polynomials.tsv', rows,
           'Products and powers of linear terms in y, z, w. polynomial: the result must be expanded (no ")^", ")*(" or ")(") '
-          'and agree with the input at the sample points y=..,z=..,w=..:value.')
+          'and agree with the input at the sample points y=..,z=..,w=..:value. The absolute tolerance is at least '
+          '64 eps times the sum of the absolute values of the expanded terms at the sample points.')
 
 
 # ---------------------------------------------------------------------------
@@ -1537,6 +1546,100 @@ def forms3():
           '(integral_value: a value or "not converged" is required, an error message fails).')
 
 
+def forms4():
+    """integral_forms4.tsv from the eighth review (BEWERTUNG-2026-11-16-4.md).
+
+    integral: narrow peaks whose denominator overflows away from the peak (1/cosh(k*(x-c)), its square,
+    x/cosh(...)^2, 1/(1+cosh(...)), the logistic step); the eighth review found half or all of their area
+    missing while reported as converged. diverges: divergent forms with tiny factors, poles at roots of
+    transcendental functions and two close poles. integral_value: finite integrals that need a value or
+    "not converged", including oscillating ones such as sin(1/x)/x."""
+    rnd = random.Random(4401)
+    rows = []
+
+    def add(kind, expr, check, ref=None, abs_tol=1e-12):
+        expected = 'divergent' if check == 'diverges' else num(ref)
+        tol = (num(abs_tol), '1e-7') if check != 'diverges' else ('0', '0')
+        rows.append([f'intform4_{kind}_{len(rows):04d}', expr, expr, check, expected, tol[0], tol[1], 'rad'])
+
+    def ulp(v):
+        return mp.mpf(2) ** (mp.floor(mp.log(abs(mp.mpf(v)), 2)) - 52)
+
+    def logistic(k, c, length=1000):
+        # int(1/(1+exp(k*(x-c))),x,0,length), written without cancellation.
+        k, c = mp.mpf(k), mp.mpf(str(c))
+        return c - mp.log(1 + mp.exp(-k * (length - c))) / k + mp.log(1 + mp.exp(-k * c)) / k
+
+    # Divergent forms.
+    for expr in ['int(1e-15*abs(sin(x))^(-1.5),x,1,4)', 'int(1e-20/sin(x)^2,x,1,4)', 'int(1e15*abs(x-0.3)^(-1),x,0,1)',
+                 'int(1e-18*abs(x^2-2)^(-1.2),x,0,2)', 'int(1/abs(x*exp(x)-1),x,0,1)', 'int(1/(ln(x)+x)^2,x,0.2,1)',
+                 'int(1/(x^x-2)^2,x,1,2)', 'int(1/(tan(x)-x)^2,x,4,4.6)', 'int(1/abs(cos(x)*cosh(x)+1),x,1,2.5)',
+                 'int(1/((x-0.5)*(x-0.5000001)),x,0,1)', 'int(abs(exp(x)-3*x)^(-1.5),x,0,1)', 'int(sin(1/x)/x^2,x,0,1)',
+                 'int(1/abs(x-0.37)*(2+sin(x)),x,0,1)', 'int(1/abs(x^7-3*x+1),x,0,1)', 'int(1/(x^3-x-1)^2*1e-10,x,0,2)',
+                 'int(abs(sin(x)-x/3)^(-1),x,1,3)', 'int(1/abs(sinh(x)-1),x,0,2)']:
+        add('divergent', expr, 'diverges')
+    # Finite integrals that need a value: normalized peaks of width 1e-12 and 1e-13 ...
+    for _ in range(6):
+        c = round(rnd.uniform(0.1, 0.9), 3)
+        ex = rnd.choice([12, 13])
+        eps, cm = mp.mpf(10) ** -ex, mp.mpf(str(c))
+        ref = mp.atan((1 - cm) / eps) + mp.atan(cm / eps)
+        add('narrow_peak', f'int(1e-{ex}/((x-{c})^2+1e-{2 * ex}),x,0,1)', 'integral_value', ref,
+            float(max(mp.mpf('1e-12'), 8 * ref * ulp(cm) / eps)))
+    big = mp.mpf(10) ** 15
+    add('peak_at_zero', 'int(1/(x^2+1e-30),x,-1,1)', 'integral_value', 2 * mp.atan(big) * big)
+    add('peak_at_zero', 'int(1e-15/(x^2+1e-30),x,-1,1)', 'integral_value', 2 * mp.atan(big))
+    # ... steep bounded integrands 1/(abs(x-c)^1.5+eps) ...
+    for _ in range(4):
+        c = round(rnd.uniform(0.1, 0.9), 3)
+        ex = rnd.choice([10, 12, 14])
+        eps, cm = mp.mpf(10) ** -ex, mp.mpf(str(c))
+        width = eps ** (mp.mpf(2) / 3)
+        ref = mp.quad(lambda t: 1 / (abs(t - cm) ** mp.mpf(1.5) + eps),
+                      [0, cm - mp.mpf('1e-6'), cm - width, cm, cm + width, cm + mp.mpf('1e-6'), 1])
+        add('bounded_power', f'int(1/(abs(x-{c})^1.5+1e-{ex}),x,0,1)', 'integral_value', ref,
+            float(max(mp.mpf('1e-12'), 8 * ref * ulp(cm) / width)))
+    # ... exponents just above -1, and an oscillating integrand.
+    add('below_one', 'int(abs(sin(x))^(-0.99),x,1,4)', 'integral_value',
+        mp.quad(lambda t: abs(mp.sin(t)) ** mp.mpf(-0.99), [1, mp.pi, 4]))
+    add('below_one', 'int(abs(x^2-2)^(-0.99),x,0,2)', 'integral_value',
+        mp.quad(lambda t: abs(t * t - 2) ** mp.mpf(-0.99), [0, mp.sqrt(2), 2]))
+    add('below_one', 'int(abs(sin(x))^(-0.999),x,1,4)', 'integral',
+        mp.quad(lambda t: abs(mp.sin(t)) ** mp.mpf(-0.999), [1, mp.pi, 4]))
+    add('osc_conv', 'int(sin(1/x)/x,x,0,1)', 'integral_value', mp.pi / 2 - mp.si(1))
+    # Narrow peaks whose denominator overflows away from the peak, on [0, 1000].
+    for _ in range(30):
+        k = rnd.choice([100, 1000, 10000])
+        c = round(rnd.uniform(5, 995), rnd.choice([1, 2, 3]))
+        cm = mp.mpf(str(c))
+        form = rnd.choice(['sech', 'sech2', 'logistic', 'xsech2', 'onepluscosh'])
+        if form == 'sech':
+            expr, ref = f'int(1/cosh({k}*(x-{c})),x,0,1000)', mp.pi / k
+        elif form == 'sech2':
+            expr, ref = f'int(1/cosh({k}*(x-{c}))^2,x,0,1000)', mp.mpf(2) / k
+        elif form == 'logistic':
+            expr, ref = f'int(1/(1+exp({k}*(x-{c}))),x,0,1000)', logistic(k, c)
+        elif form == 'xsech2':
+            expr, ref = f'int(x/cosh({k}*(x-{c}))^2,x,0,1000)', 2 * cm / k
+        else:
+            expr, ref = f'int(1/(1+cosh({k}*(x-{c}))),x,0,1000)', mp.mpf(2) / k
+        add('overflow_peak_' + form, expr, 'integral', ref)
+    # The examples named in the review, and further oscillating integrals that converge.
+    for expr, ref in [('int(1/cosh(10000*(x-127.6))^2,x,0,1000)', mp.mpf(2) / 10000),
+                      ('int(1/cosh(10000*(x-84.99)),x,0,1000)', mp.pi / 10000),
+                      ('int(1/cosh(1000*(x-328.1))^2,x,0,1000)', mp.mpf(2) / 1000),
+                      ('int(1/cosh(1000*(x-664.04))^2,x,0,1000)', mp.mpf(2) / 1000),
+                      ('int(x/cosh(1000*(x-200.7))^2,x,0,1000)', 2 * mp.mpf('200.7') / 1000),
+                      ('int(1/(1+cosh(10000*(x-43.1))),x,0,1000)', mp.mpf(2) / 10000),
+                      ('int(1/(1+exp(1000*(x-328.1))),x,0,1000)', logistic(1000, 328.1))]:
+        add('review_overflow_peak', expr, 'integral', ref)
+    add('review_osc_conv', 'int(sin(2/x)/x,x,0,1)', 'integral_value', mp.pi / 2 - mp.si(2))
+    add('review_osc_conv', 'int(cos(1/x)/x,x,0,1)', 'integral_value', -mp.ci(1))
+    write('integral_forms4.tsv', rows,
+          'Eighth review: peaks with overflowing denominators (integral), divergent forms (diverges), finite '
+          'integrals that need a value or "not converged" (integral_value).')
+
+
 def gtc_roots(fun, lo, hi, n=6000):
     """Sign changes of fun on [lo, hi], refined by bisection (for the polynomial poles of forms3)."""
     out = []
@@ -1569,3 +1672,4 @@ if __name__ == '__main__':
     forms()
     forms2()
     forms3()
+    forms4()

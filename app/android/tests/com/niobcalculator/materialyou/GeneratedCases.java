@@ -26,7 +26,8 @@ final class GeneratedCases {
         "derivatives", "integrals", "matrices", "exact_numbers", "antiderivatives", "polynomials",
         "integral_families", "derivative_families", "determinants", "integral_splits",
         "integral_forms", "derivative_forms", "determinant_forms", "split_forms",
-        "integral_forms2", "derivative_forms2", "split_forms2", "integral_forms3"
+        "integral_forms2", "derivative_forms2", "split_forms2", "integral_forms3",
+        "integral_forms4"
     };
 
     private GeneratedCases() {}

@@ -3286,14 +3286,28 @@ impl MathEngine {
         if xs.len() < 2 {
             return;
         }
-        let mut prev: Option<(f64, f64)> = None;
+        let mut vals: Vec<Option<f64>> = Vec::with_capacity(xs.len());
         for &x in &xs {
             if check_eval_deadline().is_err() {
                 *truncated = true;
                 return;
             }
-            let Some(u) = self.eval_ast_with_x_default_zero(expr, var, Some(x), ov) else {
-                Self::push_critical_point(out, x, lo, hi, truncated);
+            vals.push(self.eval_ast_with_x_default_zero(expr, var, Some(x), ov));
+        }
+        let mut prev: Option<(f64, f64)> = None;
+        for (i, &x) in xs.iter().enumerate() {
+            if check_eval_deadline().is_err() {
+                *truncated = true;
+                return;
+            }
+            let Some(u) = vals[i] else {
+                // A lone non-finite value marks an inner singularity. A run of them is overflow
+                // (e.g. cosh(k*(x-c)) away from a narrow peak) and says nothing about roots;
+                // splitting there would put the peak between the quadrature nodes.
+                let isolated = i > 0 && i + 1 < vals.len() && vals[i - 1].is_some() && vals[i + 1].is_some();
+                if isolated {
+                    Self::push_critical_point(out, x, lo, hi, truncated);
+                }
                 prev = None;
                 continue;
             };
@@ -4645,7 +4659,39 @@ where
                     && (v6 / v5) >= 4.0
                     && vr.is_none_or(|vr_val| vr_val >= 10.0 * v5)
                 {
-                    return true;
+                    // A pole keeps its sign on one side and grows steadily towards it. Oscillating
+                    // integrands such as sin(1/x)/x can pass the six-point test by chance, so
+                    // check the sign and the growth at the points in between as well.
+                    let ds = [d1, d2, d3, d4, d5, d6];
+                    let mut prev_abs = 0.0_f64;
+                    let mut sgn = 0.0_f64;
+                    let mut steady = true;
+                    'scan: for i in 0..ds.len() {
+                        for k in 0..2 {
+                            if k == 1 && i + 1 >= ds.len() {
+                                break;
+                            }
+                            let d = if k == 0 { ds[i] } else { (ds[i] * ds[i + 1]).sqrt() };
+                            match f(r + sign * d) {
+                                Ok(v)
+                                    if v.is_finite()
+                                        && v != 0.0
+                                        && (sgn == 0.0 || v.signum() == sgn)
+                                        && v.abs() > prev_abs =>
+                                {
+                                    sgn = v.signum();
+                                    prev_abs = v.abs();
+                                }
+                                _ => {
+                                    steady = false;
+                                    break 'scan;
+                                }
+                            }
+                        }
+                    }
+                    if steady {
+                        return true;
+                    }
                 }
             }
         }

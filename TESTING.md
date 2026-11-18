@@ -14,7 +14,7 @@ test.bat
 
 Der Aufruf führt die Rust-Tests und die Tests des Android-Rechenkerns aus. Alle ausgewählten Tests müssen bestehen, damit der Befehl Exitcode 0 liefert. Fehler sind normale fehlgeschlagene Tests: Sie sind weder ignoriert noch als erwartete Fehlschläge versteckt.
 
-Beim aktuellen Prüfstand vom 16.11.2026 bestanden **402 Tests** (191 Rust und 211 Android/JVM, 0 Fehler, inkl. `NIOB_GENERATED_ALL='1'` über alle 18 generierten Testsuiten mit 4 001 Fällen pro Kern). Die Ergebnisse der vorangegangenen Emulatorprüfungen stehen in der [Nachprüfung](CODE-SMELL-NACHPRUEFUNG.md); die Befunde und Nachprüfungen zu den Rechenkernen, Desktop-Persistenz und Release-Konfiguration sind in [BEWERTUNG-2026-11-15-2.md](BEWERTUNG-2026-11-15-2.md), [BEWERTUNG-2026-11-15-4.md](BEWERTUNG-2026-11-15-4.md), [BEWERTUNG-2026-11-16.md](BEWERTUNG-2026-11-16.md), [BEWERTUNG-2026-11-16-2.md](BEWERTUNG-2026-11-16-2.md) und [BEWERTUNG-2026-11-16-3.md](BEWERTUNG-2026-11-16-3.md) dokumentiert.
+Beim aktuellen Prüfstand vom 16.11.2026 bestanden **404 Tests** (192 Rust und 212 Android/JVM, 0 Fehler, inkl. `NIOB_GENERATED_ALL='1'` über alle 19 generierten Testsuiten mit 4 073 Fällen pro Kern). Die Ergebnisse der vorangegangenen Emulatorprüfungen stehen in der [Nachprüfung](CODE-SMELL-NACHPRUEFUNG.md); die Befunde und Nachprüfungen zu den Rechenkernen, Desktop-Persistenz und Release-Konfiguration sind in [BEWERTUNG-2026-11-15-2.md](BEWERTUNG-2026-11-15-2.md), [BEWERTUNG-2026-11-15-4.md](BEWERTUNG-2026-11-15-4.md), [BEWERTUNG-2026-11-16.md](BEWERTUNG-2026-11-16.md), [BEWERTUNG-2026-11-16-2.md](BEWERTUNG-2026-11-16-2.md), [BEWERTUNG-2026-11-16-3.md](BEWERTUNG-2026-11-16-3.md) und [BEWERTUNG-2026-11-16-4.md](BEWERTUNG-2026-11-16-4.md) dokumentiert.
 
 ## Einen Fix gezielt ausprobieren
 
@@ -78,7 +78,7 @@ Die Tests decken Rechenkern und Zahlenausgabe ab. Sie ersetzen keine Tests für 
 
 ## Generierte Fälle
 
-Zusätzlich zu den Einzelfällen prüfen achtzehn Tests je Implementierung zusammen rund 4 000 erzeugte Fälle, fast alle mit unabhängig berechneten Sollwerten:
+Zusätzlich zu den Einzelfällen prüfen neunzehn Tests je Implementierung zusammen rund 4 100 erzeugte Fälle, fast alle mit unabhängig berechneten Sollwerten:
 
 | Test | Fälle | Inhalt |
 |---|---:|---|
@@ -100,12 +100,13 @@ Zusätzlich zu den Einzelfällen prüfen achtzehn Tests je Implementierung zusam
 | `generated_derivative_forms2` | 30 | Stellen ohne Ableitung und Stellen mit Ableitung trotz nahem Knick oder Sprung |
 | `generated_split_forms2` | 60 | Teilungsprobe mit diesen Bausteinen |
 | `generated_integral_forms3` | 86 | Erkennung divergenter Integrale: skalierte Pole, Pole an Polynom-Nullstellen, beschränkte steile Integranden und schmale Spitzen, die einen Wert verlangen |
+| `generated_integral_forms4` | 72 | Schmale Spitzen, deren Nenner abseits der Spitze überläuft (`1/cosh(k*(x-c))^2`, logistische Stufe …), weitere divergente Formen und schwingende konvergente Integranden wie `sin(1/x)/x` |
 
 Die Fälle liegen in `app/tests/data/generated/`. Rust (`app/tests/generated.rs`) und Android (`GeneratedCases.java`) lesen dieselben Dateien; beide Rechenkerne werden also gegen dieselben Sollwerte geprüft. Die Sollwerte stammen nicht aus einem der beiden Kerne, sondern aus sympy, mpmath und exakter Python-Arithmetik. Für den Testlauf ist kein Python nötig.
 
 Grundsatz: Ein korrektes Ergebnis oder eine ausdrückliche Fehlermeldung ist in Ordnung, ein falsches Ergebnis nicht. Wo Gleitkomma an seine Grenzen kommt (nahe Polstellen, starke Auslöschung), ist deshalb auch eine Fehlermeldung zulässig; bei Integralen zusätzlich ein Ergebnis, das als nicht konvergiert gekennzeichnet ist. Die Prüfungen sind in [app/tests/data/generated/README.md](app/tests/data/generated/README.md) beschrieben.
 
-Jeder der achtzehn Tests meldet im Fehlerfall die Anzahl falscher Fälle und die ersten 30 davon. Zulässige Fehlermeldungen und als nicht konvergiert gemeldete Integrale werden mitgezählt, schlagen aber nicht fehl. Alle Fehlschläge zeigt:
+Jeder der neunzehn Tests meldet im Fehlerfall die Anzahl falscher Fälle und die ersten 30 davon. Zulässige Fehlermeldungen und als nicht konvergiert gemeldete Integrale werden mitgezählt, schlagen aber nicht fehl. Alle Fehlschläge zeigt:
 
 ```powershell
 $env:NIOB_GENERATED_ALL = '1'; .\test.ps1 -Filter generated_; Remove-Item Env:NIOB_GENERATED_ALL
@@ -150,7 +151,9 @@ Nach Umsetzung der asymptotischen Polstellen-Divergenzprüfung in beiden Rechenk
 
 Beim Einbau von `generated_integral_forms3` am 16.11.2026, nach der [siebten Nachprüfung](BEWERTUNG-2026-11-16-3.md), schlug der Test in beiden Kernen mit denselben 26 von 86 Fällen fehl: 8 divergente Integrale werden als konvergiert gemeldet (6 aus der Nachprüfung, 2 der 16 skalierten), und 18 endliche Integrale werden mit „Integral divergiert“ abgelehnt (6 aus der Nachprüfung, 5 der 10 beschränkten steilen Integranden, 7 der 10 schmalen Spitzen). Nach Behebung der Befunde (skalierungsfreie Polstellenprüfung mit Abflachungs-/Obergrenzen-Check, Nullstellensuche für Nenner/Potenzbasen höherer bzw. transzendenter Ausdrücke sowie Nachprüfung schmaler Teilintervalle mit Früherkennung glatter Bereiche) bestehen nun alle 86 Fälle von `generated_integral_forms3` in beiden Kernen (`0` Fehler).
 
-Die erzeugten Integrale brauchen in einem Rust-Debug-Build Zeit: Alle generierten Tests zusammen liefen auf einem Linux-Server in rund 130 Sekunden (Android-JVM rund 28 Sekunden). Das Standard-Zeitlimit von `test.ps1` beträgt deshalb 600 Sekunden.
+Beim Einbau von `generated_integral_forms4` am 16.11.2026, nach der [achten Nachprüfung](BEWERTUNG-2026-11-16-4.md), schlug der Test mit dem vorherigen Kern mit 20 von 72 Fällen fehl: 19 schmale Spitzen mit überlaufendem Nenner verloren die halbe oder ganze Fläche, obwohl sie als konvergiert galten, und `int(sin(1/x)/x,x,0,1)` wurde mit „Integral divergiert“ abgelehnt. Behoben in beiden Kernen: Die Nullstellensuche für Nenner (`pushZeroRoots` bzw. `push_zero_roots`) setzt bei nicht endlichen Auswertungen nur noch einen Teilungspunkt, wenn der Punkt einzeln liegt, nicht in einem ganzen Überlaufbereich; die Polstellenprüfung verlangt zusätzlich gleichbleibendes Vorzeichen und stetiges Wachstum auch an den Zwischenstellen. Zugleich wurde in `polynomials.tsv` die absolute Toleranz von 14 Fällen an die Rundung der ausmultiplizierten Summanden angepasst (siehe README der Tabellen); mit verschobenen Startwerten schlug sonst `(y-2*z+2)^11` fehl, obwohl die Entwicklung richtig war. Seitdem bestehen alle 19 generierten Suiten in beiden Kernen, auch mit um 4 000 bis 7 000 verschobenen Startwerten.
+
+Die erzeugten Integrale brauchen in einem Rust-Debug-Build Zeit: Alle generierten Tests zusammen liefen auf einem Linux-Server in rund 135 Sekunden (Android-JVM rund 30 Sekunden). Das Standard-Zeitlimit von `test.ps1` beträgt deshalb 600 Sekunden.
 
 Neue Fälle entstehen nicht von Hand, sondern im Generator `tools/generate_test_cases.py` (benötigt Python 3.9 oder neuer sowie `pip install sympy mpmath`):
 

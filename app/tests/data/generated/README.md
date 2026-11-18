@@ -25,7 +25,7 @@ Jeder Fall startet mit einem neuen Rechenkern und hat 30 Sekunden Zeit.
 - `exact_fraction`: Der exakte Bruch (oder die exakte ganze Zahl, wenn der Sollwert keinen Bruchstrich hat) oder eine Dezimalzahl innerhalb der relativen Toleranz.
 - `matrix`: Sollwert `Matrix;Schranke`. Ein Eintrag passt, wenn `|ist - soll| <= relativ * |soll| + 10⁴ * eps * Schranke` plus Rundung der Anzeige. Die Schranke ist die komponentenweise Fehlerschranke `|A⁻¹|·|A|·|A⁻¹|` bei der Inversen, `|A|·|B|` beim Produkt und `(|A|·|A⁻¹|)²` bei A·inv(A). Ein Eintrag, der nach dieser Schranke deutlich von 0 verschieden ist, darf also nicht als 0 erscheinen.
 - `antiderivative`: Sollwert `x0:f(x0);…`. Das Ergebnis F wird an x0 ± h und x0 ± 2h ausgewertet; die Fünf-Punkte-Differenz muss f(x0) treffen. Geprüft werden mehrere Schrittweiten (10⁻³ bis 10⁻⁵, relativ zu max(1, |x0|)), damit eine korrekte Stammfunktion nahe einer Polstelle nicht fälschlich durchfällt. „Symbolische Integration nicht möglich“ zählt als nicht unterstützt, nicht als Fehler. Stellen, an denen F nicht reell auswertbar ist, werden übersprungen.
-- `polynomial`: Sollwert `y=…,z=…,w=…:Wert;…`. Das Ergebnis darf kein `)^`, `)*(` oder `)(` enthalten und muss an den Stützstellen mit dem Ausgangsausdruck übereinstimmen.
+- `polynomial`: Sollwert `y=…,z=…,w=…:Wert;…`. Das Ergebnis darf kein `)^`, `)*(` oder `)(` enthalten und muss an den Stützstellen mit dem Ausgangsausdruck übereinstimmen. Die absolute Toleranz ist mindestens 64·eps mal die Summe der Beträge der ausmultiplizierten Summanden an den Stützstellen: Heben sich große Summanden fast auf, weicht die Gleitkomma-Auswertung einer richtigen Entwicklung sonst schon um mehr als 10⁻⁹ ab (etwa `(y-2*z+2)^11` bei y = 1,47, z = 1,6).
 - `integral_split`: Selbstprüfung ohne Sollwert. Spalte 5 enthält die beiden Teilintegrale `int(f,x,a,m);int(f,x,m,b)`. Das ganze Integral und beide Teile werden jeweils mit einem neuen Rechenkern berechnet; es muss `|I − I₁ − I₂| <= 10·(Δ + Δ₁ + Δ₂) + absolut + relativ·max(|I|, |I₁|, |I₂|)` gelten, wobei Δ der gemeldete Fehler aus dem Integrationsbericht ist (0 ohne Bericht). Eine Fehlermeldung oder ein als nicht konvergiert gemeldetes Teilergebnis ist zulässig. Die Prüfung schlägt also an, wenn die Fehlerschätzung zu optimistisch ist, auch für Integranden, für die es keinen Sollwert gibt.
 
 - `diverges`: Das Integral divergiert. Verlangt ist eine Fehlermeldung oder ein als nicht konvergiert gemeldetes Ergebnis; ein als konvergiert gemeldeter Wert schlägt fehl. Spalte 5 ist ohne Bedeutung.
@@ -69,6 +69,14 @@ Die drei Tabellen stammen aus der [sechsten Nachprüfung](../../../../BEWERTUNG-
 - 14 Pole an einfachen Nullstellen zufälliger Polynome 3. und 5. Grades (`1/p^2`, `1/abs(p)`, `abs(p)^(-1.5)`);
 - je 10 beschränkte steile Integranden `1/(abs(x-c)+ε)` und normierte schmale Spitzen `ε/((x-c)^2+ε^2)` mit ε von 10⁻⁶ bis 10⁻¹² (`integral_value`). Die absolute Toleranz enthält den Abstand der Gleitkomma-Stützstellen nahe c im Verhältnis zur Breite ε.
 
+## Formen aus der achten Nachprüfung
+
+`integral_forms4.tsv` stammt aus der [achten Nachprüfung](../../../../BEWERTUNG-2026-11-16-4.md) (Startwert 4401):
+
+- 17 divergente Formen (`diverges`): Faktoren bis 10⁻²⁰, Pole an Nullstellen von `x*exp(x)-1`, `x^x-2`, `tan(x)-x`, `cos(x)*cosh(x)+1`, `sinh(x)-1`, zwei Pole im Abstand 10⁻⁷, `sin(1/x)/x^2`;
+- 17 endliche Integrale mit `integral_value`: normierte Spitzen der Breite 10⁻¹² und 10⁻¹³, `1/(x^2+1e-30)` bei 0, `1/(abs(x-c)^1.5+ε)`, Exponent −0,99 sowie die schwingenden Integranden `sin(1/x)/x`, `sin(2/x)/x` und `cos(1/x)/x`, die nicht als Pol gelten dürfen; `abs(sin(x))^(-0.999)` mit `integral`;
+- 30 zufällige und 7 in der Nachprüfung genannte schmale Spitzen auf [0, 1000], deren Nenner abseits der Spitze überläuft: `1/cosh(k*(x-c))`, `1/cosh(k*(x-c))^2`, `x/cosh(k*(x-c))^2`, `1/(1+cosh(k*(x-c)))` und die logistische Stufe `1/(1+exp(k*(x-c)))` mit k = 100, 1000, 10000 (`integral`). Vor der Korrektur fehlte bei 12 der 30 zufälligen und bei allen 7 genannten Spitzen die halbe oder ganze Fläche, obwohl das Ergebnis als konvergiert galt.
+
 ## Zufallsfolgen
 
 | Datei | Startwert |
@@ -85,5 +93,6 @@ Die drei Tabellen stammen aus der [sechsten Nachprüfung](../../../../BEWERTUNG-
 | `integral_forms.tsv`, `derivative_forms.tsv`, `determinant_forms.tsv`, `split_forms.tsv` | 2611 (gemeinsam) |
 | `integral_forms2.tsv`, `derivative_forms2.tsv`, `split_forms2.tsv` | 3001 (gemeinsam) |
 | `integral_forms3.tsv` | 3301 |
+| `integral_forms4.tsv` | 4401 |
 
 `derivatives.tsv` verwendet ein festes Raster ohne Zufall.

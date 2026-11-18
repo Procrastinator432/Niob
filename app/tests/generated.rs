@@ -28,6 +28,7 @@ const INTEGRAL_FORMS2: &str = include_str!("data/generated/integral_forms2.tsv")
 const DERIVATIVE_FORMS2: &str = include_str!("data/generated/derivative_forms2.tsv");
 const SPLIT_FORMS2: &str = include_str!("data/generated/split_forms2.tsv");
 const INTEGRAL_FORMS3: &str = include_str!("data/generated/integral_forms3.tsv");
+const INTEGRAL_FORMS4: &str = include_str!("data/generated/integral_forms4.tsv");
 
 /// Generous per-case time limit so that slow debug builds do not turn into timeouts.
 const TIMEOUT_MS: u64 = 30_000;
@@ -574,4 +575,9 @@ fn generated_split_forms2() {
 #[test]
 fn generated_integral_forms3() {
     run_table("generated_integral_forms3", INTEGRAL_FORMS3);
+}
+
+#[test]
+fn generated_integral_forms4() {
+    run_table("generated_integral_forms4", INTEGRAL_FORMS4);
 }
