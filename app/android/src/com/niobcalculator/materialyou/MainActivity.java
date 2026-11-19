@@ -78,6 +78,8 @@ public class MainActivity extends Activity {
     private final CategoryDef[] constantCategories = getConstantCategories();
     private boolean moduloPositive = true;
     private boolean showExactFirst = true;
+    private static boolean useCommaDecimal = true;
+    private static int thousandsGrouping = 0; // 0=Aus, 1=Punkt/Komma, 2=Leerzeichen
 
     private FormulaEditor formula;
     private int activeTab = 0;     // 0=Calc, 1=Plotter, 2=Constants, 3=Converter/Settings
@@ -154,6 +156,8 @@ public class MainActivity extends Activity {
         SharedPreferences drafts = getSharedPreferences("niob_drafts", MODE_PRIVATE);
         showExactFirst = prefs.getBoolean("show_exact_first", true);
         showMoreVariables = prefs.getBoolean("show_more_variables", false);
+        useCommaDecimal = prefs.getBoolean("use_comma_decimal", true);
+        thousandsGrouping = prefs.getInt("thousands_grouping", 0);
         engine.setRadiansMode(prefs.getBoolean("radians_mode", true));
         engine.setModuloAlwaysPositive(prefs.getBoolean("modulo_always_positive", true));
 
@@ -187,6 +191,7 @@ public class MainActivity extends Activity {
             scheduleDraftSave();
             updatePreviewOnly();
         }, () -> handleKeyPress("="), MULTI_CHAR_TOKENS);
+        formula.setCommaDecimal(useCommaDecimal);
         long savedRevision = drafts.getLong("calculator_revision", 0);
         long committedRevision = prefs.getLong("committed_draft_revision", -1);
         draftRevision = Math.max(savedRevision, committedRevision);
@@ -380,6 +385,8 @@ public class MainActivity extends Activity {
         android.content.SharedPreferences.Editor ed = getSharedPreferences("niob_calculator", MODE_PRIVATE).edit();
         ed.putBoolean("show_exact_first", showExactFirst);
         ed.putBoolean("show_more_variables", showMoreVariables);
+        ed.putBoolean("use_comma_decimal", useCommaDecimal);
+        ed.putInt("thousands_grouping", thousandsGrouping);
         ed.putBoolean("radians_mode", engine.isRadiansMode());
         ed.putBoolean("modulo_always_positive", engine.isModuloAlwaysPositive());
         writeVarsAndAnsToEditor(ed);
@@ -836,11 +843,12 @@ private static class FilledBackspaceDrawable extends Drawable {
         LinearLayout.LayoutParams digLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 3f);
         card.addView(digitsCol, digLp);
 
+        final String decLabel = useCommaDecimal ? "," : ".";
         String[][] digRows = {
                 {"7", "8", "9"},
                 {"4", "5", "6"},
                 {"1", "2", "3"},
-                {"0", ",", "ENTER"}
+                {"0", decLabel, "ENTER"}
         };
 
         for (int r = 0; r < digRows.length; r++) {
@@ -848,7 +856,7 @@ private static class FilledBackspaceDrawable extends Drawable {
             row.setOrientation(LinearLayout.HORIZONTAL);
             for (int c = 0; c < digRows[r].length; c++) {
                 final String text = digRows[r][c];
-                final String tok = text.equals("ENTER") ? "=" : (text.equals(",") ? "." : text);
+                final String tok = text.equals("ENTER") ? "=" : text;
                 boolean isEnter = text.equals("ENTER");
                 int fg = isEnter ? colPrimary : colOnSurface;
                 float spSize = isEnter ? 14f : 24f;
@@ -863,7 +871,7 @@ private static class FilledBackspaceDrawable extends Drawable {
                     v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
                     handleKeyPress(tok);
                 });
-                if (text.equals(",")) {
+                if (text.equals(decLabel)) {
                     b.setOnLongClickListener(v -> {
                         v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
                         handleKeyPress(", ");
@@ -947,6 +955,14 @@ private static class FilledBackspaceDrawable extends Drawable {
         historyListContainer.setOrientation(LinearLayout.VERTICAL);
         historyListContainer.setPadding(dp(12), dp(14), dp(12), dp(8));
         historyScroll.addView(historyListContainer);
+        historyScroll.addOnLayoutChangeListener((v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) -> {
+            int oldH = oldBottom - oldTop;
+            int newH = bottom - top;
+            int heightDiff = oldH - newH;
+            if (oldH > 0 && heightDiff > 0) {
+                historyScroll.scrollBy(0, heightDiff);
+            }
+        });
         refreshHistoryViews();
 
         // 2. Active Expression & Input Row (Pitch black bar with blue cursor '|')
@@ -1045,13 +1061,19 @@ private static class FilledBackspaceDrawable extends Drawable {
             col.setOrientation(LinearLayout.VERTICAL);
             col.setPadding(0, 0, 0, 0);
 
+            LinearLayout topPane = new LinearLayout(this);
+            topPane.setOrientation(LinearLayout.VERTICAL);
             LinearLayout.LayoutParams histLp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.36f);
-            col.addView(historyScroll, histLp);
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+            topPane.addView(historyScroll, histLp);
 
             LinearLayout.LayoutParams inLp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            col.addView(inputCard, inLp);
+            topPane.addView(inputCard, inLp);
+
+            LinearLayout.LayoutParams topLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.42f);
+            col.addView(topPane, topLp);
 
             LinearLayout.LayoutParams upperLp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.45f);
@@ -1062,7 +1084,7 @@ private static class FilledBackspaceDrawable extends Drawable {
             kbContainer.addView(numpadCard, numLp);
 
             LinearLayout.LayoutParams kbLp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.64f);
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.58f);
             col.addView(kbContainer, kbLp);
 
             parent.addView(col, new FrameLayout.LayoutParams(
@@ -1182,7 +1204,13 @@ private static class FilledBackspaceDrawable extends Drawable {
                 sb.append(c);
             }
         }
-        return sb.toString().replaceAll(" {2,}", " ").trim();
+        String pretty = sb.toString().replaceAll(" {2,}", " ").trim();
+        if (useCommaDecimal) {
+            pretty = pretty.replaceAll("(\\d)\\.(\\d)", "$1,$2");
+        } else {
+            pretty = FormulaEditor.localizeDecimalLiterals(pretty, false);
+        }
+        return pretty;
     }
 
     private void insertHistoryValue(String rawVal) {
@@ -1205,11 +1233,12 @@ private static class FilledBackspaceDrawable extends Drawable {
         boolean isComposite = rawVal.contains("/") || rawVal.contains("÷")
                 || rawVal.contains("+") || rawVal.contains("-") || rawVal.contains("−")
                 || rawVal.contains(" ");
+        String valToInsert = useCommaDecimal ? rawVal.replaceAll("(\\d)\\.(\\d)", "$1,$2") : rawVal;
         String toInsert;
         if (isComposite && (precededByOp || (!beforeCursor.isEmpty() && !beforeCursor.endsWith("(")))) {
-            toInsert = "(" + rawVal + ")";
+            toInsert = "(" + valToInsert + ")";
         } else {
-            toInsert = rawVal;
+            toInsert = valToInsert;
         }
         insertAtCursor(toInsert);
     }
@@ -1801,14 +1830,14 @@ private static class FilledBackspaceDrawable extends Drawable {
 
         String trimmedBefore = before.replaceAll("\\s+$", "");
 
-        // Scientific exponent sign check: e.g. "1e", "2.5e"
-        if (trimmedBefore.matches(".*\\d+(\\.\\d+)?[eE]$") && (op.equals("−") || op.equals("+") || op.equals("-"))) {
+        // Scientific exponent sign check: e.g. "1e", "2.5e" or "2,5e"
+        if (trimmedBefore.matches(".*\\d+([.,]\\d+)?[eE]$") && (op.equals("−") || op.equals("+") || op.equals("-"))) {
             // Exponent sign: NO SPACES!
             String expSign = op.equals("+") ? "+" : "−";
             insertAtCursor(expSign);
             return;
         }
-        if (trimmedBefore.matches(".*\\d+(\\.\\d+)?[eE][−\\-\\+]$") && (op.equals("−") || op.equals("+") || op.equals("-"))) {
+        if (trimmedBefore.matches(".*\\d+([.,]\\d+)?[eE][−\\-\\+]$") && (op.equals("−") || op.equals("+") || op.equals("-"))) {
             // Replace previous exponent sign
             String expSign = op.equals("+") ? "+" : "−";
             int signPos = trimmedBefore.length() - 1;
@@ -2052,6 +2081,7 @@ private static class FilledBackspaceDrawable extends Drawable {
     private FormulaEditor makePlotFormula(String label, int color, String layout, String expression) {
         FormulaEditor editor = new FormulaEditor(this, color, colPrimary, this::plotFormulaChanged,
                 null, MULTI_CHAR_TOKENS);
+        editor.setCommaDecimal(useCommaDecimal);
         editor.enableSystemKeyboard(label);
         editor.restore(layout, expression);
         return editor;
@@ -2734,7 +2764,7 @@ private static class FilledBackspaceDrawable extends Drawable {
 
                     // 2. Numerical Value
                     TextView valTv = new TextView(this);
-                    valTv.setText(item.displayValue);
+                    valTv.setText(useCommaDecimal ? item.displayValue : item.displayValue.replace(',', '.'));
                     valTv.setTextColor(colOnSurfaceVariant);
                     valTv.setGravity(Gravity.CENTER);
                     valTv.setSingleLine(true);
@@ -2874,11 +2904,85 @@ private static class FilledBackspaceDrawable extends Drawable {
         col.addView(header);
 
         TextView desc = new TextView(this);
-        desc.setText("Rechenmodus, Winkelmaß und Ergebnisanzeige");
+        desc.setText("Rechenmodus, Zahlenformat, Winkelmaß und Ergebnisanzeige");
         desc.setTextColor(colOnSurfaceVariant);
         setScaledTextSize(desc, 13.5f, 2.0f);
         desc.setPadding(0, dp(4), 0, dp(14));
         col.addView(desc);
+
+        // Setting 0: Number format (Europa vs. US) & Thousands grouping
+        TextView nfLabel = new TextView(this);
+        nfLabel.setText("Zahlenformat (Punkt & Komma)");
+        nfLabel.setTextColor(colOnSurface);
+        setScaledTextSize(nfLabel, 14f, 1.8f);
+        nfLabel.setTypeface(Typeface.DEFAULT_BOLD);
+        nfLabel.setPadding(dp(2), 0, 0, dp(6));
+        col.addView(nfLabel);
+
+        LinearLayout nfRow = new LinearLayout(this);
+        nfRow.setOrientation(LinearLayout.HORIZONTAL);
+        nfRow.setGravity(Gravity.CENTER_VERTICAL);
+
+        Button euBtn = makeMaterialButton(
+                "Europa (Komma ,)",
+                useCommaDecimal ? colPrimary : colSurfaceContainer,
+                useCommaDecimal ? colOnPrimary : colOnSurface,
+                14, 13.5f, 1.8f, useCommaDecimal);
+        euBtn.setPadding(dp(10), dp(10), dp(10), dp(10));
+        euBtn.setOnClickListener(v -> {
+            if (!useCommaDecimal) {
+                useCommaDecimal = true;
+                applyNumberFormatToEditors();
+                saveState();
+                rebuildScreen();
+            }
+        });
+        LinearLayout.LayoutParams euLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        euLp.rightMargin = dp(4);
+        nfRow.addView(euBtn, euLp);
+
+        Button usBtn = makeMaterialButton(
+                "US (Punkt .)",
+                !useCommaDecimal ? colPrimary : colSurfaceContainer,
+                !useCommaDecimal ? colOnPrimary : colOnSurface,
+                14, 13.5f, 1.8f, !useCommaDecimal);
+        usBtn.setPadding(dp(10), dp(10), dp(10), dp(10));
+        usBtn.setOnClickListener(v -> {
+            if (useCommaDecimal) {
+                useCommaDecimal = false;
+                applyNumberFormatToEditors();
+                saveState();
+                rebuildScreen();
+            }
+        });
+        LinearLayout.LayoutParams usLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        usLp.leftMargin = dp(4);
+        nfRow.addView(usBtn, usLp);
+        col.addView(nfRow);
+
+        View sp0 = new View(this);
+        col.addView(sp0, new LinearLayout.LayoutParams(dp(1), dp(8)));
+
+        String groupingDesc;
+        if (thousandsGrouping == 1) {
+            groupingDesc = useCommaDecimal ? "Punkt (2.443,73)" : "Komma (2,443.73)";
+        } else if (thousandsGrouping == 2) {
+            groupingDesc = useCommaDecimal ? "Leerzeichen (2 443,73)" : "Leerzeichen (2 443.73)";
+        } else {
+            groupingDesc = useCommaDecimal ? "Aus (2443,73)" : "Aus (2443.73)";
+        }
+        Button toggleGrouping = makeMaterialButton(
+                "Tausendertrennzeichen: " + groupingDesc,
+                colSurfaceContainer, colOnSurface, 14, 14f, 2.0f);
+        toggleGrouping.setOnClickListener(v -> {
+            thousandsGrouping = (thousandsGrouping + 1) % 3;
+            saveState();
+            rebuildScreen();
+        });
+        col.addView(toggleGrouping);
+
+        View sp0b = new View(this);
+        col.addView(sp0b, new LinearLayout.LayoutParams(dp(1), dp(8)));
 
         // Setting 1: Exact first
         Button toggleExact = makeMaterialButton(
@@ -2969,10 +3073,42 @@ private static class FilledBackspaceDrawable extends Drawable {
         return gd;
     }
 
+    private void applyNumberFormatToEditors() {
+        if (formula != null) formula.setCommaDecimal(useCommaDecimal);
+        if (plotFormula1 != null) plotFormula1.setCommaDecimal(useCommaDecimal);
+        if (plotFormula2 != null) plotFormula2.setCommaDecimal(useCommaDecimal);
+    }
+
+    private static String groupIntegerDigits(String intPart) {
+        if (thousandsGrouping == 0 || intPart == null || intPart.isEmpty()) return intPart;
+        String sign = "";
+        String digits = intPart;
+        if (digits.charAt(0) == '+' || digits.charAt(0) == '-') {
+            sign = digits.substring(0, 1);
+            digits = digits.substring(1);
+        }
+        if (digits.length() <= 3) return intPart;
+        char sep = thousandsGrouping == 1 ? (useCommaDecimal ? '.' : ',') : ' ';
+        StringBuilder sb = new StringBuilder(digits.length() + digits.length() / 3);
+        sb.append(sign);
+        for (int i = 0; i < digits.length(); i++) {
+            if (i > 0 && (digits.length() - i) % 3 == 0) {
+                sb.append(sep);
+            }
+            sb.append(digits.charAt(i));
+        }
+        return sb.toString();
+    }
+
     public static String formatDisplayNumber(String numStr) {
         if (numStr == null || numStr.isEmpty()) return "";
-        if (numStr.contains("i") || numStr.contains("[")) {
+        if (numStr.contains("[")) {
             return numStr;
+        }
+        if (numStr.contains("i")) {
+            return useCommaDecimal
+                    ? numStr.replaceAll("(\\d)\\.(\\d)", "$1,$2")
+                    : FormulaEditor.localizeDecimalLiterals(numStr, false);
         }
         if (numStr.matches("^-?\\d+(\\.\\d+)?[eE][+-]?\\d+$")) {
             String[] p = numStr.split("[eE]");
@@ -2985,6 +3121,9 @@ private static class FilledBackspaceDrawable extends Drawable {
             }
         }
         String clean = numStr.replace(',', '.');
+        if (clean.matches("[+-]?\\d+")) {
+            return groupIntegerDigits(clean);
+        }
         int dot = clean.indexOf('.');
         if (dot >= 0 && clean.matches("[+-]?\\d+\\.\\d+")) {
             String fracPart = clean.substring(dot + 1);
@@ -2998,18 +3137,19 @@ private static class FilledBackspaceDrawable extends Drawable {
                             .replaceAll("(\\.\\d*?[1-9])0+$", "$1")
                             .replaceAll("\\.0+$", "");
                     dot = clean.indexOf('.');
-                    if (dot < 0) return clean;
+                    if (dot < 0) return groupIntegerDigits(clean);
                 } catch (Exception ignored) {
                 }
             }
-            String intPart = clean.substring(0, dot);
+            String intPart = groupIntegerDigits(clean.substring(0, dot));
             fracPart = clean.substring(dot + 1);
             StringBuilder sb = new StringBuilder();
             for (int i = 0; i < fracPart.length(); i++) {
                 if (i > 0 && i % 3 == 0) sb.append(' ');
                 sb.append(fracPart.charAt(i));
             }
-            return intPart + "," + sb.toString();
+            String decSep = useCommaDecimal ? "," : ".";
+            return intPart + decSep + sb.toString();
         }
         return formatUnchainedSuperscripts(numStr);
     }

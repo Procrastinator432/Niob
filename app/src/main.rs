@@ -98,7 +98,7 @@ use crate::engine::{AngleMode, Complex, EvalOutput, MathEngine, NumberFormatMode
 use crate::theme::{AccentSeed, MaterialYouPalette, ThemeMode};
 
 mod state_json {
-    use super::{AngleMode, Complex, HistoryItem, MathEngine, Value, USER_VARIABLES};
+    use super::{AngleMode, Complex, HistoryItem, MathEngine, NumberFormatMode, Value, USER_VARIABLES};
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -226,6 +226,18 @@ mod state_json {
             match engine.angle_mode {
                 AngleMode::Radians => "radians",
                 AngleMode::Degrees => "degrees",
+            },
+            &mut out,
+        );
+        out.push_str(",\n  \"number_format\": ");
+        json_escape(
+            match engine.number_format {
+                NumberFormatMode::SpacePoint => "space_point",
+                NumberFormatMode::CommaPoint => "comma_point",
+                NumberFormatMode::NonePoint => "none_point",
+                NumberFormatMode::SpaceComma => "space_comma",
+                NumberFormatMode::PointComma => "point_comma",
+                NumberFormatMode::NoneComma => "none_comma",
             },
             &mut out,
         );
@@ -495,6 +507,16 @@ mod state_json {
         };
         if let Some(am) = root.get("angle_mode").and_then(JsonVal::as_str) {
             engine.angle_mode = if am == "degrees" { AngleMode::Degrees } else { AngleMode::Radians };
+        }
+        if let Some(nf) = root.get("number_format").and_then(JsonVal::as_str) {
+            engine.number_format = match nf {
+                "comma_point" => NumberFormatMode::CommaPoint,
+                "none_point" => NumberFormatMode::NonePoint,
+                "space_comma" => NumberFormatMode::SpaceComma,
+                "point_comma" => NumberFormatMode::PointComma,
+                "none_comma" => NumberFormatMode::NoneComma,
+                _ => NumberFormatMode::SpacePoint,
+            };
         }
         if let Some(mp) = root.get("modulo_always_positive").and_then(JsonVal::as_bool) {
             engine.modulo_always_positive = mp;
@@ -1939,11 +1961,19 @@ impl NiobCalculatorApp {
                 let spacing_y = ui.spacing().item_spacing.y;
                 let op_row_h = ((4.0 * digit_row_h - spacing_y) / 5.0).max(16.0);
 
+                let dec_lbl = match self.engine.number_format {
+                    NumberFormatMode::SpaceComma
+                    | NumberFormatMode::PointComma
+                    | NumberFormatMode::NoneComma => ",",
+                    NumberFormatMode::SpacePoint
+                    | NumberFormatMode::CommaPoint
+                    | NumberFormatMode::NonePoint => ".",
+                };
                 let ctx_clone = ui.ctx().clone();
                 ui.columns(4, |cols| {
                     let digit_cols = [
                         ["7", "4", "1", "0"],
-                        ["8", "5", "2", "."],
+                        ["8", "5", "2", dec_lbl],
                         ["9", "6", "3", "="],
                     ];
                     for (c_idx, col_keys) in digit_cols.iter().enumerate() {
@@ -1962,6 +1992,8 @@ impl NiobCalculatorApp {
                             if Self::key_btn(&mut cols[c_idx], lbl, digit_row_h, fill, fg) {
                                 if is_enter {
                                     self.evaluate_current(Some(&ctx_clone));
+                                } else if lbl == dec_lbl {
+                                    self.insert_token(".");
                                 } else {
                                     self.insert_token(lbl);
                                 }
@@ -3047,6 +3079,57 @@ impl NiobCalculatorApp {
                         );
                         ui.add_space(6.0);
 
+                        let prev_nf = self.engine.number_format;
+                        let is_comma = matches!(
+                            self.engine.number_format,
+                            NumberFormatMode::SpaceComma
+                                | NumberFormatMode::PointComma
+                                | NumberFormatMode::NoneComma
+                        );
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(if self.german_ui {
+                                "Dezimaltrennzeichen:"
+                            } else {
+                                "Decimal Separator:"
+                            });
+                            if ui
+                                .selectable_label(
+                                    is_comma,
+                                    if self.german_ui {
+                                        "Europa (Komma ,)"
+                                    } else {
+                                        "Europe (Comma ,)"
+                                    },
+                                )
+                                .clicked()
+                                && !is_comma
+                            {
+                                self.engine.number_format = match self.engine.number_format {
+                                    NumberFormatMode::CommaPoint => NumberFormatMode::PointComma,
+                                    NumberFormatMode::NonePoint => NumberFormatMode::NoneComma,
+                                    _ => NumberFormatMode::SpaceComma,
+                                };
+                            }
+                            if ui
+                                .selectable_label(
+                                    !is_comma,
+                                    if self.german_ui {
+                                        "US (Punkt .)"
+                                    } else {
+                                        "US (Point .)"
+                                    },
+                                )
+                                .clicked()
+                                && is_comma
+                            {
+                                self.engine.number_format = match self.engine.number_format {
+                                    NumberFormatMode::PointComma => NumberFormatMode::CommaPoint,
+                                    NumberFormatMode::NoneComma => NumberFormatMode::NonePoint,
+                                    _ => NumberFormatMode::SpacePoint,
+                                };
+                            }
+                        });
+
                         ui.horizontal_wrapped(|ui| {
                             ui.label(if self.german_ui {
                                 "Zahlenformat (Tausendertrennzeichen & Dezimalzeichen):"
@@ -3061,6 +3144,9 @@ impl NiobCalculatorApp {
                                 );
                             }
                         });
+                        if self.engine.number_format != prev_nf {
+                            self.mark_state_dirty();
+                        }
 
                         ui.add_space(4.0);
                         ui.checkbox(

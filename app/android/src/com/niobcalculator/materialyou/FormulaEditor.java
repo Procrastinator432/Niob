@@ -49,7 +49,7 @@ import java.util.regex.Pattern;
 final class FormulaEditor extends LinearLayout {
     private static final char TEMPLATE = '\uFFFC';
     private static final Pattern OPERAND = Pattern.compile(
-            "(?:[\\p{L}_][\\p{L}\\p{N}_]*|(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][+−-]?\\d+)?|%)$");
+            "(?:[\\p{L}_][\\p{L}\\p{N}_]*|(?:\\d+(?:[.,]\\d*)?|[.,]\\d+)(?:[eE][+−-]?\\d+)?|%)$");
     private static final Pattern IDENTIFIER = Pattern.compile("[\\p{L}_][\\p{L}\\p{N}_]*$");
     private static final Pattern EXACT_FRACTION = Pattern.compile(
             "^([+−-]?\\d+)\\s*[/÷]\\s*([+−-]?\\d+)$");
@@ -104,27 +104,31 @@ final class FormulaEditor extends LinearLayout {
         }
 
         String expression() {
+            return expression(false, true);
+        }
+
+        String expression(boolean systemKeyboard, boolean commaDecimal) {
             if (kind == SpecialInput.SYMBOL) return token;
             if (kind.wrapsOperand()) {
                 String operator = kind == SpecialInput.FRACTION ? "/" : "^";
-                return "((" + row(0).expression() + ")" + operator + "(" + row(1).expression() + "))";
+                return "((" + row(0).expression(systemKeyboard, commaDecimal) + ")" + operator + "(" + row(1).expression(systemKeyboard, commaDecimal) + "))";
             }
             if (kind == SpecialInput.MATRIX) {
                 StringBuilder matrix = new StringBuilder("[");
                 for (int i = 0; i < rows.size(); i += columns) {
                     if (i > 0) matrix.append(',');
-                    matrix.append('[').append(arguments(i, i + columns)).append(']');
+                    matrix.append('[').append(arguments(i, i + columns, systemKeyboard, commaDecimal)).append(']');
                 }
                 return matrix.append(']').toString();
             }
-            return kind.prefix + arguments(0, rows.size()) + ")";
+            return kind.prefix + arguments(0, rows.size(), systemKeyboard, commaDecimal) + ")";
         }
 
-        private String arguments(int start, int end) {
+        private String arguments(int start, int end, boolean systemKeyboard, boolean commaDecimal) {
             StringBuilder result = new StringBuilder();
             for (int i = start; i < end; i++) {
                 if (i > start) result.append(',');
-                result.append(row(i).expression());
+                result.append(row(i).expression(systemKeyboard, commaDecimal));
             }
             return result.toString();
         }
@@ -210,9 +214,17 @@ final class FormulaEditor extends LinearLayout {
         }
 
         String expression() {
+            return expression(false, true);
+        }
+
+        String expression(boolean systemKeyboard, boolean commaDecimal) {
             StringBuilder result = new StringBuilder();
             for (Part part : parts) {
-                result.append(part instanceof Text ? ((Text) part).value : ((Template) part).expression());
+                if (part instanceof Text) {
+                    result.append(canonicalizeTextExpression(((Text) part).value, systemKeyboard, commaDecimal));
+                } else {
+                    result.append(((Template) part).expression(systemKeyboard, commaDecimal));
+                }
             }
             return result.toString();
         }
@@ -268,6 +280,7 @@ final class FormulaEditor extends LinearLayout {
     private boolean rendering;
     private boolean restoreFocus;
     private boolean systemKeyboard;
+    private boolean commaDecimal = true;
     private String rootFieldDescription = "input_expression";
     private EditText errorField;
 
@@ -304,7 +317,7 @@ final class FormulaEditor extends LinearLayout {
         button.setMinimumWidth(0);
         button.setBackgroundColor(android.graphics.Color.TRANSPARENT);
         button.setOnClickListener(view -> action.run());
-        addView(button, new LayoutParams(dp(48), dp(48)));
+        addView(button, new LayoutParams(dp(40), dp(36)));
         return button;
     }
 
@@ -317,7 +330,7 @@ final class FormulaEditor extends LinearLayout {
         }
 
         @Override protected void onMeasure(int width, int height) {
-            int windowLimit = Math.round(getResources().getDisplayMetrics().heightPixels * 0.34f);
+            int windowLimit = Math.round(getResources().getDisplayMetrics().heightPixels * 0.26f);
             int limit = MeasureSpec.getMode(height) == MeasureSpec.UNSPECIFIED ? windowLimit
                     : Math.min(MeasureSpec.getSize(height), windowLimit);
             super.onMeasure(width, MeasureSpec.makeMeasureSpec(limit, MeasureSpec.AT_MOST));
@@ -328,7 +341,107 @@ final class FormulaEditor extends LinearLayout {
         root.reset();
         if (!decode(root, layout)) root.append(fallback);
         structurePlotNotation();
+        localizeRow(root, commaDecimal);
         active = root.last();
+    }
+
+    void setCommaDecimal(boolean commaDecimal) {
+        this.commaDecimal = commaDecimal;
+        localizeRow(root, commaDecimal);
+        render(Math.min(selectionEnd(), active.value.length()), false);
+    }
+
+    static boolean isMultiArgCallStart(String beforeParen) {
+        int end = beforeParen.length();
+        int start = end;
+        while (start > 0 && (Character.isLetterOrDigit(beforeParen.charAt(start - 1))
+                || beforeParen.charAt(start - 1) == '_')) {
+            start--;
+        }
+        if (start == end) return false;
+        String name = beforeParen.substring(start, end);
+        return name.equals("log") || name.equals("int") || name.equals("defint")
+                || name.equals("integral") || name.equals("sum") || name.equals("prod")
+                || name.equals("product") || name.equals("deriv") || name.equals("diff")
+                || name.equals("d") || name.equals("nthroot") || name.equals("binomial")
+                || name.equals("nCr") || name.equals("gcd") || name.equals("lcm")
+                || name.equals("mod") || name.equals("round");
+    }
+
+    static String canonicalizeTextExpression(String value, boolean systemKeyboard, boolean commaDecimal) {
+        if (value == null || value.isEmpty() || !commaDecimal) return value == null ? "" : value;
+        StringBuilder out = new StringBuilder(value.length());
+        List<Boolean> multiArgStack = new ArrayList<>();
+        for (int i = 0; i < value.length(); i++) {
+            char ch = value.charAt(i);
+            if (ch == '(') {
+                multiArgStack.add(isMultiArgCallStart(value.substring(0, i)));
+                out.append(ch);
+            } else if (ch == '[') {
+                multiArgStack.add(true);
+                out.append(ch);
+            } else if (ch == ')' || ch == ']') {
+                if (!multiArgStack.isEmpty()) multiArgStack.remove(multiArgStack.size() - 1);
+                out.append(ch);
+            } else if (ch == ',') {
+                boolean inMultiArg = !multiArgStack.isEmpty() && multiArgStack.get(multiArgStack.size() - 1);
+                boolean prevDigit = i > 0 && Character.isDigit(value.charAt(i - 1));
+                boolean nextDigit = i + 1 < value.length() && Character.isDigit(value.charAt(i + 1));
+                boolean convert = !inMultiArg && (systemKeyboard ? (prevDigit && nextDigit) : true);
+                out.append(convert ? '.' : ',');
+            } else {
+                out.append(ch);
+            }
+        }
+        return out.toString();
+    }
+
+    static String localizeDecimalLiterals(String value, boolean useComma) {
+        if (value == null || value.isEmpty()) return "";
+        char from = useComma ? '.' : ',';
+        char to = useComma ? ',' : '.';
+        StringBuilder out = new StringBuilder(value.length());
+        List<Boolean> multiArgStack = new ArrayList<>();
+        for (int i = 0; i < value.length(); i++) {
+            char ch = value.charAt(i);
+            if (ch == '(') {
+                multiArgStack.add(isMultiArgCallStart(value.substring(0, i)));
+                out.append(ch);
+            } else if (ch == '[') {
+                multiArgStack.add(true);
+                out.append(ch);
+            } else if (ch == ')' || ch == ']') {
+                if (!multiArgStack.isEmpty()) multiArgStack.remove(multiArgStack.size() - 1);
+                out.append(ch);
+            } else if (ch == from) {
+                boolean inMultiArg = !multiArgStack.isEmpty() && multiArgStack.get(multiArgStack.size() - 1);
+                boolean prevDigit = i > 0 && Character.isDigit(value.charAt(i - 1));
+                boolean nextDigit = i + 1 < value.length() && Character.isDigit(value.charAt(i + 1));
+                boolean atEnd = i + 1 == value.length();
+                boolean prevSep = i > 0 && (value.charAt(i - 1) == '.' || value.charAt(i - 1) == ',');
+                if (!inMultiArg && ((prevDigit && (nextDigit || atEnd)) || (nextDigit && !prevSep))) {
+                    out.append(to);
+                } else {
+                    out.append(ch);
+                }
+            } else {
+                out.append(ch);
+            }
+        }
+        return out.toString();
+    }
+
+    private static void localizeRow(Row row, boolean useComma) {
+        for (Part part : row.parts) {
+            if (part instanceof Text) {
+                Text t = (Text) part;
+                t.value = localizeDecimalLiterals(t.value, useComma);
+            } else {
+                for (Row field : ((Template) part).rows) {
+                    localizeRow(field, useComma);
+                }
+            }
+        }
     }
 
     void enableSystemKeyboard(String fieldDescription) {
@@ -355,11 +468,11 @@ final class FormulaEditor extends LinearLayout {
 
     private boolean structurePlotNotation() {
         if (!systemKeyboard || hasMissingField() || !hasLinearNotation(root)) return false;
-        AstNode expression = AstParser.tryParseNotation(root.expression());
+        AstNode expression = AstParser.tryParseNotation(root.expression(true, commaDecimal));
         if (expression == null) return false;
 
         Row formatted = new Row(null);
-        appendNotation(formatted, expression, 0);
+        appendNotation(formatted, expression, 0, commaDecimal);
         if (root.encode().toString().equals(formatted.encode().toString())) return false;
         root.reset();
         root.appendRange(formatted, 0, symbolLength(formatted));
@@ -388,38 +501,39 @@ final class FormulaEditor extends LinearLayout {
         return 5;
     }
 
-    private static void appendNotation(Row row, AstNode node, int minimumPrecedence) {
+    private static void appendNotation(Row row, AstNode node, int minimumPrecedence, boolean useComma) {
         int precedence = notationPrecedence(node);
         boolean parentheses = precedence < minimumPrecedence;
         if (parentheses) row.append("(");
         if (node instanceof AstAdd) {
             AstAdd addition = (AstAdd) node;
-            appendBinary(row, addition.left, " + ", addition.right, precedence);
+            appendBinary(row, addition.left, " + ", addition.right, precedence, useComma);
         } else if (node instanceof AstSub) {
             AstSub subtraction = (AstSub) node;
-            appendBinary(row, subtraction.left, " − ", subtraction.right, precedence);
+            appendBinary(row, subtraction.left, " − ", subtraction.right, precedence, useComma);
         } else if (node instanceof AstMul) {
             AstMul multiplication = (AstMul) node;
-            appendBinary(row, multiplication.left, " × ", multiplication.right, precedence);
+            appendBinary(row, multiplication.left, " × ", multiplication.right, precedence, useComma);
         } else if (node instanceof AstDiv) {
             AstDiv division = (AstDiv) node;
             Template fraction = new Template(SpecialInput.FRACTION);
-            appendNotation(fraction.row(0), division.left, 0);
-            appendNotation(fraction.row(1), division.right, 0);
+            appendNotation(fraction.row(0), division.left, 0, useComma);
+            appendNotation(fraction.row(1), division.right, 0, useComma);
             row.append(fraction);
         } else if (node instanceof AstPow) {
             AstPow power = (AstPow) node;
             Template template = new Template(SpecialInput.POWER);
-            appendNotation(template.row(0), power.base, 5);
-            appendNotation(template.row(1), power.exp, 0);
+            appendNotation(template.row(0), power.base, 5, useComma);
+            appendNotation(template.row(1), power.exp, 0, useComma);
             row.append(template);
         } else if (node instanceof AstNeg) {
             row.append("−");
-            appendNotation(row, ((AstNeg) node).inner, precedence);
+            appendNotation(row, ((AstNeg) node).inner, precedence, useComma);
         } else if (node instanceof AstFunc) {
-            appendFunction(row, (AstFunc) node, precedence);
+            appendFunction(row, (AstFunc) node, precedence, useComma);
         } else if (node instanceof AstNum) {
-            row.append(((AstNum) node).literal);
+            String literal = ((AstNum) node).literal;
+            row.append(useComma ? literal.replace('.', ',') : literal);
         } else if (node instanceof AstVar && ((AstVar) node).name.equals("pi")) {
             row.append(new Template(SpecialInput.SYMBOL, 0, 0, "π", "pi"));
         } else {
@@ -428,30 +542,30 @@ final class FormulaEditor extends LinearLayout {
         if (parentheses) row.append(")");
     }
 
-    private static void appendBinary(Row row, AstNode left, String operator, AstNode right, int precedence) {
-        appendNotation(row, left, precedence);
+    private static void appendBinary(Row row, AstNode left, String operator, AstNode right, int precedence, boolean useComma) {
+        appendNotation(row, left, precedence, useComma);
         row.append(operator);
-        appendNotation(row, right, precedence + 1);
+        appendNotation(row, right, precedence + 1, useComma);
     }
 
-    private static void appendFunction(Row row, AstFunc call, int precedence) {
+    private static void appendFunction(Row row, AstFunc call, int precedence, boolean useComma) {
         if (call.name.equals("!") || call.name.equals("%")) {
-            appendNotation(row, call.args.get(0), precedence);
+            appendNotation(row, call.args.get(0), precedence, useComma);
             row.append(call.name);
         } else if (call.name.equals(" mod ")) {
-            appendBinary(row, call.args.get(0), call.name, call.args.get(1), precedence);
+            appendBinary(row, call.args.get(0), call.name, call.args.get(1), precedence, useComma);
         } else if (call.name.equals("[]")) {
-            appendMatrixNotation(row, call);
+            appendMatrixNotation(row, call, useComma);
         } else {
             SpecialInput kind = notationFunction(call);
             if (kind != null && kind.fields.length == call.args.size()) {
                 Template template = new Template(kind);
                 for (int i = 0; i < call.args.size(); i++) {
-                    appendNotation(template.row(i), call.args.get(i), 0);
+                    appendNotation(template.row(i), call.args.get(i), 0, useComma);
                 }
                 row.append(template);
             } else {
-                appendCall(row, call.name + "(", call.args, ")");
+                appendCall(row, call.name + "(", call.args, ")", useComma);
             }
         }
     }
@@ -472,34 +586,34 @@ final class FormulaEditor extends LinearLayout {
         }
     }
 
-    private static void appendMatrixNotation(Row row, AstFunc matrix) {
+    private static void appendMatrixNotation(Row row, AstFunc matrix, boolean useComma) {
         List<AstNode> cells = new ArrayList<>();
         int columns = 0;
         for (AstNode entry : matrix.args) {
             if (!(entry instanceof AstFunc) || !((AstFunc) entry).name.equals("[]")) {
-                appendCall(row, "[", matrix.args, "]");
+                appendCall(row, "[", matrix.args, "]", useComma);
                 return;
             }
             List<AstNode> entries = ((AstFunc) entry).args;
             if (columns == 0) columns = entries.size();
             if (entries.size() != columns) {
-                appendCall(row, "[", matrix.args, "]");
+                appendCall(row, "[", matrix.args, "]", useComma);
                 return;
             }
             cells.addAll(entries);
         }
         Template template = new Template(SpecialInput.MATRIX, cells.size(), columns, "", "");
         for (int i = 0; i < cells.size(); i++) {
-            appendNotation(template.row(i), cells.get(i), 0);
+            appendNotation(template.row(i), cells.get(i), 0, useComma);
         }
         row.append(template);
     }
 
-    private static void appendCall(Row row, String opening, List<AstNode> args, String closing) {
+    private static void appendCall(Row row, String opening, List<AstNode> args, String closing, boolean useComma) {
         row.append(opening);
         for (int i = 0; i < args.size(); i++) {
             if (i > 0) row.append(", ");
-            appendNotation(row, args.get(i), 0);
+            appendNotation(row, args.get(i), 0, useComma);
         }
         row.append(closing);
     }
@@ -519,7 +633,7 @@ final class FormulaEditor extends LinearLayout {
     }
 
     String expression() {
-        return root.expression();
+        return root.expression(systemKeyboard, commaDecimal);
     }
 
     String layoutState() {
@@ -563,6 +677,7 @@ final class FormulaEditor extends LinearLayout {
     View historyView(String layout, float size, Runnable onClick) {
         Row row = new Row(null);
         if (!decode(row, layout)) return null;
+        localizeRow(row, commaDecimal);
         HorizontalScrollView container = new HorizontalScrollView(getContext());
         container.setHorizontalScrollBarEnabled(false);
         View expression = buildRow(row, size, false);
@@ -573,6 +688,7 @@ final class FormulaEditor extends LinearLayout {
 
     boolean restoreHistory(String layout) {
         if (!expression().trim().isEmpty() || !decode(root, layout)) return false;
+        localizeRow(root, commaDecimal);
         active = root.last();
         render(active.value.length(), true);
         onChange.accept(this);
@@ -964,7 +1080,7 @@ final class FormulaEditor extends LinearLayout {
         field.setShowSoftInputOnFocus(systemKeyboard);
         field.setBackground(null);
         // Keep room for the caret between templates without spacing out the notation.
-        int minimumWidth = dp(text.row.parts.size() > 1 ? 2 : text.row.owner == null ? 14 : 10);
+        int minimumWidth = dp(text.row.parts.size() > 1 || !text.value.isEmpty() ? 2 : text.row.owner == null ? 14 : 10);
         field.setMinWidth(minimumWidth);
         field.setMinimumWidth(minimumWidth);
         if (text.row.owner != null) field.setGravity(Gravity.CENTER);
@@ -1052,7 +1168,7 @@ final class FormulaEditor extends LinearLayout {
                         buildRow(template.row(1), small, editable));
             case POWER:
                 return attachScript(buildRow(template.row(0), size, editable),
-                        buildRow(template.row(1), size * 0.70f, editable), size, true);
+                        buildRow(template.row(1), size * 0.62f, editable), size, true);
             case MATRIX:
                 return matrixView(template, small, editable);
             case SYMBOL: {
@@ -1113,7 +1229,7 @@ final class FormulaEditor extends LinearLayout {
             case CEIL:
                 return frame(Frame.CEIL, buildRow(template.row(0), size, editable));
             case EXP:
-                return attachScript(label("e", size), buildRow(template.row(0), size * 0.70f, editable), size, true);
+                return attachScript(label("e", size), buildRow(template.row(0), size * 0.62f, editable), size, true);
             case INVERSE:
             case TRANSPOSE:
                 return attachScript(frame(Frame.PARENS, buildRow(template.row(0), size, editable)),
@@ -1227,7 +1343,7 @@ final class FormulaEditor extends LinearLayout {
     }
 
     private View attachScript(View base, View script, float size, boolean raised) {
-        int offset = dp(Math.round(size * (raised ? 0.43f : 0.22f)
+        int offset = dp(Math.round(size * (raised ? 0.45f : 0.22f)
                 * Math.min(getResources().getConfiguration().fontScale, 2f)));
         return new ScriptLayout(base, script, offset, raised);
     }
@@ -1235,6 +1351,7 @@ final class FormulaEditor extends LinearLayout {
     private final class ScriptLayout extends LinearLayout {
         private final View base;
         private final View script;
+        private final LayoutParams baseParams;
         private final LayoutParams scriptParams;
         private final int offset;
         private final boolean raised;
@@ -1247,25 +1364,34 @@ final class FormulaEditor extends LinearLayout {
             this.raised = raised;
             setBaselineAligned(false);
             setGravity(raised ? Gravity.BOTTOM : Gravity.TOP);
-            addView(base);
+            baseParams = new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
+            addView(base, baseParams);
             scriptParams = new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
-            scriptParams.leftMargin = dp(!raised || base instanceof MathFrame ? 1 : -3);
+            scriptParams.leftMargin = dp(1);
             addView(script, scriptParams);
         }
 
         @Override protected void onMeasure(int width, int height) {
+            baseParams.topMargin = 0;
+            baseParams.bottomMargin = 0;
             scriptParams.bottomMargin = raised ? offset : 0;
             scriptParams.topMargin = 0;
             super.onMeasure(width, height);
-            int heightDifference = base.getMeasuredHeight() - script.getMeasuredHeight();
+            int baseH = base.getMeasuredHeight();
+            int scriptH = script.getMeasuredHeight();
+            int heightDifference = baseH - scriptH;
             if (raised) {
-                // Keep the exponent at the top edge of a tall fraction or matrix.
+                // Keep the base centered on the row baseline when the exponent rises above it.
                 int rise = Math.max(offset, heightDifference + dp(1));
-                if (rise == offset) return;
-                scriptParams.bottomMargin = rise;
+                int extraTop = Math.max(0, rise + scriptH - baseH);
+                baseParams.bottomMargin = extraTop;
+                scriptParams.bottomMargin = rise + extraTop;
             } else {
                 // Measure from the bottom of the word rather than its vertical midpoint.
-                scriptParams.topMargin = Math.max(base.getMeasuredHeight() / 2, heightDifference + offset);
+                int drop = Math.max(baseH / 2, heightDifference + offset);
+                int extraBottom = Math.max(0, drop + scriptH - baseH);
+                baseParams.topMargin = extraBottom;
+                scriptParams.topMargin = drop + extraBottom;
             }
             super.onMeasure(width, height);
         }
@@ -1320,6 +1446,9 @@ final class FormulaEditor extends LinearLayout {
     boolean insertMatrixResult(String expression) {
         Template matrix = parseMatrixResult(expression);
         if (matrix == null) return false;
+        for (Row cell : matrix.rows) {
+            localizeRow(cell, commaDecimal);
+        }
         place(matrix, null, "");
         focus(adjacentField(matrix, true), 0);
         return true;
