@@ -209,11 +209,125 @@ pub fn rich_job(text: &str, font: FontId, color: Color32) -> LayoutJob {
     job
 }
 
+// Reichweite eines Exponenten – dieselbe Grammatik wie die Engine:
+// Exponent = Vorzeichen/√ … Potenz; Potenz = Postfix [^ Exponent];
+// Postfix = Primär [! | %]*; Primär = (…) | […] | Zahl | Name [(…)] | %.
+// So umfasst die Hochstellung bei `2^3!` auch das `!` (2^(3!) = 64).
+
+fn skip_ws(c: &[char], mut i: usize, end: usize) -> usize {
+    while i < end && c[i].is_whitespace() {
+        i += 1;
+    }
+    i
+}
+
+/// Index hinter der zu `c[open]` passenden Klammer `close_ch`, falls vorhanden.
+fn matching_close(c: &[char], open: usize, end: usize, open_ch: char, close_ch: char) -> Option<usize> {
+    let mut depth = 0i32;
+    for (k, &ch) in c.iter().enumerate().take(end).skip(open) {
+        if ch == open_ch {
+            depth += 1;
+        } else if ch == close_ch {
+            depth -= 1;
+            if depth == 0 {
+                return Some(k);
+            }
+        }
+    }
+    None
+}
+
+fn primary_end(c: &[char], i: usize, end: usize) -> Option<usize> {
+    let i = skip_ws(c, i, end);
+    let ch = *c.get(i).filter(|_| i < end)?;
+    match ch {
+        '(' => Some(matching_close(c, i, end, '(', ')').map_or(end, |k| k + 1)),
+        '[' => Some(matching_close(c, i, end, '[', ']').map_or(end, |k| k + 1)),
+        '%' => Some(i + 1),
+        '0' if i + 1 < end && matches!(c[i + 1], 'x' | 'X') => {
+            let mut j = i + 2;
+            while j < end && c[j].is_ascii_hexdigit() {
+                j += 1;
+            }
+            Some(j)
+        }
+        d if d.is_ascii_digit() || d == '.' => {
+            let mut j = i;
+            while j < end && (c[j].is_ascii_digit() || c[j] == '.') {
+                j += 1;
+            }
+            // Zehnerexponent `1e-5`
+            if j < end && matches!(c[j], 'e' | 'E') {
+                let mut k = j + 1;
+                if k < end && matches!(c[k], '+' | '-' | '−') {
+                    k += 1;
+                }
+                let digits = k;
+                while k < end && c[k].is_ascii_digit() {
+                    k += 1;
+                }
+                if k > digits {
+                    j = k;
+                }
+            }
+            Some(j)
+        }
+        a if a.is_alphabetic() => {
+            let mut j = i;
+            while j < end && is_ident_char(c[j]) {
+                j += 1;
+            }
+            let k = skip_ws(c, j, end);
+            if k < end && c[k] == '(' {
+                return Some(matching_close(c, k, end, '(', ')').map_or(end, |m| m + 1));
+            }
+            Some(j)
+        }
+        _ => None,
+    }
+}
+
+fn postfix_end(c: &[char], i: usize, end: usize) -> Option<usize> {
+    let mut j = primary_end(c, i, end)?;
+    loop {
+        let k = skip_ws(c, j, end);
+        if k < end && matches!(c[k], '!' | '%') {
+            j = k + 1;
+        } else {
+            return Some(j);
+        }
+    }
+}
+
+fn power_end(c: &[char], i: usize, end: usize) -> Option<usize> {
+    let j = postfix_end(c, i, end)?;
+    let k = skip_ws(c, j, end);
+    if k < end && c[k] == '^' {
+        return Some(unary_end(c, k + 1, end).unwrap_or(k + 1));
+    }
+    Some(j)
+}
+
+/// Ende des Exponenten, der bei `i` (direkt hinter `^`) beginnt.
+fn unary_end(c: &[char], i: usize, end: usize) -> Option<usize> {
+    let i = skip_ws(c, i, end);
+    if i >= end {
+        return None;
+    }
+    if matches!(c[i], '+' | '-' | '−' | '√') {
+        return unary_end(c, i + 1, end);
+    }
+    power_end(c, i, end)
+}
+
 /// Layout für editierbare Formelfelder. Jedes Zeichen des Puffers bleibt im
 /// Layout erhalten (Cursor und Auswahl bleiben korrekt), aber:
 /// * `^` vor einem Exponenten wird unsichtbar,
-/// * der Exponent wird klein und angehoben gesetzt,
-/// * Klammern, die nur den Exponenten umschließen, werden ausgeblendet.
+/// * der gesamte Exponent (so weit, wie die Engine ihn liest) wird klein und
+///   angehoben gesetzt, ein Exponent im Exponenten noch kleiner und höher –
+///   so sehen `2^3^2` (= 2⁹) und `2^32` verschieden aus,
+/// * ab der dritten Ebene bleibt `^` sichtbar, statt immer kleiner zu werden,
+/// * Klammern, die genau den Exponenten umschließen, werden ausgeblendet.
 pub fn edit_layout_job(text: &str, font: FontId, color: Color32) -> LayoutJob {
     #[derive(Clone, Copy, PartialEq)]
     enum St {
@@ -224,74 +338,42 @@ pub fn edit_layout_job(text: &str, font: FontId, color: Color32) -> LayoutJob {
     let n = chars.len();
     let mut style = vec![St::Normal(0); n];
 
-    fn matching_paren(chars: &[char], open: usize, end: usize) -> Option<usize> {
-        let mut depth = 0i32;
-        for (k, &c) in chars.iter().enumerate().take(end).skip(open) {
-            if c == '(' {
-                depth += 1;
-            } else if c == ')' {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(k);
-                }
-            }
-        }
-        None
-    }
-
-    // Bereich [start, end) mit Grundstufe `level` auszeichnen.
-    fn mark(chars: &[char], style: &mut [St], start: usize, end: usize, level: u8) {
+    fn mark(c: &[char], style: &mut [St], start: usize, end: usize, level: u8) {
         let mut i = start;
         while i < end {
-            if chars[i] == '^' && i + 1 < end {
-                let lvl = level.saturating_add(1).min(2);
-                if chars[i + 1] == '(' {
-                    if let Some(close) = matching_paren(chars, i + 1, end) {
-                        if close > i + 2 {
-                            style[i] = St::Hidden;
-                            style[i + 1] = St::Hidden;
+            if c[i] == '^' && level < 2 {
+                if let Some(e) = unary_end(c, i + 1, end).filter(|&e| e > i + 1) {
+                    let lvl = level + 1;
+                    style[i] = St::Hidden;
+                    let s = skip_ws(c, i + 1, e);
+                    let group = (c.get(s) == Some(&'('))
+                        .then(|| matching_close(c, s, e, '(', ')'))
+                        .flatten()
+                        .filter(|&close| close + 1 == e && close > s + 1);
+                    match group {
+                        // Klammern umschließen genau den Exponenten: ausblenden
+                        Some(close) => {
+                            for st in style.iter_mut().take(s).skip(i + 1) {
+                                *st = St::Normal(lvl);
+                            }
+                            style[s] = St::Hidden;
                             style[close] = St::Hidden;
-                            mark(chars, style, i + 2, close, lvl);
-                            i = close + 1;
-                            continue;
+                            mark(c, style, s + 1, close, lvl);
                         }
-                    } else {
-                        // Offene Klammer: sichtbar lassen, Rest anheben.
-                        style[i] = St::Hidden;
-                        for s in style.iter_mut().take(end).skip(i + 1) {
-                            *s = St::Normal(lvl);
-                        }
-                        mark(chars, style, i + 2, end, lvl);
-                        return;
+                        None => mark(c, style, i + 1, e, lvl),
                     }
-                } else {
-                    let mut j = i + 1;
-                    if j < end && (chars[j] == '−' || chars[j] == '-') {
-                        j += 1;
-                    }
-                    let run_start = j;
-                    while j < end && (chars[j].is_alphanumeric() || chars[j] == '.' || chars[j] == '_') {
-                        j += 1;
-                    }
-                    if j > run_start {
-                        style[i] = St::Hidden;
-                        for s in style.iter_mut().take(j).skip(i + 1) {
-                            *s = St::Normal(lvl);
-                        }
-                        i = j;
-                        continue;
-                    }
+                    i = e;
+                    continue;
                 }
             }
-            if style[i] == St::Normal(0) && level > 0 {
-                style[i] = St::Normal(level);
-            }
+            style[i] = St::Normal(level);
             i += 1;
         }
     }
     mark(&chars, &mut style, 0, n, 0);
 
     let small = FontId::new(font.size * SCRIPT_SCALE, font.family.clone());
+    let smaller = FontId::new(font.size * SCRIPT_SCALE * SCRIPT_SCALE, font.family.clone());
     let hidden = FontId::new(1.0, font.family.clone());
     let mut job = LayoutJob::default();
     let mut buf = String::new();
@@ -303,7 +385,8 @@ pub fn edit_layout_job(text: &str, font: FontId, color: Color32) -> LayoutJob {
         let f = match st {
             Some(St::Hidden) => fmt(&hidden, Color32::TRANSPARENT, Align::TOP),
             Some(St::Normal(0)) | None => fmt(&font, color, Align::BOTTOM),
-            Some(St::Normal(_)) => fmt(&small, color, Align::TOP),
+            Some(St::Normal(1)) => fmt(&small, color, Align::TOP),
+            Some(St::Normal(_)) => fmt(&smaller, color, Align::TOP),
         };
         job.append(buf, 0.0, f);
         buf.clear();
@@ -346,6 +429,18 @@ pub enum MathNode {
 impl MathNode {
     fn text(s: &str) -> Self {
         MathNode::Text(s.to_string())
+    }
+
+    /// Enthält der Baum Brüche oder Wurzeln? Die kann ein einzeiliges
+    /// Eingabefeld nicht darstellen (Exponenten hebt es selbst an).
+    pub fn is_two_dimensional(&self) -> bool {
+        match self {
+            MathNode::Text(_) | MathNode::Space(_) => false,
+            MathNode::Frac(..) | MathNode::Sqrt(_) | MathNode::Root(..) => true,
+            MathNode::Row(v) => v.iter().any(|n| n.is_two_dimensional()),
+            MathNode::Paren(n) | MathNode::Abs(n) => n.is_two_dimensional(),
+            MathNode::Pow(a, b) | MathNode::Sub(a, b) => a.is_two_dimensional() || b.is_two_dimensional(),
+        }
     }
 
     /// Enthält der Baum etwas, das zweidimensional gesetzt wird?
@@ -1168,6 +1263,11 @@ mod tests {
             parse_math("-x^2"),
             Some(MathNode::Row(vec![t("−"), MathNode::Pow(Box::new(t("x")), Box::new(t("2")))]))
         );
+        // 2^3! ist 2^(3!) – wie in der Engine
+        assert_eq!(
+            parse_math("2^3!"),
+            Some(MathNode::Pow(Box::new(t("2")), Box::new(MathNode::Row(vec![t("3"), t("!")]))))
+        );
         // 2^3^2 ist rechtsassoziativ
         assert_eq!(
             parse_math("2^3^2"),
@@ -1198,6 +1298,54 @@ mod tests {
         assert_eq!(job.text, "10−20");
         assert_eq!(job.sections.len(), 2);
         assert_eq!(job.sections[1].format.valign, Align::TOP);
+    }
+
+    /// Sichtbare, angehobene Zeichen im Layout eines Eingabefelds.
+    fn raised(s: &str) -> String {
+        let job = edit_layout_job(s, FontId::proportional(20.0), Color32::WHITE);
+        job.sections
+            .iter()
+            .filter(|sec| sec.format.valign == Align::TOP && sec.format.color != Color32::TRANSPARENT)
+            .map(|sec| &job.text[sec.byte_range.clone()])
+            .collect()
+    }
+
+    /// Angehobene Abschnitte mit Schriftgröße (Ebene 1: 13.6, Ebene 2: 9.248).
+    fn scripts(s: &str) -> Vec<(String, f32)> {
+        let job = edit_layout_job(s, FontId::proportional(20.0), Color32::WHITE);
+        job.sections
+            .iter()
+            .filter(|sec| sec.format.valign == Align::TOP && sec.format.color != Color32::TRANSPARENT)
+            .map(|sec| (job.text[sec.byte_range.clone()].to_string(), sec.format.font_id.size))
+            .collect()
+    }
+
+    #[test]
+    fn nested_exponents_look_different_from_long_exponents() {
+        // Befund: 2^3^2 (= 512) und 2^32 sahen im Eingabefeld gleich aus
+        let l1 = 20.0 * SCRIPT_SCALE;
+        let l2 = l1 * SCRIPT_SCALE;
+        assert_eq!(scripts("2^32"), vec![("32".to_string(), l1)]);
+        assert_eq!(scripts("2^3^2"), vec![("3".to_string(), l1), ("2".to_string(), l2)]);
+        // Dritte Ebene: ^ bleibt sichtbar
+        assert_eq!(scripts("2^3^2^2"), vec![("3".to_string(), l1), ("2^2".to_string(), l2)]);
+    }
+
+    #[test]
+    fn edit_layout_raises_the_whole_exponent_like_the_engine() {
+        // Befund: bei 2^3! stand das ! auf der Grundlinie, Engine rechnet 2^(3!)
+        assert_eq!(raised("2^3!"), "3!");
+        assert_eq!(raised("2^3×4"), "3");
+        assert_eq!(raised("2^3x"), "3");
+        assert_eq!(raised("10^−3"), "−3");
+        assert_eq!(raised("2^1e−5"), "1e−5");
+        assert_eq!(raised("e^−x^2"), "−x2");
+        assert_eq!(raised("x^sin(x)+1"), "sin(x)");
+        assert_eq!(raised("2^(1+2)"), "1+2");
+        assert_eq!(raised("2^(1+2)!"), "(1+2)!");
+        assert_eq!(raised("2^(3"), "(3");
+        assert_eq!(raised("x^"), "");
+        assert_eq!(raised("x^2+1"), "2");
     }
 
     #[test]

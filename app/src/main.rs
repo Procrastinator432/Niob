@@ -861,6 +861,17 @@ fn classify_preview_error(err: &str, engine_input: &str) -> PreviewError {
     if err.starts_with("Unbekannte Funktion") {
         return PreviewError::Show;
     }
+    // Falsche Argumentzahl bei geschlossenem Aufruf, z. B. log(). Bei noch
+    // offener Klammer („sin(“, „nthroot(3, “) meldet die Engine dasselbe.
+    if err.contains("Argument") && (err.contains("benötigt") || err.contains("erwartet")) {
+        let t = engine_input.trim_end();
+        let closed = t.matches('(').count() <= t.matches(')').count() && !t.ends_with(',');
+        return if closed {
+            PreviewError::Show
+        } else {
+            PreviewError::Incomplete
+        };
+    }
     if let Some(name) = err
         .strip_prefix("Unbekannte Variable oder Konstante '")
         .and_then(|r| r.strip_suffix('\''))
@@ -902,19 +913,12 @@ fn plot_readout(engine: &MathEngine, display_expr: &str, x: f64, de: bool) -> (S
     if expr.trim().is_empty() {
         return (String::new(), false);
     }
-    let fx = engine.eval_for_x_result(&expr, x);
-    if let Err(err) = &fx {
-        // Schlägt die Auswertung auch an anderen Stellen mit derselben Meldung
-        // fehl, liegt es an der Eingabe und nicht am Definitionsbereich.
-        let probes = [0.5, -1.7, 2.3, 7.1];
-        let everywhere = probes
-            .iter()
-            .all(|&p| matches!(engine.eval_for_x_result(&expr, p), Err(e) if &e == err));
-        if everywhere {
-            return (format!("⚠ {}", err), true);
-        }
+    // Eingabefehler (Syntax, unbekannte Namen) unabhängig von der Spurposition
+    if let Err(err) = engine.validate_expression(&expr, &["x"]) {
+        return (format!("⚠ {}", err), true);
     }
-    let x_txt = format!("{:.2}", x);
+    let fx = engine.eval_for_x_result(&expr, x);
+    let x_txt = readout_number(x, 2);
     let Ok(y) = fx else {
         return (
             if de {
@@ -926,11 +930,26 @@ fn plot_readout(engine: &MathEngine, display_expr: &str, x: f64, de: bool) -> (S
         );
     };
     let derivative = match numdiff::derivative_at(|t| engine.eval_for_x(&expr, t), x) {
-        Some(numdiff::Derivative::Value(v)) => format!("f'({x_txt}) = {:.4}", v),
+        Some(numdiff::Derivative::Value(v)) => format!("f'({x_txt}) = {}", readout_number(v, 4)),
         _ if de => format!("f'({x_txt}) existiert nicht"),
         _ => format!("f'({x_txt}) does not exist"),
     };
-    (format!("f({x_txt}) = {:.4}   |   {derivative}", y), false)
+    (format!("f({x_txt}) = {}   |   {derivative}", readout_number(y, 4)), false)
+}
+
+/// Zahl für die Plotter-Statuszeile: höchstens `decimals` Nachkommastellen und
+/// höchstens 8 gültige Stellen (mehr liefert die numerische Ableitung nicht
+/// verlässlich); sehr kleine und sehr große Beträge in Exponentenschreibweise
+/// (sonst zeigt x = 10⁻⁷ „0.00“).
+fn readout_number(v: f64, decimals: usize) -> String {
+    let a = v.abs();
+    if v == 0.0 || (1e-2..1e7).contains(&a) {
+        let int_digits = if a >= 1.0 { a.log10().floor() as usize + 1 } else { 1 };
+        let dec = decimals.min(8usize.saturating_sub(int_digits));
+        format!("{:.*}", dec, v)
+    } else {
+        format!("{:.*e}", decimals, v)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1465,12 +1484,15 @@ impl NiobCalculatorApp {
     }
 
     fn render_top_bar(&mut self, ui: &mut Ui, pal: &MaterialYouPalette) {
+        // Schmale Fenster: kurzer Titel, Knöpfe nur mit Symbol, damit sich
+        // Titel und Bedienelemente nicht überlagern.
+        let compact = ui.available_width() < 640.0;
         ui.horizontal_wrapped(|ui| {
             ui.label(
-                RichText::new(if self.german_ui {
-                    "Niob Rechner"
-                } else {
-                    "Niob Calculator"
+                RichText::new(match (compact, self.german_ui) {
+                    (true, _) => "Niob",
+                    (false, true) => "Niob Rechner",
+                    (false, false) => "Niob Calculator",
                 })
                 .font(FontId::proportional(17.5))
                 .strong()
@@ -1496,10 +1518,13 @@ impl NiobCalculatorApp {
                 }
 
                 // Theme Mode cycle button (Dark / Light / AMOLED)
-                let mode_icon = match self.theme_mode {
-                    ThemeMode::Dark => "🌙 Dark",
-                    ThemeMode::Light => "☀ Light",
-                    ThemeMode::Amoled => "⬛ AMOLED",
+                let mode_icon = match (self.theme_mode, compact) {
+                    (ThemeMode::Dark, false) => "🌙 Dark",
+                    (ThemeMode::Light, false) => "☀ Light",
+                    (ThemeMode::Amoled, false) => "⬛ AMOLED",
+                    (ThemeMode::Dark, true) => "🌙",
+                    (ThemeMode::Light, true) => "☀",
+                    (ThemeMode::Amoled, true) => "⬛",
                 };
                 if ui
                     .add(
@@ -1543,7 +1568,9 @@ impl NiobCalculatorApp {
                 }
 
                 // Dual Keyboard toggle pill
-                let dual_txt = if self.dual_keyboard {
+                let dual_txt = if compact {
+                    "⌨"
+                } else if self.dual_keyboard {
                     if self.german_ui {
                         "⌨ Dual-Tastatur"
                     } else {
@@ -1572,6 +1599,7 @@ impl NiobCalculatorApp {
                         })
                         .corner_radius(CornerRadius::same(10)),
                     )
+                    .on_hover_text(if self.german_ui { "Dual-/Einzel-Tastatur umschalten" } else { "Toggle dual/single keypad" })
                     .clicked()
                 {
                     self.dual_keyboard = !self.dual_keyboard;
@@ -2298,23 +2326,35 @@ impl NiobCalculatorApp {
                 Ok(preview) => {
                     let nf = self.engine.number_format;
                     let dec_disp = format_decimal_history_display(&preview.decimal_text, nf);
+                    // Formelspiegel: Die Eingabezeile ist ein Textfeld und setzt
+                    // Brüche und Wurzeln einzeilig. Hier steht die Eingabe
+                    // zweidimensional, wenn sie Brüche oder Wurzeln enthält.
+                    let mirror = mathview::parse_math(&raw)
+                        .filter(|n| n.is_two_dimensional())
+                        .filter(|n| mathview::math_width(ui, n, 15.0) <= ui.available_width() * 0.5);
+                    if let Some(node) = &mirror {
+                        mathview::math_widget(ui, node, 15.0, pal.on_surface, Sense::hover());
+                    }
                     if preview.is_exact {
                         let ex_disp = format_exact_history_display(&preview.exact_text, nf);
-                        ui.label(
-                            RichText::new(if self.german_ui { "exakt:" } else { "exact:" })
-                                .font(FontId::proportional(13.5))
-                                .color(pal.primary),
-                        );
+                        let label = if mirror.is_some() {
+                            "="
+                        } else if self.german_ui {
+                            "exakt:"
+                        } else {
+                            "exact:"
+                        };
+                        ui.label(RichText::new(label).font(FontId::proportional(13.5)).color(pal.primary));
                         let max_w = ui.available_width() * 0.6;
                         mathview::show_math(ui, &ex_disp, &ex_disp, 15.0, pal.primary, max_w, Sense::hover());
                         if ex_disp != dec_disp {
                             ui.separator();
-                            let job = mathview::rich_job(
-                                &format!("{}: ≈ {}", if self.german_ui { "dezimal" } else { "decimal" }, dec_disp),
-                                FontId::proportional(13.5),
-                                pal.on_surface_variant,
-                            );
-                            ui.label(job);
+                            let text = if mirror.is_some() {
+                                format!("≈ {}", dec_disp)
+                            } else {
+                                format!("{}: ≈ {}", if self.german_ui { "dezimal" } else { "decimal" }, dec_disp)
+                            };
+                            ui.label(mathview::rich_job(&text, FontId::proportional(13.5), pal.on_surface_variant));
                         }
                     } else {
                         ui.label(mathview::rich_job(
@@ -2788,23 +2828,31 @@ impl NiobCalculatorApp {
             .corner_radius(CornerRadius::same(16))
             .inner_margin(egui::Margin::same(10))
             .show(ui, |ui| {
+                // Schmale Fenster: kurzer Titel, Knöpfe nur mit Symbol
+                let narrow = ui.available_width() < 720.0;
+                let hint = if self.german_ui {
+                    "Ziehen zum Verschieben, Mausrad zum Zoomen"
+                } else {
+                    "Drag to pan, scroll to zoom"
+                };
                 ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(if self.german_ui {
-                            "2D-Funktionsplotter (Ziehen zum Verschieben, Mausrad zum Zoomen)"
-                        } else {
-                            "2D Function Plotter (Drag to pan, Scroll to zoom)"
-                        })
-                        .font(FontId::proportional(14.5))
-                        .strong(),
-                    );
+                    let title = match (narrow, self.german_ui) {
+                        (true, true) => "2D-Plotter".to_string(),
+                        (true, false) => "2D Plotter".to_string(),
+                        (false, true) => format!("2D-Funktionsplotter ({hint})"),
+                        (false, false) => format!("2D Function Plotter ({hint})"),
+                    };
+                    ui.label(RichText::new(title).font(FontId::proportional(14.5)).strong())
+                        .on_hover_text(hint);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let reset_label = match (narrow, self.german_ui) {
+                            (true, _) => "⟳",
+                            (false, true) => "⟳ Ursprung zentrieren",
+                            (false, false) => "⟳ Reset View",
+                        };
                         if ui
-                            .small_button(if self.german_ui {
-                                "⟳ Ursprung zentrieren"
-                            } else {
-                                "⟳ Reset View"
-                            })
+                            .small_button(reset_label)
+                            .on_hover_text(if self.german_ui { "Ursprung zentrieren" } else { "Reset view" })
                             .clicked()
                         {
                             self.plot_center_x = 0.0;
@@ -2823,7 +2871,10 @@ impl NiobCalculatorApp {
                 ui.add_space(4.0);
                 let de = self.german_ui;
                 let trace_x = self.plot_trace_x;
+                // Breite Fenster: Statuszeile neben dem Feld, sonst darunter
+                let wide = ui.available_width() >= 820.0;
                 for (i, pf) in self.plot_functions.iter_mut().enumerate() {
+                    let mut readout = None;
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut pf.visible, "");
                         ui.label(
@@ -2844,7 +2895,7 @@ impl NiobCalculatorApp {
                         let field_id = ui.id().with(("plot_fn", i));
                         let out = egui::TextEdit::singleline(&mut pf.expr)
                             .id(field_id)
-                            .desired_width(220.0)
+                            .desired_width(ui.available_width().clamp(120.0, 220.0))
                             .font(field_font)
                             .layouter(&mut layouter)
                             .show(ui);
@@ -2864,15 +2915,35 @@ impl NiobCalculatorApp {
                                 state.store(ui.ctx(), field_id);
                             }
                         }
+                        // Formelspiegel mit Bruchstrichen und Wurzeln, wenn Platz ist
+                        let readout_room = if wide { 340.0 } else { 0.0 };
+                        if let Some(node) = mathview::parse_math(&mathview::to_engine_syntax(&pf.expr))
+                            .filter(|n| n.is_two_dimensional())
+                        {
+                            if mathview::math_width(ui, &node, 14.0) + 8.0 <= ui.available_width() - readout_room {
+                                ui.add_space(4.0);
+                                mathview::math_widget(ui, &node, 14.0, pal.on_surface_variant, Sense::hover());
+                            }
+                        }
                         let (text, is_err) = plot_readout(&self.engine, &pf.expr, trace_x, de);
-                        ui.label(
-                            mathview::rich_job(
-                                &text,
-                                FontId::proportional(12.5),
-                                if is_err { pal.error } else { pal.on_surface_variant },
-                            ),
+                        let job = mathview::rich_job(
+                            &text,
+                            FontId::proportional(12.5),
+                            if is_err { pal.error } else { pal.on_surface_variant },
                         );
+                        if wide {
+                            ui.label(job);
+                        } else {
+                            readout = Some(job);
+                        }
                     });
+                    if let Some(mut job) = readout {
+                        ui.horizontal(|ui| {
+                            ui.add_space(28.0);
+                            job.wrap.max_width = ui.available_width();
+                            ui.label(job);
+                        });
+                    }
                 }
             });
 
@@ -3924,6 +3995,9 @@ mod ui_tests {
         assert_eq!(preview_kind("2+"), Some(PreviewError::Incomplete));
         assert_eq!(preview_kind("fao(2)"), Some(PreviewError::Show));
         assert_eq!(preview_kind("sin("), Some(PreviewError::Incomplete));
+        assert_eq!(preview_kind("nthroot(3, "), Some(PreviewError::Incomplete));
+        // Befund: log() mit fehlendem Argument
+        assert_eq!(preview_kind("log()"), Some(PreviewError::Show));
         assert_eq!(preview_kind("1÷0"), Some(PreviewError::Show));
         // Unbekannter Name: am Ende wird er womöglich noch getippt, sonst Tippfehler
         let unknown = "Unbekannte Variable oder Konstante 'fa'";
@@ -3947,6 +4021,62 @@ mod ui_tests {
         // Außerhalb des Definitionsbereichs: kein Eingabefehler
         let (txt, err) = plot_readout(&engine, "√(x)", -1.0, true);
         assert!(!err && txt.contains("nicht definiert"), "{txt}");
+        // Befund: Definitionslücke ist kein Eingabefehler …
+        let (txt, err) = plot_readout(&engine, "√(x−100)", 1.0, true);
+        assert!(!err && txt == "f(1.00) nicht definiert", "{txt}");
+        // … und ein Pol verdeckt keinen unbekannten Namen mehr
+        let (txt, err) = plot_readout(&engine, "1÷(x−1)+fao(x)", 1.0, true);
+        assert!(err && txt.contains("Unbekannte Funktion 'fao'"), "{txt}");
+        let (txt, err) = plot_readout(&engine, "q×x", 2.0, true);
+        assert!(err && txt.contains("Unbekannte Variable"), "{txt}");
+        let (txt, err) = plot_readout(&engine, "sum(k^2, k, 1, 3)+x", 0.0, true);
+        assert!(!err && txt.starts_with("f(0.00) = 14.0000"), "{txt}");
+        // Befund: Laufvariable von defint ist keine unbekannte Variable …
+        let (txt, err) = plot_readout(&engine, "defint(t,t,0,x)", 1.0, true);
+        assert!(!err && txt.starts_with("f(1.00) = 0.5000"), "{txt}");
+        let (txt, err) = plot_readout(&engine, "int(t^2,t,0,x)+sum(k,k,1,3)", 1.0, true);
+        assert!(!err, "{txt}");
+        // … und ein fehlendes Argument ist keine Definitionslücke
+        let (txt, err) = plot_readout(&engine, "log()", 1.0, true);
+        assert!(err && txt.contains("benötigt mindestens 1 Argument"), "{txt}");
+        let (txt, err) = plot_readout(&engine, "nthroot(x)", 1.0, true);
+        assert!(err && txt.contains("nthroot(n, x) benötigt 2 Argumente"), "{txt}");
+        // Wertebereichsfehler bleibt Definitionslücke, kein Eingabefehler
+        let (txt, err) = plot_readout(&engine, "binomial(x, 2)", 0.5, true);
+        assert!(!err, "{txt}");
+        // Befund: det mit x zeichnete konstant 2 (gespeichertes x statt Spurwert)
+        let (txt, err) = plot_readout(&engine, "det([[x,2],[3,4]])", 1.0, true);
+        assert!(!err && txt == "f(1.00) = -2.0000   |   f'(1.00) = 4.0000", "{txt}");
+        assert_eq!(engine.eval_for_x("det([[x,2],[3,4]])", -3.25), Some(-19.0));
+        assert_eq!(engine.eval_for_x("sum(det([[k,1],[0,x]]),k,1,3)", 2.0), Some(12.0));
+        assert_eq!(engine.eval_for_x("det([[2x]])", -3.25), Some(-6.5));
+        assert_eq!(engine.eval_for_x("det([[sum(x,x,1,3)]])", 2.0), Some(6.0));
+        let (txt, err) = plot_readout(&engine, "det(inv([[x,0],[0,1]]))", 4.0, true);
+        assert!(!err && txt == "f(4.00) = 0.2500   |   f'(4.00) = -0.0625", "{txt}");
+        let (txt, err) = plot_readout(&engine, "det([[x]]+[[x]])", 2.0, true);
+        assert!(!err && txt == "f(2.00) = 4.0000   |   f'(2.00) = 2.0000", "{txt}");
+        // Befund: fehlende Argumente bei sqrt und mod
+        for (expr, msg) in [
+            ("sqrt()", "benötigt mindestens 1 Argument"),
+            ("mod(x)", "mod(a, b) benötigt 2 Argumente"),
+            ("factorial(x)", "Unbekannte Funktion 'factorial'"),
+            ("[[1,2],[3,4]]", "nur innerhalb von det"),
+        ] {
+            let (txt, err) = plot_readout(&engine, expr, 1.0, true);
+            assert!(err && txt.contains(msg), "{expr}: {txt}");
+        }
+        for expr in ["√(x)", "mod(x,3)", "x mod 3", "x!"] {
+            let (txt, err) = plot_readout(&engine, expr, 1.0, true);
+            assert!(!err, "{expr}: {txt}");
+        }
+        // Befund: schnell schwingende Funktion
+        let (txt, _) = plot_readout(&engine, "sin(628318.5307179586×x)", 0.0, true);
+        assert!(txt.ends_with("f'(0.00) = 628318.53"), "{txt}");
+        // Befund: Ableitung bei kleinen Werten
+        let (txt, _) = plot_readout(&engine, "10^−6×abs(x)", 0.0, true);
+        assert!(txt.ends_with("f'(0.00) existiert nicht"), "{txt}");
+        let (txt, _) = plot_readout(&engine, "√(x)", 1e-7, true);
+        assert!(txt.contains("f(1.00e-7) = 3.1623e-4") && txt.contains("f'(1.00e-7) = 1581.13"), "{txt}");
         // Normalfall
         let (txt, _) = plot_readout(&engine, "x^2", 1.0, true);
         assert_eq!(txt, "f(1.00) = 1.0000   |   f'(1.00) = 2.0000");

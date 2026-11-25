@@ -486,6 +486,22 @@ public final class CalculatorRegressionTest {
             require(threw, "validatePlotSyntax must reject 1/(x-1)+foo(x)");
             require(Double.isNaN(engine.compilePlotFunction("1/(x-1)").evaluate(1)), "pole must produce a gap");
         });
+        add("plot_matrix_outside_det_has_clear_message", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            for (String expression : new String[] {
+                    "[[1,2],[3,4]]", "2*[[1,x],[0,1]]", "inv([[x,0],[0,1]])", "trans([[1,2],[3,4]])"}) {
+                String message = null;
+                try {
+                    engine.validatePlotSyntax(expression);
+                } catch (RuntimeException expected) {
+                    message = expected.getMessage();
+                }
+                require(message != null && message.contains("nur innerhalb von det"),
+                        expression + " must explain that matrices need det(…), got: " + message);
+            }
+            close(engine.compilePlotFunction("det(inv([[x,0],[0,1]]))").evaluate(4), 0.25, 1e-12, 0);
+            close(engine.compilePlotFunction("det(trans([[x,2],[3,4]]))").evaluate(1), -2, 1e-12, 0);
+        });
         add("exact_display_no_float_guessing_and_reusable_text", () -> {
             CalculatorEngine engine = new CalculatorEngine();
             CalculatorEngine.Result near = engine.evaluate("sqrt(2)+1e-15");

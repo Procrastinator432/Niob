@@ -1805,6 +1805,28 @@ impl Value {
     }
 }
 
+/// Steht `name(` als eigenständiger Funktionsaufruf im Ausdruck?
+fn contains_call(src: &str, name: &str) -> bool {
+    let chars: Vec<char> = src.chars().collect();
+    let target: Vec<char> = name.chars().collect();
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    (0..chars.len()).any(|i| {
+        chars[i..].starts_with(&target)
+            && (i == 0 || !is_ident(chars[i - 1]))
+            && chars[i + target.len()..]
+                .iter()
+                .find(|c| !c.is_whitespace())
+                == Some(&'(')
+    })
+}
+
+/// Funktionen, deren zweites Argument eine Laufvariable ist (`sum(k^2, k, 1, n)`,
+/// `defint(t, t, 0, x)` …). Muss zu den Zweigen in `ExprParser::eval_function`
+/// passen.
+const BINDING_FUNCTIONS: [&str; 11] = [
+    "sum", "∑", "prod", "product", "∏", "int", "defint", "∫", "deriv", "diff", "d",
+];
+
 #[derive(Clone, Debug)]
 pub struct MathEngine {
     pub variables: HashMap<String, Value>,
@@ -1985,7 +2007,7 @@ impl MathEngine {
                 || rhs_trimmed.starts_with("[[")
                 || rhs_ast.as_ref().is_some_and(|ast| self.contains_matrix_expression(ast))
             {
-                let mat = self.eval_matrix_expr(rhs_trimmed)?;
+                let mat = self.eval_matrix_expr(rhs_trimmed, None)?;
                 let decimal = Self::format_matrix(&mat, |value| self.format_value_decimal(value));
                 let exact = Self::format_matrix(&mat, |value| {
                     Self::format_exact_real(value).unwrap_or_else(|| self.format_value_decimal(value))
@@ -2185,6 +2207,120 @@ impl MathEngine {
 
     pub fn eval_for_x(&self, expr: &str, x_val: f64) -> Option<f64> {
         self.eval_for_x_result(expr, x_val).ok()
+    }
+
+    /// Prüft eine Formel unabhängig von einem konkreten Wert der freien
+    /// Variablen: Syntax sowie alle Funktions- und Variablennamen. `bound`
+    /// sind Namen, die beim Auswerten belegt werden (im Plotter `x`).
+    /// Definitionslücken (Division durch Null, Wurzel aus Negativem …) sind
+    /// hier kein Fehler – die werden erst beim Auswerten an einer Stelle sichtbar.
+    pub fn validate_expression(&self, expr: &str, bound: &[&str]) -> Result<(), String> {
+        let ast = AstParser::parse(expr)?;
+        // `factorial` ist im Syntaxbaum der Name für das Postfix `!`. Steht er
+        // selbst in der Eingabe, muss die Engine ihn als Funktion kennen.
+        if contains_call(expr, "factorial") {
+            self.validate_call("factorial", 1)?;
+        }
+        let mut names: Vec<String> = bound.iter().map(|s| s.to_string()).collect();
+        self.validate_names(&ast, &mut names, false)
+    }
+
+    /// `matrix_ok`: Matrizen sind nur als Argument von det(…) (bzw. inv/trans
+    /// darin) erlaubt – ein Funktionswert muss eine Zahl sein.
+    fn validate_names(&self, node: &AstNode, bound: &mut Vec<String>, matrix_ok: bool) -> Result<(), String> {
+        match node {
+            AstNode::Num(_) | AstNode::BigInt(_) => Ok(()),
+            AstNode::Var(name) => {
+                if bound.iter().any(|b| b == name) {
+                    return Ok(());
+                }
+                match ExprParser::new(name, self, None).parse_expr() {
+                    Err(e) if e.starts_with("Unbekannte") => Err(e),
+                    _ => Ok(()),
+                }
+            }
+            AstNode::Add(a, b)
+            | AstNode::Sub(a, b)
+            | AstNode::Mul(a, b) => {
+                self.validate_names(a, bound, matrix_ok)?;
+                self.validate_names(b, bound, matrix_ok)
+            }
+            AstNode::Div(a, b) | AstNode::Pow(a, b) => {
+                self.validate_names(a, bound, matrix_ok)?;
+                self.validate_names(b, bound, false)
+            }
+            AstNode::Neg(a) => self.validate_names(a, bound, matrix_ok),
+            AstNode::Func(name, args) if name == "[]" => {
+                if !matrix_ok {
+                    return Err("Matrizen sind hier nur innerhalb von det(…) möglich".to_string());
+                }
+                for a in args {
+                    // Zeilen sind wieder Matrizen-Knoten, Zellen Zahlen
+                    let nested = matches!(a, AstNode::Func(n, _) if n == "[]");
+                    self.validate_names(a, bound, nested)?;
+                }
+                Ok(())
+            }
+            AstNode::Func(name, args) if matches!(name.as_str(), "inv" | "trans" | "transpose") => {
+                if !matrix_ok {
+                    return Err("Matrizen sind hier nur innerhalb von det(…) möglich".to_string());
+                }
+                if args.len() != 1 {
+                    return Err(format!("{name}(Matrix) benötigt genau 1 Argument"));
+                }
+                self.validate_names(&args[0], bound, true)
+            }
+            AstNode::Func(name, args) => {
+                let matrix_args = name == "det";
+                // Interne Knoten des Syntaxbaums, keine Funktionsnamen der Eingabe.
+                // `sqrt` (aus √) und `mod` (Infix) werden mitgeprüft: intern haben
+                // sie immer die richtige Argumentzahl, `sqrt()` und `mod(x)` nicht.
+                if name != "factorial" {
+                    self.validate_call(name, args.len())?;
+                }
+                // Funktionen mit Laufvariable: sum(f, k, a, b), defint(f, t, a, b) …
+                if BINDING_FUNCTIONS.contains(&name.as_str()) && args.len() >= 2 {
+                    if let AstNode::Var(var) = &args[1] {
+                        bound.push(var.clone());
+                        let inner = self.validate_names(&args[0], bound, false);
+                        bound.pop();
+                        inner?;
+                        for a in &args[2..] {
+                            self.validate_names(a, bound, false)?;
+                        }
+                        return Ok(());
+                    }
+                }
+                for a in args {
+                    self.validate_names(a, bound, matrix_args)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Ist `name` eine bekannte Funktion und passt die Zahl der Argumente?
+    /// Geprüft wird mit Platzhalterwerten (1), damit Definitionslücken der
+    /// echten Argumente keine Rolle spielen.
+    fn validate_call(&self, name: &str, arity: usize) -> Result<(), String> {
+        let probe = |n: usize| {
+            let args = vec!["1"; n].join(", ");
+            ExprParser::new(&format!("{}({})", name, args), self, None).parse_expr()
+        };
+        // Erst den Namen (mit einem Argument, sonst meldet die Engine bei
+        // fehlenden Argumenten zuerst diese), dann die Argumentzahl.
+        if let Err(e) = probe(1) {
+            if e.starts_with("Unbekannte Funktion") {
+                return Err(e);
+            }
+        }
+        if let Err(e) = probe(arity) {
+            let wrong_arity = e.contains("Argument") && (e.contains("benötigt") || e.contains("erwartet"));
+            if wrong_arity {
+                return Err(e);
+            }
+        }
+        Ok(())
     }
 
     /// Wie [`Self::eval_for_x`], liefert aber die Fehlermeldung (z. B.
@@ -2538,7 +2674,7 @@ impl MathEngine {
                 }, None));
                 }
             }
-            if let MatrixOrScalar::Scalar(val) = self.eval_matrix_or_scalar_ast(&ast)? {
+            if let MatrixOrScalar::Scalar(val) = self.eval_matrix_or_scalar_ast(&ast, None)? {
                 let dec = self.format_value_decimal(val);
                 let exact_opt = Self::format_exact_real(val);
                 let is_exact = exact_opt.is_some();
@@ -2557,7 +2693,7 @@ impl MathEngine {
         }
 
         if let Some(inner) = trimmed.strip_prefix("det(").and_then(|s| s.strip_suffix(')')) {
-            let mat = self.eval_matrix_expr(inner)?;
+            let mat = self.eval_matrix_expr(inner, None)?;
             if let Some(br) = try_exact_matrix_det(&mat)? {
                 let exact = br.to_exact_string();
                 let f = br.to_f64();
@@ -2598,7 +2734,7 @@ impl MathEngine {
             }, None));
         }
 
-        let mat = self.eval_matrix_expr(trimmed)?;
+        let mat = self.eval_matrix_expr(trimmed, None)?;
         let is_exact = mat.iter().all(|row| row.iter().all(|v| v.rat.is_some()));
         let decimal = Self::format_matrix(&mat, |value| self.format_value_decimal(value));
         let exact = Self::format_matrix(&mat, |value| {
@@ -2869,8 +3005,8 @@ impl MathEngine {
             AstNode::Pow(a, b) => Ok(self
                 .eval_ast_scalar_with_overrides(a, ov)?
                 .pow(self.eval_ast_scalar_with_overrides(b, ov)?)),
-            AstNode::Func(name, args) if name == "det" && args.len() == 1 && ov.is_none() => {
-                let mat = self.eval_matrix_ast(&args[0])?;
+            AstNode::Func(name, args) if name == "det" && args.len() == 1 => {
+                let mat = self.eval_matrix_ast(&args[0], ov)?;
                 matrix_det(&mat)
             }
             AstNode::Func(name, args) if matches!(name.as_str(), "d" | "deriv" | "diff") && args.len() == 2 => {
@@ -3680,29 +3816,33 @@ impl MathEngine {
         }
     }
 
-    fn eval_ast_scalar(&self, node: &AstNode) -> Result<Value, String> {
+    fn eval_ast_scalar(
+        &self,
+        node: &AstNode,
+        overrides: Option<&HashMap<String, Value>>,
+    ) -> Result<Value, String> {
         match node {
             AstNode::Num(v) => Ok(*v),
             AstNode::BigInt(bi) => Ok(Value::from_f64(bi.to_f64())),
             AstNode::Neg(a) => {
-                let v = self.eval_ast_scalar(a)?;
+                let v = self.eval_ast_scalar(a, overrides)?;
                 Ok(Value {
                     c: Complex::new(-v.c.re, -v.c.im),
                     rat: v.rat.map(|r| ExactRat { num: -r.num, den: r.den }),
                 })
             }
-            AstNode::Add(a, b) => Ok(self.eval_ast_scalar(a)?.add(self.eval_ast_scalar(b)?)),
-            AstNode::Sub(a, b) => Ok(self.eval_ast_scalar(a)?.sub(self.eval_ast_scalar(b)?)),
-            AstNode::Mul(a, b) => Ok(self.eval_ast_scalar(a)?.mul(self.eval_ast_scalar(b)?)),
-            AstNode::Div(a, b) => self.eval_ast_scalar(a)?.div(self.eval_ast_scalar(b)?),
-            AstNode::Pow(a, b) => Ok(self.eval_ast_scalar(a)?.pow(self.eval_ast_scalar(b)?)),
+            AstNode::Add(a, b) => Ok(self.eval_ast_scalar(a, overrides)?.add(self.eval_ast_scalar(b, overrides)?)),
+            AstNode::Sub(a, b) => Ok(self.eval_ast_scalar(a, overrides)?.sub(self.eval_ast_scalar(b, overrides)?)),
+            AstNode::Mul(a, b) => Ok(self.eval_ast_scalar(a, overrides)?.mul(self.eval_ast_scalar(b, overrides)?)),
+            AstNode::Div(a, b) => self.eval_ast_scalar(a, overrides)?.div(self.eval_ast_scalar(b, overrides)?),
+            AstNode::Pow(a, b) => Ok(self.eval_ast_scalar(a, overrides)?.pow(self.eval_ast_scalar(b, overrides)?)),
             AstNode::Func(name, args) if name == "det" && args.len() == 1 => {
-                let mat = self.eval_matrix_ast(&args[0])?;
+                let mat = self.eval_matrix_ast(&args[0], overrides)?;
                 matrix_det(&mat)
             }
             _ => {
                 let expr = node.to_display_string();
-                let mut p = ExprParser::new(&expr, self, None);
+                let mut p = ExprParser::new(&expr, self, overrides);
                 let v = p.parse_expr()?;
                 p.skip_ws();
                 if p.pos < p.chars.len() {
@@ -3713,39 +3853,48 @@ impl MathEngine {
         }
     }
 
-    fn eval_matrix_ast(&self, node: &AstNode) -> Result<Vec<Vec<Value>>, String> {
-        match self.eval_matrix_or_scalar_ast(node)? {
+    fn eval_matrix_ast(
+        &self,
+        node: &AstNode,
+        overrides: Option<&HashMap<String, Value>>,
+    ) -> Result<Vec<Vec<Value>>, String> {
+        match self.eval_matrix_or_scalar_ast(node, overrides)? {
             MatrixOrScalar::Matrix(m) => Ok(m),
             MatrixOrScalar::Scalar(_) => Err("Matrix erwartet".to_string()),
         }
     }
 
-    fn eval_matrix_or_scalar_ast(&self, node: &AstNode) -> Result<MatrixOrScalar, String> {
+    fn eval_matrix_or_scalar_ast(
+        &self,
+        node: &AstNode,
+        overrides: Option<&HashMap<String, Value>>,
+    ) -> Result<MatrixOrScalar, String> {
+        let eval = |operand| self.eval_matrix_or_scalar_ast(operand, overrides);
         match node {
-            AstNode::Neg(inner) => match self.eval_matrix_or_scalar_ast(inner)? {
+            AstNode::Neg(inner) => match eval(inner)? {
                 MatrixOrScalar::Matrix(m) => Ok(MatrixOrScalar::Matrix(scale_matrix(&m, Value::from_int(-1))?)),
                 MatrixOrScalar::Scalar(s) => Ok(MatrixOrScalar::Scalar(Value {
                     c: Complex::new(-s.c.re, -s.c.im),
                     rat: s.rat.map(|r| ExactRat { num: -r.num, den: r.den }),
                 })),
             },
-            AstNode::Add(l, r) => match (self.eval_matrix_or_scalar_ast(l)?, self.eval_matrix_or_scalar_ast(r)?) {
+            AstNode::Add(l, r) => match (eval(l)?, eval(r)?) {
                 (MatrixOrScalar::Matrix(a), MatrixOrScalar::Matrix(b)) => Ok(MatrixOrScalar::Matrix(add_sub_matrices(&a, &b, true)?)),
                 (MatrixOrScalar::Scalar(a), MatrixOrScalar::Scalar(b)) => Ok(MatrixOrScalar::Scalar(a.add(b))),
                 _ => Err("Incompatible matrix dimensions".to_string()),
             },
-            AstNode::Sub(l, r) => match (self.eval_matrix_or_scalar_ast(l)?, self.eval_matrix_or_scalar_ast(r)?) {
+            AstNode::Sub(l, r) => match (eval(l)?, eval(r)?) {
                 (MatrixOrScalar::Matrix(a), MatrixOrScalar::Matrix(b)) => Ok(MatrixOrScalar::Matrix(add_sub_matrices(&a, &b, false)?)),
                 (MatrixOrScalar::Scalar(a), MatrixOrScalar::Scalar(b)) => Ok(MatrixOrScalar::Scalar(a.sub(b))),
                 _ => Err("Incompatible matrix dimensions".to_string()),
             },
-            AstNode::Mul(l, r) => match (self.eval_matrix_or_scalar_ast(l)?, self.eval_matrix_or_scalar_ast(r)?) {
+            AstNode::Mul(l, r) => match (eval(l)?, eval(r)?) {
                 (MatrixOrScalar::Matrix(a), MatrixOrScalar::Matrix(b)) => Ok(MatrixOrScalar::Matrix(multiply_matrices(&a, &b)?)),
                 (MatrixOrScalar::Matrix(m), MatrixOrScalar::Scalar(s))
                 | (MatrixOrScalar::Scalar(s), MatrixOrScalar::Matrix(m)) => Ok(MatrixOrScalar::Matrix(scale_matrix(&m, s)?)),
                 (MatrixOrScalar::Scalar(a), MatrixOrScalar::Scalar(b)) => Ok(MatrixOrScalar::Scalar(a.mul(b))),
             },
-            AstNode::Div(l, r) => match (self.eval_matrix_or_scalar_ast(l)?, self.eval_matrix_or_scalar_ast(r)?) {
+            AstNode::Div(l, r) => match (eval(l)?, eval(r)?) {
                 (MatrixOrScalar::Matrix(m), MatrixOrScalar::Scalar(s)) => {
                     let mut scaled = Vec::with_capacity(m.len());
                     for row in m {
@@ -3764,7 +3913,7 @@ impl MathEngine {
                 (MatrixOrScalar::Scalar(a), MatrixOrScalar::Scalar(b)) => Ok(MatrixOrScalar::Scalar(a.div(b)?)),
                 _ => Err("Ungültige Matrixdivision".to_string()),
             },
-            AstNode::Pow(l, r) => match (self.eval_matrix_or_scalar_ast(l)?, self.eval_matrix_or_scalar_ast(r)?) {
+            AstNode::Pow(l, r) => match (eval(l)?, eval(r)?) {
                 (MatrixOrScalar::Matrix(m), MatrixOrScalar::Scalar(s)) => {
                     Ok(MatrixOrScalar::Matrix(matrix_pow(&m, s)?))
                 }
@@ -3774,15 +3923,15 @@ impl MathEngine {
                 _ => Err("Ungültige Matrixpotenz".to_string()),
             },
             AstNode::Func(name, args) if name == "inv" && args.len() == 1 => {
-                let mat = self.eval_matrix_ast(&args[0])?;
+                let mat = self.eval_matrix_ast(&args[0], overrides)?;
                 Ok(MatrixOrScalar::Matrix(matrix_inv(&mat)?))
             }
             AstNode::Func(name, args) if (name == "trans" || name == "transpose") && args.len() == 1 => {
-                let mat = self.eval_matrix_ast(&args[0])?;
+                let mat = self.eval_matrix_ast(&args[0], overrides)?;
                 Ok(MatrixOrScalar::Matrix(transpose_matrix(&mat)))
             }
             AstNode::Func(name, args) if name == "det" && args.len() == 1 => {
-                let mat = self.eval_matrix_ast(&args[0])?;
+                let mat = self.eval_matrix_ast(&args[0], overrides)?;
                 Ok(MatrixOrScalar::Scalar(matrix_det(&mat)?))
             }
             AstNode::Func(name, args) if name == "[]" => {
@@ -3808,7 +3957,7 @@ impl MathEngine {
                     }
                     let mut row_vals = Vec::with_capacity(cells.len());
                     for cell in cells {
-                        let v = self.eval_ast_scalar(cell)?;
+                        let v = self.eval_ast_scalar(cell, overrides)?;
                         if !v.c.is_real() || !v.c.re.is_finite() {
                             return Err("Matrixzellen müssen endliche reelle Zahlen sein".to_string());
                         }
@@ -3819,6 +3968,9 @@ impl MathEngine {
                 Ok(MatrixOrScalar::Matrix(rows))
             }
             AstNode::Var(name) => {
+                if let Some(&value) = overrides.and_then(|values| values.get(name)) {
+                    return Ok(MatrixOrScalar::Scalar(value));
+                }
                 if name.eq_ignore_ascii_case("ans") {
                     if let Some(ref m) = self.matrix_ans {
                         return Ok(MatrixOrScalar::Matrix(m.clone()));
@@ -3827,16 +3979,20 @@ impl MathEngine {
                 if let Some(m) = self.matrix_variables.get(name) {
                     return Ok(MatrixOrScalar::Matrix(m.clone()));
                 }
-                Ok(MatrixOrScalar::Scalar(self.eval_ast_scalar(node)?))
+                Ok(MatrixOrScalar::Scalar(self.eval_ast_scalar(node, overrides)?))
             }
-            _ => Ok(MatrixOrScalar::Scalar(self.eval_ast_scalar(node)?)),
+            _ => Ok(MatrixOrScalar::Scalar(self.eval_ast_scalar(node, overrides)?)),
         }
     }
 
-    fn eval_matrix_expr(&self, s: &str) -> Result<Vec<Vec<Value>>, String> {
+    fn eval_matrix_expr(
+        &self,
+        s: &str,
+        overrides: Option<&HashMap<String, Value>>,
+    ) -> Result<Vec<Vec<Value>>, String> {
         let s = s.trim();
         if let Ok(ast) = AstParser::parse(s) {
-            return self.eval_matrix_ast(&ast);
+            return self.eval_matrix_ast(&ast, overrides);
         }
         let mut depth = 0;
         let mut split_pos = None;
@@ -3850,15 +4006,15 @@ impl MathEngine {
             }
         }
         if let Some(pos) = split_pos {
-            let left = self.eval_matrix_expr(&s[..pos])?;
-            let right = self.eval_matrix_expr(&s[pos + 1..])?;
+            let left = self.eval_matrix_expr(&s[..pos], overrides)?;
+            let right = self.eval_matrix_expr(&s[pos + 1..], overrides)?;
             return add_sub_matrices(&left, &right, op == '+');
         }
         if s.starts_with('[') {
-            return self.parse_matrix(s);
+            return self.parse_matrix(s, overrides);
         }
         if let Some(inner) = s.strip_prefix("inv(").and_then(|x| x.strip_suffix(')')) {
-            let mat = self.eval_matrix_expr(inner)?;
+            let mat = self.eval_matrix_expr(inner, overrides)?;
             return matrix_inv(&mat);
         }
         let trans_inner = s
@@ -3866,7 +4022,7 @@ impl MathEngine {
             .or_else(|| s.strip_prefix("transpose("))
             .and_then(|x| x.strip_suffix(')'));
         if let Some(inner) = trans_inner {
-            let mat = self.eval_matrix_expr(inner)?;
+            let mat = self.eval_matrix_expr(inner, overrides)?;
             let rows = mat.len();
             let cols = mat[0].len();
             let mut t = vec![vec![Value::from_int(0); rows]; cols];
@@ -3880,7 +4036,11 @@ impl MathEngine {
         Err("Ungültiger Matrix-Ausdruck".to_string())
     }
 
-    fn parse_matrix(&self, s: &str) -> Result<Vec<Vec<Value>>, String> {
+    fn parse_matrix(
+        &self,
+        s: &str,
+        overrides: Option<&HashMap<String, Value>>,
+    ) -> Result<Vec<Vec<Value>>, String> {
         let s = s.trim();
         let inner = s
             .strip_prefix('[')
@@ -3912,7 +4072,7 @@ impl MathEngine {
                             ch == ',' && nested == 0
                         });
                         for cell in cells {
-                            let mut p = ExprParser::new_matrix_cell(cell.trim(), self, None);
+                            let mut p = ExprParser::new_matrix_cell(cell.trim(), self, overrides);
                             let v = p.parse_expr()?;
                             p.skip_ws();
                             if p.pos < p.chars.len() || !v.c.is_real() || !v.c.re.is_finite() {
@@ -8423,7 +8583,7 @@ impl<'a> ExprParser<'a> {
                 if raw_args.len() != 1 {
                     return Err("det(Matrix) benötigt genau 1 Argument".to_string());
                 }
-                let mat = self.engine.eval_matrix_expr(&raw_args[0])?;
+                let mat = self.engine.eval_matrix_expr(&raw_args[0], self.overrides)?;
                 return matrix_det(&mat);
             }
             _ => {}

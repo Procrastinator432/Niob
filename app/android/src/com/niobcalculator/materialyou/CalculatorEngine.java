@@ -399,6 +399,12 @@ public final class CalculatorEngine {
             AstFunc f = (AstFunc) node;
             String fn = f.name;
             int argc = f.args.size();
+            // Matrizen (auch inv/trans) liefern keinen Funktionswert; im Plotter
+            // sind sie nur als Argument von det(…) sinnvoll. Ohne diese Prüfung
+            // meldet validateFunctionArity „Unbekannte Funktion: []“.
+            if (fn.equals("[]") || fn.equals("inv") || fn.equals("trans") || fn.equals("transpose")) {
+                throw new RuntimeException("Matrizen sind hier nur innerhalb von det(…) möglich");
+            }
             validateFunctionArity(fn, argc);
             if (fn.equals("det")) {
                 validatePlotMatrix(f.args.get(0), scope);
