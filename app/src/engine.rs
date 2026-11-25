@@ -1119,6 +1119,7 @@ pub enum NumberFormatMode {
 }
 
 impl NumberFormatMode {
+    #[allow(dead_code)] // von den Tests genutzt; die Oberfläche wählt Dezimalzeichen und Gruppierung getrennt
     pub const ALL: [NumberFormatMode; 6] = [
         Self::SpacePoint,
         Self::CommaPoint,

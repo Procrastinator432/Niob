@@ -3,6 +3,7 @@ mod engine;
 mod mathview;
 mod numdiff;
 mod theme;
+#[cfg(test)]
 mod verification;
 
 use std::path::PathBuf;
@@ -90,20 +91,58 @@ impl Drop for PreviewWorker {
 }
 use egui::{
     Align, Color32, CornerRadius, FontId, Frame, Layout, Pos2, RichText, ScrollArea, Sense,
-    Stroke, StrokeKind, Ui, Vec2,
+    Stroke, StrokeKind, Ui,
 };
 
 use crate::constants::{
      ASSIGNABLE_VARIABLE_SLOTS, ConstantCategory, DEFAULT_KEYBOARD_SLOTS, HISTORY_TERM_FONT_SIZE,
     INPUT_TERM_FONT_SIZE, INPUT_TERM_MIN_FONT_SIZE, KEYBOARD_CARD_CORNER_RADIUS,
     KEYBOARD_SECTION_BAR_HEIGHT, PLOTTER_AXIS_LABEL_SIZE, PLOTTER_MAJOR_GRID_STROKE,
-    PLOTTER_MINOR_GRID_STROKE, SCIENTIFIC_CONSTANTS, SYMBOLIC_WATCHDOG_TIMEOUT_MS, USER_VARIABLES,
+    PLOTTER_MINOR_GRID_STROKE, SCIENTIFIC_CONSTANTS, USER_VARIABLES,
 };
 use crate::engine::{AngleMode, Complex, EvalOutput, MathEngine, NumberFormatMode, Value};
-use crate::theme::{AccentSeed, MaterialYouPalette, ThemeMode};
+use crate::theme::{readable_on, AccentSeed, MaterialYouPalette, ThemeMode, PLOT_COLOR_COUNT};
+
+/// Bedien-Einstellungen, die zusammen mit Verlauf und Variablen im
+/// `state.json` landen (Befund: Theme, Sprache, Tastatur gingen bei jedem
+/// Neustart verloren).
+#[derive(Clone, Debug, PartialEq)]
+struct UiPrefs {
+    theme_mode: ThemeMode,
+    accent_seed: AccentSeed,
+    german_ui: bool,
+    dual_keyboard: bool,
+    show_hex_row: bool,
+    keyboard_scale: f32,
+    keyboard_slots: [String; ASSIGNABLE_VARIABLE_SLOTS],
+    show_exact_first: bool,
+    auto_ans_insertion: bool,
+}
+
+impl Default for UiPrefs {
+    fn default() -> Self {
+        Self {
+            theme_mode: ThemeMode::Dark,
+            accent_seed: AccentSeed::NiobEmerald,
+            german_ui: true,
+            dual_keyboard: true,
+            show_hex_row: false,
+            keyboard_scale: 1.0,
+            keyboard_slots: DEFAULT_KEYBOARD_SLOTS.map(|s| s.to_string()),
+            show_exact_first: true,
+            auto_ans_insertion: true,
+        }
+    }
+}
+
+/// Die drei wählbaren Tastaturgrößen.
+const KEYBOARD_SCALES: [f32; 3] = [0.9, 1.0, 1.12];
 
 mod state_json {
-    use super::{AngleMode, Complex, HistoryItem, MathEngine, NumberFormatMode, Value, USER_VARIABLES};
+    use super::{
+        AccentSeed, AngleMode, Complex, HistoryItem, MathEngine, NumberFormatMode, ThemeMode, UiPrefs, Value,
+        ASSIGNABLE_VARIABLE_SLOTS, KEYBOARD_SCALES, USER_VARIABLES,
+    };
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -212,7 +251,7 @@ mod state_json {
         }
     }
 
-    pub(super) fn save_state_to_disk(engine: &MathEngine, history: &[HistoryItem]) {
+    pub(super) fn save_state_to_disk(engine: &MathEngine, history: &[HistoryItem], prefs: &UiPrefs) {
         let Some(path) = state_file_path() else {
             return;
         };
@@ -221,11 +260,11 @@ mod state_json {
                 return;
             }
         }
-        let out = serialize_state_json(engine, history);
+        let out = serialize_state_json(engine, history, prefs);
         write_state_json_atomic(&path, &out);
     }
 
-    fn serialize_state_json(engine: &MathEngine, history: &[HistoryItem]) -> String {
+    fn serialize_state_json(engine: &MathEngine, history: &[HistoryItem], prefs: &UiPrefs) -> String {
         let mut out = String::from("{\n  \"angle_mode\": ");
         json_escape(
             match engine.angle_mode {
@@ -307,8 +346,73 @@ mod state_json {
                 push_matrix_json(mat, &mut out);
             }
         }
-        out.push_str("\n  }\n}\n");
+        out.push_str("\n  },\n  \"ui\": {\n    \"theme\": ");
+        json_escape(prefs.theme_mode.key(), &mut out);
+        out.push_str(",\n    \"accent\": ");
+        json_escape(prefs.accent_seed.key(), &mut out);
+        out.push_str(",\n    \"language\": ");
+        json_escape(if prefs.german_ui { "de" } else { "en" }, &mut out);
+        for (key, on) in [
+            ("dual_keyboard", prefs.dual_keyboard),
+            ("hex_row", prefs.show_hex_row),
+            ("show_exact_first", prefs.show_exact_first),
+            ("auto_ans_insertion", prefs.auto_ans_insertion),
+        ] {
+            out.push_str(&format!(",\n    \"{key}\": {on}"));
+        }
+        out.push_str(&format!(",\n    \"keyboard_scale\": {}", prefs.keyboard_scale));
+        out.push_str(",\n    \"keyboard_slots\": [");
+        for (i, slot) in prefs.keyboard_slots.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            json_escape(slot, &mut out);
+        }
+        out.push_str("]\n  }\n}\n");
         out
+    }
+
+    /// Gespeicherte Bedien-Einstellungen lesen; fehlende oder ungültige Felder
+    /// behalten den Standardwert.
+    fn decode_prefs(ui: &JsonVal) -> UiPrefs {
+        let mut p = UiPrefs::default();
+        if let Some(m) = ui.get("theme").and_then(JsonVal::as_str).and_then(ThemeMode::from_key) {
+            p.theme_mode = m;
+        }
+        if let Some(a) = ui.get("accent").and_then(JsonVal::as_str).and_then(AccentSeed::from_key) {
+            p.accent_seed = a;
+        }
+        if let Some(l) = ui.get("language").and_then(JsonVal::as_str) {
+            p.german_ui = l != "en";
+        }
+        for (key, slot) in [
+            ("dual_keyboard", &mut p.dual_keyboard),
+            ("hex_row", &mut p.show_hex_row),
+            ("show_exact_first", &mut p.show_exact_first),
+            ("auto_ans_insertion", &mut p.auto_ans_insertion),
+        ] {
+            if let Some(v) = ui.get(key).and_then(JsonVal::as_bool) {
+                *slot = v;
+            }
+        }
+        if let Some(s) = ui.get("keyboard_scale").and_then(JsonVal::as_f64) {
+            // Auf die nächste wählbare Größe einrasten
+            p.keyboard_scale = KEYBOARD_SCALES
+                .into_iter()
+                .min_by(|a, b| ((*a as f64) - s).abs().total_cmp(&((*b as f64) - s).abs()))
+                .unwrap_or(1.0);
+        }
+        if let Some(JsonVal::Arr(slots)) = ui.get("keyboard_slots") {
+            let names: Vec<&str> = slots.iter().filter_map(JsonVal::as_str).collect();
+            if names.len() == ASSIGNABLE_VARIABLE_SLOTS
+                && names.iter().all(|n| !n.trim().is_empty() && n.chars().count() <= 24)
+            {
+                for (dst, src) in p.keyboard_slots.iter_mut().zip(names) {
+                    *dst = src.to_string();
+                }
+            }
+        }
+        p
     }
 
     enum JsonVal {
@@ -497,21 +601,16 @@ mod state_json {
         Some(Value::from_complex(Complex::new(re, im)))
     }
 
-    pub(super) fn load_state_from_disk(engine: &mut MathEngine, history: &mut Vec<HistoryItem>) {
-        let Some(path) = state_file_path() else {
-            return;
-        };
-        let Ok(raw) = std::fs::read_to_string(path) else {
-            return;
-        };
-        apply_state_json(&raw, engine, history);
+    /// Zustand laden. Liefert die gespeicherten Bedien-Einstellungen, falls vorhanden.
+    pub(super) fn load_state_from_disk(engine: &mut MathEngine, history: &mut Vec<HistoryItem>) -> Option<UiPrefs> {
+        let path = state_file_path()?;
+        let raw = std::fs::read_to_string(path).ok()?;
+        apply_state_json(&raw, engine, history)
     }
 
-    fn apply_state_json(raw: &str, engine: &mut MathEngine, history: &mut Vec<HistoryItem>) {
+    fn apply_state_json(raw: &str, engine: &mut MathEngine, history: &mut Vec<HistoryItem>) -> Option<UiPrefs> {
         let mut parser = Parser { bytes: raw.as_bytes(), pos: 0 };
-        let Some(root) = parser.parse_value(0) else {
-            return;
-        };
+        let root = parser.parse_value(0)?;
         if let Some(am) = root.get("angle_mode").and_then(JsonVal::as_str) {
             engine.angle_mode = if am == "degrees" { AngleMode::Degrees } else { AngleMode::Radians };
         }
@@ -581,6 +680,7 @@ mod state_json {
                 });
             }
         }
+        root.get("ui").map(decode_prefs)
     }
 
     #[cfg(test)]
@@ -604,7 +704,7 @@ mod state_json {
                 integration_report: None,
             }];
 
-            let json = serialize_state_json(&engine, &history);
+            let json = serialize_state_json(&engine, &history, &UiPrefs::default());
             let dir = std::env::temp_dir().join(format!("niob_state_test_{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             let state_path = dir.join("state.json");
@@ -628,6 +728,32 @@ mod state_json {
 
             let _ = std::fs::remove_dir_all(&dir);
         }
+
+        /// Befund aus der UI-Bewertung: Theme, Sprache und Tastatur gingen beim
+        /// Neustart verloren.
+        #[test]
+        fn ui_preferences_survive_a_restart() {
+            let mut prefs = UiPrefs {
+                theme_mode: ThemeMode::Light,
+                accent_seed: AccentSeed::GoldenAmber,
+                german_ui: false,
+                dual_keyboard: false,
+                show_hex_row: true,
+                keyboard_scale: 1.12,
+                show_exact_first: false,
+                auto_ans_insertion: false,
+                ..UiPrefs::default()
+            };
+            prefs.keyboard_slots[2] = "c0".to_string();
+            let json = serialize_state_json(&MathEngine::default(), &[], &prefs);
+            let restored = apply_state_json(&json, &mut MathEngine::default(), &mut Vec::new());
+            assert_eq!(restored, Some(prefs));
+            // Alte Zustandsdateien ohne „ui“ laden weiter, ohne Einstellungen
+            let legacy = "{\"angle_mode\": \"degrees\", \"history\": []}";
+            let mut engine = MathEngine::default();
+            assert_eq!(apply_state_json(legacy, &mut engine, &mut Vec::new()), None);
+            assert_eq!(engine.angle_mode, AngleMode::Degrees);
+        }
     }
 }
 
@@ -636,7 +762,7 @@ enum MainTab {
     Calculator,
     Plotter,
     VariablesAndConstants,
-    ConverterAndSettings,
+    Settings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -646,33 +772,39 @@ enum KeyboardSection {
     Trigonometry, // sin
     AdvancedMath, // Σ ∫ i
     Variables,    // a b c
-    More,         // more
 }
 
 impl KeyboardSection {
-    const ALL: [KeyboardSection; 6] = [
+    const ALL: [KeyboardSection; 5] = [
         Self::Numbers,
         Self::Operators,
         Self::Trigonometry,
         Self::AdvancedMath,
         Self::Variables,
-        Self::More,
     ];
 
-    fn label(self, de: bool) -> &'static str {
+    fn label(self) -> &'static str {
         match self {
             Self::Numbers => "1 2 3",
             Self::Operators => "( ) √ xⁿ",
             Self::Trigonometry => "sin cos",
             Self::AdvancedMath => "∑ ∫ i",
             Self::Variables => "a b c",
-            Self::More => {
-                if de {
-                    "Mehr"
-                } else {
-                    "more"
-                }
-            }
+        }
+    }
+
+    fn tooltip(self, de: bool) -> &'static str {
+        match (self, de) {
+            (Self::Numbers, true) => "Ziffernblock",
+            (Self::Numbers, false) => "Number pad",
+            (Self::Operators, true) => "Klammern, Potenzen, Wurzeln, Logarithmen",
+            (Self::Operators, false) => "Brackets, powers, roots, logarithms",
+            (Self::Trigonometry, true) => "Winkel- und Hyperbelfunktionen",
+            (Self::Trigonometry, false) => "Trigonometric and hyperbolic functions",
+            (Self::AdvancedMath, true) => "Summen, Integrale, Ableitungen, Matrizen",
+            (Self::AdvancedMath, false) => "Sums, integrals, derivatives, matrices",
+            (Self::Variables, true) => "Variablen und belegbare Tastatur-Plätze",
+            (Self::Variables, false) => "Variables and assignable keyboard slots",
         }
     }
 }
@@ -956,8 +1088,14 @@ fn readout_number(v: f64, decimals: usize) -> String {
 struct PlotFunction {
     expr: String,
     visible: bool,
-    color: Color32,
+    /// Index in die Plotfarben der Palette (passt sich dem Farbmodus an).
+    color_idx: usize,
 }
+
+/// Höchstzahl der Funktionen im Plotter.
+const MAX_PLOT_FUNCTIONS: usize = PLOT_COLOR_COUNT;
+/// Gemeinsame Zoomgrenzen für Knöpfe und Mausrad (Pixel je Einheit).
+const PLOT_SCALE_RANGE: (f64, f64) = (0.01, 100_000.0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UnitCategory {
@@ -1000,59 +1138,60 @@ impl UnitCategory {
         }
     }
 
-    fn units(self) -> &'static [(&'static str, f64)] {
+    /// Einheiten als (deutscher Name, englischer Name, Faktor zur Basiseinheit).
+    fn units(self) -> &'static [(&'static str, &'static str, f64)] {
         match self {
             Self::Length => &[
-                ("Meter (m)", 1.0),
-                ("Kilometer (km)", 1000.0),
-                ("Zentimeter (cm)", 0.01),
-                ("Millimeter (mm)", 0.001),
-                ("Mikrometer (µm)", 1e-6),
-                ("Nanometer (nm)", 1e-9),
-                ("Meile (mi)", 1609.344),
-                ("Fuß (ft)", 0.3048),
-                ("Zoll (in)", 0.0254),
+                ("Meter (m)", "Meter (m)", 1.0),
+                ("Kilometer (km)", "Kilometer (km)", 1000.0),
+                ("Zentimeter (cm)", "Centimeter (cm)", 0.01),
+                ("Millimeter (mm)", "Millimeter (mm)", 0.001),
+                ("Mikrometer (µm)", "Micrometer (µm)", 1e-6),
+                ("Nanometer (nm)", "Nanometer (nm)", 1e-9),
+                ("Meile (mi)", "Mile (mi)", 1609.344),
+                ("Fuß (ft)", "Foot (ft)", 0.3048),
+                ("Zoll (in)", "Inch (in)", 0.0254),
             ],
             Self::Mass => &[
-                ("Kilogramm (kg)", 1.0),
-                ("Gramm (g)", 0.001),
-                ("Milligramm (mg)", 1e-6),
-                ("Tonne (t)", 1000.0),
-                ("Pfund (lb)", 0.45359237),
-                ("Unze (oz)", 0.0283495231),
+                ("Kilogramm (kg)", "Kilogram (kg)", 1.0),
+                ("Gramm (g)", "Gram (g)", 0.001),
+                ("Milligramm (mg)", "Milligram (mg)", 1e-6),
+                ("Tonne (t)", "Tonne (t)", 1000.0),
+                ("Pfund (lb)", "Pound (lb)", 0.45359237),
+                ("Unze (oz)", "Ounce (oz)", 0.0283495231),
             ],
             Self::Temperature => &[
-                ("Celsius (°C)", 1.0),
-                ("Kelvin (K)", 1.0),
-                ("Fahrenheit (°F)", 1.0),
+                ("Celsius (°C)", "Celsius (°C)", 1.0),
+                ("Kelvin (K)", "Kelvin (K)", 1.0),
+                ("Fahrenheit (°F)", "Fahrenheit (°F)", 1.0),
             ],
             Self::Speed => &[
-                ("Meter/Sekunde (m/s)", 1.0),
-                ("Kilometer/Stunde (km/h)", 1.0 / 3.6),
-                ("Meilen/Stunde (mph)", 0.44704),
-                ("Knoten (kn)", 0.514444),
-                ("Lichtgeschwindigkeit (c₀)", crate::constants::SPEED_OF_LIGHT),
+                ("Meter/Sekunde (m/s)", "Meters/second (m/s)", 1.0),
+                ("Kilometer/Stunde (km/h)", "Kilometers/hour (km/h)", 1.0 / 3.6),
+                ("Meilen/Stunde (mph)", "Miles/hour (mph)", 0.44704),
+                ("Knoten (kn)", "Knot (kn)", 0.514444),
+                ("Lichtgeschwindigkeit (c₀)", "Speed of light (c₀)", crate::constants::SPEED_OF_LIGHT),
             ],
             Self::Energy => &[
-                ("Joule (J)", 1.0),
-                ("Kilojoule (kJ)", 1000.0),
-                ("Wattstunde (Wh)", 3600.0),
-                ("Kilowattstunde (kWh)", 3_600_000.0),
-                ("Elektronenvolt (eV)", crate::constants::ELECTRON_CHARGE),
-                ("Kalorie (cal)", 4.184),
+                ("Joule (J)", "Joule (J)", 1.0),
+                ("Kilojoule (kJ)", "Kilojoule (kJ)", 1000.0),
+                ("Wattstunde (Wh)", "Watt-hour (Wh)", 3600.0),
+                ("Kilowattstunde (kWh)", "Kilowatt-hour (kWh)", 3_600_000.0),
+                ("Elektronenvolt (eV)", "Electronvolt (eV)", crate::constants::ELECTRON_CHARGE),
+                ("Kalorie (cal)", "Calorie (cal)", 4.184),
             ],
             Self::Angle => &[
-                ("Radiant (rad)", 1.0),
-                ("Grad (°)", std::f64::consts::PI / 180.0),
-                ("Gon (grad)", std::f64::consts::PI / 200.0),
+                ("Radiant (rad)", "Radian (rad)", 1.0),
+                ("Grad (°)", "Degree (°)", std::f64::consts::PI / 180.0),
+                ("Gon (grad)", "Gradian (grad)", std::f64::consts::PI / 200.0),
             ],
             Self::Data => &[
-                ("Byte (B)", 1.0),
-                ("Kilobyte (KB)", 1000.0),
-                ("Megabyte (MB)", 1e6),
-                ("Gigabyte (GB)", 1e9),
-                ("Kibibyte (KiB)", 1024.0),
-                ("Mebibyte (MiB)", 1_048_576.0),
+                ("Byte (B)", "Byte (B)", 1.0),
+                ("Kilobyte (KB)", "Kilobyte (KB)", 1000.0),
+                ("Megabyte (MB)", "Megabyte (MB)", 1e6),
+                ("Gigabyte (GB)", "Gigabyte (GB)", 1e9),
+                ("Kibibyte (KiB)", "Kibibyte (KiB)", 1024.0),
+                ("Mebibyte (MiB)", "Mebibyte (MiB)", 1_048_576.0),
             ],
         }
     }
@@ -1074,7 +1213,6 @@ struct NiobCalculatorApp {
     history: Vec<HistoryItem>,
     active_tab: MainTab,
     active_section: KeyboardSection,
-    aux_section: KeyboardSection,
     dual_keyboard: bool,
     show_hex_row: bool,
     keyboard_scale: f32, // 0.9 = small, 1.0 = default, 1.12 = large
@@ -1090,6 +1228,16 @@ struct NiobCalculatorApp {
     constants_search: String,
     var_edit_name: String,
     var_edit_value: String,
+    /// Rückmeldung des Variablen-Editors (Text, ist Fehler).
+    var_status: Option<(String, bool)>,
+    /// Rückmeldung nach „Auf Tastatur“ in der Konstantenliste.
+    const_status: Option<String>,
+    /// Hinweis im Plotter (z. B. wenn eine Funktion ersetzt wurde).
+    plot_notice: Option<String>,
+    /// Zuletzt gespeicherte Bedien-Einstellungen (Änderungen werden gespeichert).
+    last_saved_prefs: Option<UiPrefs>,
+    /// Sprache, für die der Fenstertitel zuletzt gesetzt wurde.
+    window_title_de: Option<bool>,
 
     // 2D Function Plotter state (`FunctionPlotting2DView`)
     plot_functions: Vec<PlotFunction>,
@@ -1123,8 +1271,12 @@ struct NiobCalculatorApp {
 impl NiobCalculatorApp {
     fn new(screenshot_path: Option<PathBuf>) -> Self {
         let mut engine = MathEngine::default();
+        // Keine stillen Vorbelegungen (a = 5, b = 3, x = 2): `x+1` soll bei
+        // einer frischen Installation nicht einfach 3 ergeben.
+        engine.variables.clear();
         let mut history = Vec::new();
         let mut input_expr = String::new();
+        let mut prefs = UiPrefs::default();
 
         if screenshot_path.is_some() {
             // Populate initial history with representative scientific expressions
@@ -1151,13 +1303,13 @@ impl NiobCalculatorApp {
                 }
             }
             input_expr = mathview::to_display_syntax("sqrt(2)/2 + sin(pi/4)");
-        } else {
-            state_json::load_state_from_disk(&mut engine, &mut history);
+        } else if let Some(saved) = state_json::load_state_from_disk(&mut engine, &mut history) {
+            prefs = saved;
         }
+        engine.show_exact_first = prefs.show_exact_first;
+        engine.auto_ans_insertion = prefs.auto_ans_insertion;
 
-        let keyboard_slots = DEFAULT_KEYBOARD_SLOTS.map(|s| s.to_string());
-
-        Self {
+        let mut app = Self {
             engine,
             input_sel: (input_expr.chars().count(), input_expr.chars().count()),
             pending_cursor: Some(input_expr.chars().count()),
@@ -1167,33 +1319,37 @@ impl NiobCalculatorApp {
             history,
             active_tab: MainTab::Calculator,
             active_section: KeyboardSection::Operators,
-            aux_section: KeyboardSection::Numbers,
-            dual_keyboard: true,
-            show_hex_row: false,
-            keyboard_scale: 1.0,
-            german_ui: true,
-            theme_mode: ThemeMode::Dark,
-            accent_seed: AccentSeed::NiobEmerald,
-            keyboard_slots,
+            dual_keyboard: prefs.dual_keyboard,
+            show_hex_row: prefs.show_hex_row,
+            keyboard_scale: prefs.keyboard_scale,
+            german_ui: prefs.german_ui,
+            theme_mode: prefs.theme_mode,
+            accent_seed: prefs.accent_seed,
+            keyboard_slots: prefs.keyboard_slots.clone(),
             selected_slot_to_assign: 0,
             constants_search: String::new(),
             var_edit_name: "a".to_string(),
-            var_edit_value: "5".to_string(),
+            var_edit_value: String::new(),
+            var_status: None,
+            const_status: None,
+            plot_notice: None,
+            last_saved_prefs: None,
+            window_title_de: None,
             plot_functions: vec![
                 PlotFunction {
                     expr: mathview::to_display_syntax("sin(x) * cos(x/2)"),
                     visible: true,
-                    color: Color32::from_rgb(0x3D, 0xDC, 0x84),
+                    color_idx: 0,
                 },
                 PlotFunction {
                     expr: mathview::to_display_syntax("x^2 / 4 - 2"),
                     visible: true,
-                    color: Color32::from_rgb(0x64, 0xB5, 0xF6),
+                    color_idx: 1,
                 },
                 PlotFunction {
                     expr: mathview::to_display_syntax("exp(-x^2 / 3) * 2"),
                     visible: true,
-                    color: Color32::from_rgb(0xFF, 0xB7, 0x4D),
+                    color_idx: 2,
                 },
             ],
             plot_center_x: 0.0,
@@ -1215,13 +1371,43 @@ impl NiobCalculatorApp {
             screenshot_path,
             frame_count: 0,
             screenshot_requested: false,
+        };
+        app.last_saved_prefs = Some(app.ui_prefs());
+        app
+    }
+
+    /// Aktuelle Bedien-Einstellungen für die Zustandsdatei.
+    fn ui_prefs(&self) -> UiPrefs {
+        UiPrefs {
+            theme_mode: self.theme_mode,
+            accent_seed: self.accent_seed,
+            german_ui: self.german_ui,
+            dual_keyboard: self.dual_keyboard,
+            show_hex_row: self.show_hex_row,
+            keyboard_scale: self.keyboard_scale,
+            keyboard_slots: self.keyboard_slots.clone(),
+            show_exact_first: self.engine.show_exact_first,
+            auto_ans_insertion: self.engine.auto_ans_insertion,
         }
+    }
+
+    fn save_state(&mut self) {
+        let prefs = self.ui_prefs();
+        if self.screenshot_path.is_none() {
+            state_json::save_state_to_disk(&self.engine, &self.history, &prefs);
+        }
+        self.last_saved_prefs = Some(prefs);
     }
 
     fn mark_state_dirty(&mut self) {
         self.eval_revision = self.eval_revision.wrapping_add(1);
-        if self.screenshot_path.is_none() {
-            state_json::save_state_to_disk(&self.engine, &self.history);
+        self.save_state();
+    }
+
+    /// Geänderte Bedien-Einstellungen sofort speichern.
+    fn persist_prefs_if_changed(&mut self) {
+        if self.last_saved_prefs.as_ref() != Some(&self.ui_prefs()) {
+            self.save_state();
         }
     }
 
@@ -1484,12 +1670,13 @@ impl NiobCalculatorApp {
     }
 
     fn render_top_bar(&mut self, ui: &mut Ui, pal: &MaterialYouPalette) {
-        // Schmale Fenster: kurzer Titel, Knöpfe nur mit Symbol, damit sich
-        // Titel und Bedienelemente nicht überlagern.
+        // Schmale Fenster: kurzer Titel, Knöpfe nur mit Symbol. Akzentfarbe und
+        // Tastaturlayout stehen nur noch in den Einstellungen.
         let compact = ui.available_width() < 640.0;
-        ui.horizontal_wrapped(|ui| {
+        let de = self.german_ui;
+        ui.horizontal(|ui| {
             ui.label(
-                RichText::new(match (compact, self.german_ui) {
+                RichText::new(match (compact, de) {
                     (true, _) => "Niob",
                     (false, true) => "Niob Rechner",
                     (false, false) => "Niob Calculator",
@@ -1500,39 +1687,45 @@ impl NiobCalculatorApp {
             );
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                // Language toggle DE / EN
-                let lang_lbl = if self.german_ui { "DE" } else { "EN" };
                 if ui
                     .add(
                         egui::Button::new(
-                            RichText::new(lang_lbl)
+                            RichText::new(if de { "DE" } else { "EN" })
                                 .font(FontId::proportional(12.0))
                                 .strong(),
                         )
                         .corner_radius(CornerRadius::same(10)),
                     )
-                    .on_hover_text("Sprache wechseln / Toggle Language")
+                    .on_hover_text(if de {
+                        "Sprache: Deutsch – klicken für Englisch"
+                    } else {
+                        "Language: English – click for German"
+                    })
                     .clicked()
                 {
-                    self.german_ui = !self.german_ui;
+                    self.german_ui = !de;
                 }
 
-                // Theme Mode cycle button (Dark / Light / AMOLED)
-                let mode_icon = match (self.theme_mode, compact) {
-                    (ThemeMode::Dark, false) => "🌙 Dark",
-                    (ThemeMode::Light, false) => "☀ Light",
-                    (ThemeMode::Amoled, false) => "⬛ AMOLED",
-                    (ThemeMode::Dark, true) => "🌙",
-                    (ThemeMode::Light, true) => "☀",
-                    (ThemeMode::Amoled, true) => "⬛",
+                let icon = match self.theme_mode {
+                    ThemeMode::Dark => "🌙",
+                    ThemeMode::Light => "☀",
+                    ThemeMode::Amoled => "⬛",
+                };
+                let mode_label = if compact {
+                    icon.to_string()
+                } else {
+                    format!("{icon} {}", self.theme_mode.short_label(de))
                 };
                 if ui
                     .add(
-                        egui::Button::new(
-                            RichText::new(mode_icon).font(FontId::proportional(12.0)),
-                        )
-                        .corner_radius(CornerRadius::same(10)),
+                        egui::Button::new(RichText::new(mode_label).font(FontId::proportional(12.0)))
+                            .corner_radius(CornerRadius::same(10)),
                     )
+                    .on_hover_text(if de {
+                        "Farbmodus wechseln (Dunkel → Hell → AMOLED)"
+                    } else {
+                        "Switch color mode (Dark → Light → AMOLED)"
+                    })
                     .clicked()
                 {
                     self.theme_mode = match self.theme_mode {
@@ -1542,70 +1735,6 @@ impl NiobCalculatorApp {
                     };
                 }
 
-                // Material You Seed Color quick dots
-                for seed in [
-                    AccentSeed::NiobEmerald,
-                    AccentSeed::DynamicViolet,
-                    AccentSeed::OceanBlue,
-                    AccentSeed::SunsetOrange,
-                    AccentSeed::RosePink,
-                ] {
-                    let c = seed.seed_color();
-                    let selected = self.accent_seed == seed;
-                    let size = if selected { 18.0 } else { 14.0 };
-                    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
-                    ui.painter().circle_filled(rect.center(), size * 0.45, c);
-                    if selected {
-                        ui.painter().circle_stroke(
-                            rect.center(),
-                            size * 0.48,
-                            Stroke::new(2.0_f32, pal.on_surface),
-                        );
-                    }
-                    if resp.on_hover_text(seed.name_de()).clicked() {
-                        self.accent_seed = seed;
-                    }
-                }
-
-                // Dual Keyboard toggle pill
-                let dual_txt = if compact {
-                    "⌨"
-                } else if self.dual_keyboard {
-                    if self.german_ui {
-                        "⌨ Dual-Tastatur"
-                    } else {
-                        "⌨ Dual Pad"
-                    }
-                } else if self.german_ui {
-                    "⌨ Einzel-Tastatur"
-                } else {
-                    "⌨ Single Pad"
-                };
-                if ui
-                    .add(
-                        egui::Button::new(
-                            RichText::new(dual_txt)
-                                .font(FontId::proportional(12.0))
-                                .color(if self.dual_keyboard {
-                                    pal.on_primary_container
-                                } else {
-                                    pal.on_surface_variant
-                                }),
-                        )
-                        .fill(if self.dual_keyboard {
-                            pal.primary_container
-                        } else {
-                            pal.surface_container_high
-                        })
-                        .corner_radius(CornerRadius::same(10)),
-                    )
-                    .on_hover_text(if self.german_ui { "Dual-/Einzel-Tastatur umschalten" } else { "Toggle dual/single keypad" })
-                    .clicked()
-                {
-                    self.dual_keyboard = !self.dual_keyboard;
-                }
-
-                // Angle mode quick pill (RAD / DEG)
                 let angle_str = match self.engine.angle_mode {
                     AngleMode::Radians => "RAD",
                     AngleMode::Degrees => "DEG",
@@ -1621,7 +1750,11 @@ impl NiobCalculatorApp {
                         .fill(pal.tertiary_container)
                         .corner_radius(CornerRadius::same(10)),
                     )
-                    .on_hover_text("Bogenmaß (RAD) / Gradmaß (DEG) umschalten")
+                    .on_hover_text(if de {
+                        "Winkelmaß: Bogenmaß (RAD) / Gradmaß (DEG) umschalten"
+                    } else {
+                        "Angle unit: toggle radians (RAD) / degrees (DEG)"
+                    })
                     .clicked()
                 {
                     self.engine.angle_mode = match self.engine.angle_mode {
@@ -1634,62 +1767,50 @@ impl NiobCalculatorApp {
         });
     }
 
-    fn render_bottom_nav(&mut self, ui: &mut Ui, pal: &MaterialYouPalette) {
-        let tabs = [
-            (
-                MainTab::Calculator,
-                if self.german_ui {
-                    "Rechner"
-                } else {
-                    "Calculator"
-                },
-            ),
-            (
-                MainTab::Plotter,
-                if self.german_ui {
-                    "2D-Plotter"
-                } else {
-                    "Graphing"
-                },
-            ),
-            (
-                MainTab::VariablesAndConstants,
-                if self.german_ui {
-                    "Konstanten & Var."
-                } else {
-                    "Constants & Vars"
-                },
-            ),
-            (
-                MainTab::ConverterAndSettings,
-                if self.german_ui {
-                    "Einstellungen & Setup"
-                } else {
-                    "Settings & Setup"
-                },
-            ),
-        ];
+    fn tab_label(&self, tab: MainTab, compact: bool) -> &'static str {
+        match (tab, self.german_ui, compact) {
+            (MainTab::Calculator, true, _) => "Rechner",
+            (MainTab::Calculator, false, _) => "Calculator",
+            (MainTab::Plotter, true, false) => "2D-Plotter",
+            (MainTab::Plotter, true, true) => "Plotter",
+            (MainTab::Plotter, false, _) => "Graphing",
+            (MainTab::VariablesAndConstants, true, false) => "Konstanten & Einheiten",
+            (MainTab::VariablesAndConstants, true, true) => "Konstanten",
+            (MainTab::VariablesAndConstants, false, false) => "Constants & Units",
+            (MainTab::VariablesAndConstants, false, true) => "Constants",
+            (MainTab::Settings, true, _) => "Einstellungen",
+            (MainTab::Settings, false, _) => "Settings",
+        }
+    }
 
+    fn render_bottom_nav(&mut self, ui: &mut Ui, pal: &MaterialYouPalette) {
+        let compact = ui.available_width() < 640.0;
+        let tabs = [
+            MainTab::Calculator,
+            MainTab::Plotter,
+            MainTab::VariablesAndConstants,
+            MainTab::Settings,
+        ];
+        let titles = tabs.map(|t| (self.tab_label(t, compact), self.tab_label(t, false)));
+        let font = if compact { 12.5 } else { 13.5 };
         ui.columns(tabs.len(), |cols| {
-            for (i, (tab, title)) in tabs.iter().enumerate() {
+            for (i, tab) in tabs.iter().enumerate() {
                 let is_active = self.active_tab == *tab;
-                let fill = if is_active {
-                    pal.primary_container
+                let (fill, text_col) = if is_active {
+                    (pal.primary_container, pal.on_primary_container)
                 } else {
-                    Color32::TRANSPARENT
-                };
-                let text_col = if is_active {
-                    pal.on_primary_container
-                } else {
-                    pal.on_surface_variant
+                    (Color32::TRANSPARENT, pal.on_surface_variant)
                 };
                 cols[i].vertical_centered(|ui| {
+                    ui.spacing_mut().button_padding.x = if compact { 4.0 } else { 10.0 };
+                    // Nie mitten im Wort umbrechen („Einstellunge|n“), notfalls kürzen
                     let btn = egui::Button::new(
-                        RichText::new(*title)
-                            .font(FontId::proportional(13.5))
+                        RichText::new(titles[i].0)
+                            .font(FontId::proportional(font))
                             .strong()
                             .color(text_col),
                     )
+                    .wrap_mode(egui::TextWrapMode::Truncate)
                     .fill(fill)
                     .stroke(if is_active {
                         Stroke::new(1.5_f32, pal.primary)
@@ -1698,23 +1819,11 @@ impl NiobCalculatorApp {
                     })
                     .corner_radius(CornerRadius::same(18))
                     .min_size(egui::vec2(ui.available_width() * 0.94, 34.0));
-
-                    if ui.add(btn).clicked() {
+                    if ui.add(btn).on_hover_text(titles[i].1).clicked() {
                         self.active_tab = *tab;
                     }
                 });
             }
-        });
-
-        // Android 12 System Gesture Navigation Pill
-        ui.add_space(4.0);
-        ui.vertical_centered(|ui| {
-            let (pill_rect, _) = ui.allocate_exact_size(egui::vec2(130.0, 5.0), Sense::hover());
-            ui.painter().rect_filled(
-                pill_rect,
-                CornerRadius::same(3),
-                pal.on_surface_variant,
-            );
         });
     }
 
@@ -1727,18 +1836,16 @@ impl NiobCalculatorApp {
         const HISTORY_MIN_BODY: f32 = 70.0; // Kopfzeile + ein Eintrag
         const KEYBOARD_MIN_CARD: f32 = 225.0;
         let total_h = ui.available_height();
-        let kb_target = (total_h * 0.47 * self.keyboard_scale).clamp(KEYBOARD_MIN_CARD, 340.0);
+        let kb_target = (total_h * 0.47 * self.keyboard_scale).clamp(KEYBOARD_MIN_CARD, 440.0);
         let history_body =
             total_h - self.last_input_bar_height - kb_target - 2.0 * GAP - HISTORY_FRAME_EXTRA;
         let show_history = history_body >= HISTORY_MIN_BODY;
 
-        // 1. Top Area: TermHistoryRecyclerView (`@id/term_history_list_view`)
         if show_history {
             self.render_history(ui, pal, history_body);
             ui.add_space(GAP);
         }
 
-        // 2. Middle Area: Editable User Input TermView (`user_input_termview_layout.xml`)
         let input_card = Frame::new()
             .fill(pal.surface_container)
             .corner_radius(CornerRadius::same(16))
@@ -1752,91 +1859,49 @@ impl NiobCalculatorApp {
 
         ui.add_space(GAP);
 
-        // 3. Bottom Keyboard Card (`main_keyboard_layout.xml`, corner radius 20dp + `@id/main_keyboard_drag_bar`)
+        let de = self.german_ui;
         Frame::new()
             .fill(pal.surface_container)
             .corner_radius(CornerRadius::same(KEYBOARD_CARD_CORNER_RADIUS as u8))
             .inner_margin(egui::Margin::same(10))
             .stroke(Stroke::new(1.0_f32, pal.outline_variant))
             .show(ui, |ui| {
-                // Centered 64dp Android Drag Handle Bar (`@id/main_keyboard_drag_bar` from `main_keyboard_layout.xml`)
-                ui.vertical_centered(|ui| {
-                    let (drag_rect, drag_resp) =
-                        ui.allocate_exact_size(egui::vec2(64.0, 10.0), Sense::click());
-                    let bar_rect = egui::Rect::from_center_size(
-                        drag_rect.center(),
-                        egui::vec2(64.0, 4.0),
-                    );
-                    ui.painter().rect_filled(
-                        bar_rect,
-                        CornerRadius::same(2),
-                        if drag_resp.hovered() {
-                            pal.primary
-                        } else {
-                            pal.on_surface_variant
-                        },
-                    );
-                    if drag_resp
-                        .on_hover_text(if self.german_ui {
-                            "Ziehleiste (@id/main_keyboard_drag_bar) — Klicken für Zweittastatur (Dual-Ansicht)"
-                        } else {
-                            "Drag handle (@id/main_keyboard_drag_bar) — Click to toggle Auxiliary Keyboard"
-                        })
-                        .clicked()
-                    {
-                        self.dual_keyboard = !self.dual_keyboard;
-                    }
-                });
-                ui.add_space(2.0);
-
-                // Section Selector Header Bar (`height = 32.0` dp)
+                // Im Dual-Modus ist der Ziffernblock immer rechts zu sehen; sein
+                // Reiter entfällt, damit nur ein Reiter als aktiv erscheint.
+                if self.dual_keyboard && self.active_section == KeyboardSection::Numbers {
+                    self.active_section = KeyboardSection::Operators;
+                }
+                let sections: Vec<KeyboardSection> = KeyboardSection::ALL
+                    .into_iter()
+                    .filter(|s| !(self.dual_keyboard && *s == KeyboardSection::Numbers))
+                    .collect();
                 ui.allocate_ui_with_layout(
                     egui::vec2(ui.available_width(), KEYBOARD_SECTION_BAR_HEIGHT),
                     Layout::left_to_right(Align::Center),
                     |ui| {
-                        ui.columns(KeyboardSection::ALL.len(), |cols| {
-                            for (i, sec) in KeyboardSection::ALL.iter().enumerate() {
-                                let is_selected = if self.dual_keyboard && *sec == KeyboardSection::Numbers {
-                                    true
+                        ui.columns(sections.len(), |cols| {
+                            for (i, sec) in sections.iter().enumerate() {
+                                let active = self.active_section == *sec;
+                                let (fill, fg) = if active {
+                                    (pal.primary, pal.on_primary)
                                 } else {
-                                    self.active_section == *sec
+                                    (pal.surface_container_high, pal.on_surface)
                                 };
-                                let fill = if self.active_section == *sec {
-                                    pal.primary
-                                } else if is_selected {
-                                    pal.primary_container
-                                } else {
-                                    pal.surface_container_high
-                                };
-                                let fg = if self.active_section == *sec {
-                                    pal.on_primary
-                                } else if is_selected {
-                                    pal.on_primary_container
-                                } else {
-                                    pal.on_surface
-                                };
-
                                 cols[i].vertical_centered(|ui| {
-                                    let btn = egui::Button::new(egui::WidgetText::from(
-                                        mathview::rich_job(
-                                            sec.label(self.german_ui),
-                                            FontId::proportional(13.0),
-                                            fg,
-                                        ),
-                                    ))
+                                    let btn = egui::Button::new(egui::WidgetText::from(mathview::rich_job(
+                                        sec.label(),
+                                        FontId::proportional(13.0),
+                                        fg,
+                                    )))
+                                    .wrap_mode(egui::TextWrapMode::Extend)
                                     .fill(fill)
                                     .corner_radius(CornerRadius::same(14))
                                     .min_size(egui::vec2(
                                         ui.available_width() * 0.95,
                                         KEYBOARD_SECTION_BAR_HEIGHT - 4.0,
                                     ));
-                                    if ui.add(btn).clicked() {
-                                        if self.dual_keyboard && *sec == KeyboardSection::Numbers {
-                                            self.dual_keyboard = false;
-                                            self.active_section = KeyboardSection::Numbers;
-                                        } else {
-                                            self.active_section = *sec;
-                                        }
+                                    if ui.add(btn).on_hover_text(sec.tooltip(de)).clicked() {
+                                        self.active_section = *sec;
                                     }
                                 });
                             }
@@ -1846,14 +1911,15 @@ impl NiobCalculatorApp {
 
                 ui.add_space(4.0);
 
-                // Keyboard body: Dual Keyboard (Left: Scientific section, Right: 1 2 3 Number pad) or Single Keyboard
+                // Hex-Zeile über die volle Breite, damit beide Tastenhälften gleich
+                // hoch bleiben und ihre Reihen bündig abschließen.
+                if self.show_hex_row && (self.dual_keyboard || self.active_section == KeyboardSection::Numbers) {
+                    let h = (ui.available_height() * 0.16).clamp(26.0, 44.0);
+                    self.render_hex_row(ui, h, pal);
+                }
+
                 if self.dual_keyboard {
-                    let sci_sec = if self.active_section == KeyboardSection::Numbers {
-                        KeyboardSection::Operators
-                    } else {
-                        self.active_section
-                    };
-                    let _ = self.aux_section;
+                    let sci_sec = self.active_section;
                     ui.columns(2, |cols| {
                         self.render_keyboard_section(&mut cols[0], sci_sec, pal);
                         self.render_keyboard_section(&mut cols[1], KeyboardSection::Numbers, pal);
@@ -1864,8 +1930,31 @@ impl NiobCalculatorApp {
             });
     }
 
+    /// Hex-Ziffern A–F (`keyboard_hex_number_section.xml`).
+    fn render_hex_row(&mut self, ui: &mut Ui, h: f32, pal: &MaterialYouPalette) {
+        ui.columns(6, |cols| {
+            for (i, hex_ch) in ["A", "B", "C", "D", "E", "F"].iter().enumerate() {
+                if Self::key_btn(&mut cols[i], hex_ch, h, pal.tertiary_container, pal.on_tertiary_container) {
+                    let before = self.text_before_cursor();
+                    if !before.ends_with("0x")
+                        && !before
+                            .chars()
+                            .last()
+                            .map(|c| c.is_ascii_hexdigit())
+                            .unwrap_or(false)
+                    {
+                        self.insert_token(&format!("0x{}", hex_ch));
+                    } else {
+                        self.insert_token(hex_ch);
+                    }
+                }
+            }
+        });
+    }
+
     /// Rechenverlauf mit Formelsatz für Eingaben und exakte Ergebnisse.
     fn render_history(&mut self, ui: &mut Ui, pal: &MaterialYouPalette, body_height: f32) {
+        let de = self.german_ui;
         Frame::new()
             .fill(pal.surface_container_low)
             .corner_radius(CornerRadius::same(16))
@@ -1873,27 +1962,29 @@ impl NiobCalculatorApp {
             .stroke(Stroke::new(1.0_f32, pal.outline_variant))
             .show(ui, |ui| {
                 ui.set_height(body_height);
+                ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.label(
-                        RichText::new(if self.german_ui {
-                            "Rechenverlauf (Klick auf exakt / dezimal wechselt Darstellung)"
-                        } else {
-                            "Calculation History (Click exact / decim. to toggle format)"
-                        })
-                        .font(FontId::proportional(11.5))
-                        .color(pal.on_surface_variant),
-                    );
+                        RichText::new(if de { "Rechenverlauf" } else { "History" })
+                            .font(FontId::proportional(12.5))
+                            .strong()
+                            .color(pal.on_surface_variant),
+                    )
+                    .on_hover_text(if de {
+                        "Klick auf Ausdruck oder Ergebnis übernimmt es in die Eingabe. „exakt“/„dezimal“ wechselt die Darstellung."
+                    } else {
+                        "Click an expression or result to reuse it. “exact”/“decimal” switches the format."
+                    });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if self.history.is_empty() {
                             self.confirm_clear_history = false;
                         } else if self.confirm_clear_history {
-                            if ui.small_button(if self.german_ui { "Abbrechen" } else { "Cancel" }).clicked() {
+                            if ui.small_button(if de { "Abbrechen" } else { "Cancel" }).clicked() {
                                 self.confirm_clear_history = false;
                             }
                             if ui
                                 .small_button(
-                                    RichText::new(if self.german_ui { "Ja, leeren" } else { "Yes, clear" })
-                                        .color(pal.error),
+                                    RichText::new(if de { "Ja, leeren" } else { "Yes, clear" }).color(pal.error),
                                 )
                                 .clicked()
                             {
@@ -1902,16 +1993,12 @@ impl NiobCalculatorApp {
                                 self.mark_state_dirty();
                             }
                             ui.label(
-                                RichText::new(if self.german_ui {
-                                    "Gesamten Verlauf löschen?"
-                                } else {
-                                    "Delete entire history?"
-                                })
-                                .font(FontId::proportional(11.5))
-                                .color(pal.error),
+                                RichText::new(if de { "Gesamten Verlauf löschen?" } else { "Delete entire history?" })
+                                    .font(FontId::proportional(11.5))
+                                    .color(pal.error),
                             );
                         } else if ui
-                            .small_button(if self.german_ui { "Verlauf leeren" } else { "Clear History" })
+                            .small_button(if de { "Verlauf leeren" } else { "Clear history" })
                             .clicked()
                         {
                             self.confirm_clear_history = true;
@@ -1919,6 +2006,27 @@ impl NiobCalculatorApp {
                     });
                 });
                 ui.add_space(4.0);
+
+                if self.history.is_empty() {
+                    ui.add_space(12.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new(if de { "Noch keine Berechnungen" } else { "No calculations yet" })
+                                .font(FontId::proportional(14.5))
+                                .color(pal.on_surface_variant),
+                        );
+                        ui.label(
+                            RichText::new(if de {
+                                "Ausdruck eingeben und Enter oder „=“ drücken. Später übernimmt ein Klick auf einen Eintrag ihn wieder in die Eingabe."
+                            } else {
+                                "Type an expression and press Enter or “=”. Later, click an entry to reuse it."
+                            })
+                            .font(FontId::proportional(12.0))
+                            .color(pal.on_surface_variant),
+                        );
+                    });
+                    return;
+                }
 
                 ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -1934,13 +2042,11 @@ impl NiobCalculatorApp {
                                 .corner_radius(CornerRadius::same(12))
                                 .inner_margin(egui::Margin::symmetric(12, 6))
                                 .show(ui, |ui| {
-                                    // Row 1 (`@id/input_term_view` from `term_input_result_combination_layout.xml`):
-                                    // Left-aligned input expression + right-aligned plot/delete actions
+                                    ui.set_min_width(ui.available_width());
+                                    // Zeile 1: Eingabe links, Aktionen rechts
                                     ui.horizontal(|ui| {
-                                        let pretty_in =
-                                            MathEngine::prettify_expression(&item.raw_input);
-                                        // Platz rechts für „Plot“ und „×“ freihalten
-                                        let max_w = (ui.available_width() - 90.0).max(60.0);
+                                        let pretty_in = MathEngine::prettify_expression(&item.raw_input);
+                                        let max_w = (ui.available_width() - 110.0).max(60.0);
                                         if mathview::show_math(
                                             ui,
                                             &item.raw_input,
@@ -1951,107 +2057,80 @@ impl NiobCalculatorApp {
                                             Sense::click(),
                                         )
                                         .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                        .on_hover_text(if self.german_ui {
-                                                "Klicken, um Ausdruck in die Eingabe zu übernehmen"
-                                            } else {
-                                                "Click to paste expression to input"
-                                            })
-                                            .clicked()
+                                        .on_hover_text(if de {
+                                            "Klicken, um den Ausdruck in die Eingabe zu übernehmen"
+                                        } else {
+                                            "Click to paste the expression into the input"
+                                        })
+                                        .clicked()
                                         {
                                             paste_text = Some(item.raw_input.clone());
                                         }
 
-                                        ui.with_layout(
-                                            Layout::right_to_left(Align::Center),
-                                            |ui| {
-                                                if ui
-                                                    .add(
-                                                        egui::Button::new(
-                                                            RichText::new("×")
-                                                                .font(FontId::proportional(14.0))
-                                                                .color(pal.on_surface_variant),
-                                                        )
-                                                        .frame(false),
+                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                            if ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        RichText::new("×")
+                                                            .font(FontId::proportional(14.0))
+                                                            .color(pal.on_surface_variant),
                                                     )
-                                                    .on_hover_text(if self.german_ui {
-                                                        "Eintrag löschen"
+                                                    .min_size(egui::vec2(24.0, 22.0))
+                                                    .corner_radius(CornerRadius::same(8)),
+                                                )
+                                                .on_hover_text(if de { "Eintrag löschen" } else { "Delete entry" })
+                                                .clicked()
+                                            {
+                                                delete_idx = Some(idx);
+                                            }
+
+                                            if !item.is_error && plottable_in_x(&item.raw_input) {
+                                                if ui
+                                                    .small_button(if de { "Plotten" } else { "Plot" })
+                                                    .on_hover_text(if de {
+                                                        "Im 2D-Plotter als neue Funktion zeichnen"
                                                     } else {
-                                                        "Delete item"
+                                                        "Draw as a new function in the 2D plotter"
                                                     })
                                                     .clicked()
                                                 {
-                                                    delete_idx = Some(idx);
+                                                    plot_expr = Some(item.raw_input.clone());
                                                 }
-
-                                                if item.raw_input.contains('x')
-                                                    && !item.raw_input.contains("int(")
-                                                {
-                                                    if ui
-                                                        .small_button("Plot")
-                                                        .on_hover_text(if self.german_ui {
-                                                            "Im 2D-Funktionsplotter zeichnen"
-                                                        } else {
-                                                            "Plot in 2D Graph"
-                                                        })
-                                                        .clicked()
-                                                    {
-                                                        plot_expr = Some(item.raw_input.clone());
-                                                    }
-                                                }
-                                            },
-                                        );
+                                            }
+                                        });
                                     });
 
-                                    // Row 2 (`@id/exact_decimal_switch_button` + `@id/equal_sign_text_view` on left,
-                                    // `@id/result_term_view_exact` / `@id/result_term_view_decimal` right-aligned)
+                                    // Zeile 2: Umschalter exakt/dezimal und „=“ links, Ergebnis rechts
                                     let exact_disp = if item.is_exact && !item.is_error {
                                         format_exact_history_display(&item.exact_result, self.engine.number_format)
                                     } else {
                                         String::new()
                                     };
-                                    let dec_disp = format_decimal_history_display(
-                                        &item.decimal_result,
-                                        self.engine.number_format,
-                                    );
-                                    let is_matrix = item.exact_result.contains("[[")
-                                        || item.decimal_result.contains("[[");
-                                    let can_toggle = !item.is_error
-                                        && item.is_exact
-                                        && !is_matrix
-                                        && exact_disp != dec_disp;
+                                    let dec_disp =
+                                        format_decimal_history_display(&item.decimal_result, self.engine.number_format);
+                                    let is_matrix =
+                                        item.exact_result.contains("[[") || item.decimal_result.contains("[[");
+                                    let can_toggle =
+                                        !item.is_error && item.is_exact && !is_matrix && exact_disp != dec_disp;
                                     let use_exact = if can_toggle {
                                         item.showing_exact
                                     } else {
                                         item.is_exact && !item.is_error
                                     };
-                                    let shown_res: &str = if use_exact {
-                                        &exact_disp
-                                    } else {
-                                        &dec_disp
-                                    };
+                                    let shown_res: &str = if use_exact { &exact_disp } else { &dec_disp };
 
                                     ui.horizontal(|ui| {
                                         if can_toggle {
-                                            let badge_txt = if self.german_ui {
-                                                if item.showing_exact {
-                                                    "exakt"
-                                                } else {
-                                                    "dezimal"
-                                                }
-                                            } else if item.showing_exact {
-                                                "exact"
-                                            } else {
-                                                "decim."
+                                            let badge_txt = match (de, item.showing_exact) {
+                                                (true, true) => "exakt",
+                                                (true, false) => "dezimal",
+                                                (false, true) => "exact",
+                                                (false, false) => "decimal",
                                             };
-                                            let pill_fill = if item.showing_exact {
-                                                pal.primary_container
+                                            let (pill_fill, pill_fg) = if item.showing_exact {
+                                                (pal.primary_container, pal.on_primary_container)
                                             } else {
-                                                pal.secondary_container
-                                            };
-                                            let pill_fg = if item.showing_exact {
-                                                pal.on_primary_container
-                                            } else {
-                                                pal.on_secondary_container
+                                                (pal.secondary_container, pal.on_secondary_container)
                                             };
                                             let btn = egui::Button::new(
                                                 RichText::new(badge_txt)
@@ -2061,16 +2140,10 @@ impl NiobCalculatorApp {
                                             )
                                             .fill(pill_fill)
                                             .corner_radius(CornerRadius::same(10));
-                                            let tooltip = if self.german_ui {
-                                                format!(
-                                                    "Exakt: {}  |  Dezi.: {}",
-                                                    exact_disp, dec_disp
-                                                )
+                                            let tooltip = if de {
+                                                format!("Exakt: {}  |  Dezimal: {}", exact_disp, dec_disp)
                                             } else {
-                                                format!(
-                                                    "Exact: {}  |  Decimal: {}",
-                                                    exact_disp, dec_disp
-                                                )
+                                                format!("Exact: {}  |  Decimal: {}", exact_disp, dec_disp)
                                             };
                                             if ui.add(btn).on_hover_text(tooltip).clicked() {
                                                 item.showing_exact = !item.showing_exact;
@@ -2084,23 +2157,32 @@ impl NiobCalculatorApp {
                                                 .color(pal.on_surface_variant),
                                         );
 
-                                        ui.with_layout(
-                                            Layout::right_to_left(Align::Center),
-                                            |ui| {
-                                                let res_col = if item.is_error {
-                                                    pal.error
-                                                } else {
-                                                    pal.primary
-                                                };
-                                                // Exakte Ergebnisse mit Bruchstrich/Wurzel setzen,
-                                                // alles andere als Text (Hochzahlen angehoben).
-                                                let parse_src = if use_exact && !item.is_error {
-                                                    shown_res
-                                                } else {
-                                                    ""
-                                                };
+                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                            let res_col = if item.is_error { pal.error } else { pal.primary };
+                                            let hint = if de {
+                                                "Klicken, um das Ergebnis einzufügen"
+                                            } else {
+                                                "Click to insert the result"
+                                            };
+                                            // Matrizen als Matrix setzen, exakte Ergebnisse mit
+                                            // Bruchstrich/Wurzel, alles andere als Text.
+                                            let matrix = if is_matrix && !item.is_error {
+                                                mathview::parse_matrix_literal(shown_res)
+                                            } else {
+                                                None
+                                            };
+                                            let resp = if let Some(rows) = matrix {
+                                                mathview::matrix_widget(
+                                                    ui,
+                                                    &rows,
+                                                    HISTORY_TERM_FONT_SIZE - 2.0,
+                                                    res_col,
+                                                    Sense::click(),
+                                                )
+                                            } else {
+                                                let parse_src = if use_exact && !item.is_error { shown_res } else { "" };
                                                 let max_w = ui.available_width();
-                                                if mathview::show_math(
+                                                mathview::show_math(
                                                     ui,
                                                     parse_src,
                                                     shown_res,
@@ -2109,46 +2191,39 @@ impl NiobCalculatorApp {
                                                     max_w,
                                                     Sense::click(),
                                                 )
-                                                .on_hover_text(if self.german_ui {
-                                                        "Klicken, um Ergebnis einzufügen"
-                                                    } else {
-                                                        "Click to insert result"
-                                                    })
-                                                    .clicked()
-                                                {
-                                                    if !item.is_error {
-                                                        paste_text = Some(item.reusable_result.clone());
-                                                    }
-                                                }
-                                            },
-                                        );
+                                            };
+                                            if resp.on_hover_text(hint).clicked() && !item.is_error {
+                                                paste_text = Some(item.reusable_result.clone());
+                                            }
+                                        });
                                     });
 
                                     if let Some(ref rep) = item.integration_report {
-                                        ui.horizontal(|ui| {
-                                            let (info, color) = if rep.converged {
-                                                (
-                                                    format!(
-                                                        "✓ conv. | err ≈ {:.1e} | {} subintervals",
-                                                        rep.abs_err, rep.subintervals
-                                                    ),
-                                                    pal.on_surface_variant,
-                                                )
-                                            } else {
-                                                (
-                                                    format!(
-                                                        "⚠ not converged | {} subintervals",
-                                                        rep.subintervals
-                                                    ),
-                                                    pal.error,
-                                                )
-                                            };
-                                            ui.label(
-                                                RichText::new(info)
-                                                    .font(FontId::proportional(11.0))
-                                                    .color(color),
-                                            );
-                                        });
+                                        let (info, color) = match (rep.converged, de) {
+                                            (true, true) => (
+                                                format!(
+                                                    "✓ konvergiert | Fehler ≈ {:.1e} | {} Teilintervalle",
+                                                    rep.abs_err, rep.subintervals
+                                                ),
+                                                pal.on_surface_variant,
+                                            ),
+                                            (true, false) => (
+                                                format!(
+                                                    "✓ converged | error ≈ {:.1e} | {} subintervals",
+                                                    rep.abs_err, rep.subintervals
+                                                ),
+                                                pal.on_surface_variant,
+                                            ),
+                                            (false, true) => (
+                                                format!("⚠ nicht konvergiert | {} Teilintervalle", rep.subintervals),
+                                                pal.error,
+                                            ),
+                                            (false, false) => (
+                                                format!("⚠ not converged | {} subintervals", rep.subintervals),
+                                                pal.error,
+                                            ),
+                                        };
+                                        ui.label(RichText::new(info).font(FontId::proportional(11.0)).color(color));
                                     }
                                 });
                         }
@@ -2157,9 +2232,7 @@ impl NiobCalculatorApp {
                             self.insert_token(&txt);
                         }
                         if let Some(p_expr) = plot_expr {
-                            self.plot_functions[0].expr = mathview::to_display_syntax(&p_expr);
-                            self.plot_functions[0].visible = true;
-                            self.active_tab = MainTab::Plotter;
+                            self.plot_expression(&p_expr);
                         }
                         if let Some(i) = delete_idx {
                             self.history.remove(i);
@@ -2167,6 +2240,41 @@ impl NiobCalculatorApp {
                         }
                     });
             });
+    }
+
+    /// Ausdruck aus dem Verlauf zeichnen, ohne eine vorhandene Funktion
+    /// stillschweigend zu überschreiben: erst ein leerer Platz, sonst ein
+    /// neuer, und erst wenn alle Plätze belegt sind, wird der letzte ersetzt.
+    fn plot_expression(&mut self, raw: &str) {
+        let expr = mathview::to_display_syntax(raw);
+        let de = self.german_ui;
+        self.plot_notice = None;
+        if let Some(pf) = self.plot_functions.iter_mut().find(|pf| pf.expr == expr) {
+            pf.visible = true;
+        } else if let Some(pf) = self.plot_functions.iter_mut().find(|pf| pf.expr.trim().is_empty()) {
+            pf.expr = expr;
+            pf.visible = true;
+        } else if self.plot_functions.len() < MAX_PLOT_FUNCTIONS {
+            self.add_plot_function(expr);
+        } else if let Some(last) = self.plot_functions.last_mut() {
+            last.expr = expr;
+            last.visible = true;
+            let name = format!("f{}", subscript_number(MAX_PLOT_FUNCTIONS));
+            self.plot_notice = Some(if de {
+                format!("Alle {MAX_PLOT_FUNCTIONS} Plätze waren belegt – {name} wurde ersetzt.")
+            } else {
+                format!("All {MAX_PLOT_FUNCTIONS} slots were in use – {name} was replaced.")
+            });
+        }
+        self.active_tab = MainTab::Plotter;
+    }
+
+    fn add_plot_function(&mut self, expr: String) {
+        let used: Vec<usize> = self.plot_functions.iter().map(|p| p.color_idx).collect();
+        let color_idx = (0..PLOT_COLOR_COUNT)
+            .find(|i| !used.contains(i))
+            .unwrap_or(self.plot_functions.len() % PLOT_COLOR_COUNT);
+        self.plot_functions.push(PlotFunction { expr, visible: true, color_idx });
     }
 
     /// Formelzeile: echtes Textfeld mit Cursor, Auswahl, Einfügen und Rückgängig.
@@ -2274,10 +2382,7 @@ impl NiobCalculatorApp {
             if raw.is_empty() {
                 let ans_s = self.engine.number_format.format_f64(self.engine.ans.re);
                 ui.label(
-                    RichText::new(format!(
-                        "ANS = {}   •   Timeout: {} ms",
-                        ans_s, SYMBOLIC_WATCHDOG_TIMEOUT_MS
-                    ))
+                    RichText::new(format!("ANS = {}", ans_s))
                     .font(FontId::proportional(12.5))
                     .color(pal.on_surface_variant),
                 );
@@ -2389,78 +2494,33 @@ impl NiobCalculatorApp {
         pal: &MaterialYouPalette,
     ) {
         let avail_h = ui.available_height().max(100.0);
+        let sp = ui.spacing().item_spacing.y;
+        // Alle Bereiche haben vier gleich hohe Reihen, damit linke und rechte
+        // Tastenhälfte im Dual-Modus Reihe für Reihe bündig sind.
+        let row_h = ((avail_h - 3.0 * sp - 6.0) / 4.0).max(22.0);
+        let de = self.german_ui;
 
         match section {
             KeyboardSection::Numbers => {
-                // Optional Hex row A B C D E F (`keyboard_hex_number_section.xml`)
-                let hex_h = if self.show_hex_row {
-                    let h = (avail_h * 0.17).max(26.0);
-                    ui.columns(6, |cols| {
-                        for (i, hex_ch) in ["A", "B", "C", "D", "E", "F"].iter().enumerate() {
-                            if Self::key_btn(
-                                &mut cols[i],
-                                hex_ch,
-                                h,
-                                pal.tertiary_container,
-                                pal.on_tertiary_container,
-                            ) {
-                                let before = self.text_before_cursor();
-                                if !before.ends_with("0x")
-                                    && !before
-                                        .chars()
-                                        .last()
-                                        .map(|c| c.is_ascii_hexdigit())
-                                        .unwrap_or(false)
-                                {
-                                    self.insert_token(&format!("0x{}", hex_ch));
-                                } else {
-                                    self.insert_token(hex_ch);
-                                }
-                            }
-                        }
-                    });
-                    h + 4.0
-                } else {
-                    0.0
-                };
-
-                // Authentic `keyboard_number_section.xml` layout:
-                // Left 3 columns (weight 3): 4 rows of digits (`7 8 9`, `4 5 6`, `1 2 3`, `0 . =`)
-                // Right 1 column (weight 1, `layout_rowSpan="4"`): 5 vertically stacked operators (`DEL`, `÷`, `×`, `+`, `−`)
-                let grid_h = (avail_h - hex_h - 6.0).max(100.0);
-                let digit_row_h = ((grid_h - 18.0) / 4.0).max(22.0);
-                let spacing_y = ui.spacing().item_spacing.y;
-                let op_row_h = ((4.0 * digit_row_h - spacing_y) / 5.0).max(16.0);
-
+                // Links drei Spalten Ziffern (`7 8 9` … `0 . =`), rechts fünf
+                // Operatoren (`⌫ ÷ × + −`) über dieselbe Höhe.
+                let op_row_h = ((4.0 * row_h - sp) / 5.0).max(16.0);
                 let dec_lbl = match self.engine.number_format {
-                    NumberFormatMode::SpaceComma
-                    | NumberFormatMode::PointComma
-                    | NumberFormatMode::NoneComma => ",",
-                    NumberFormatMode::SpacePoint
-                    | NumberFormatMode::CommaPoint
-                    | NumberFormatMode::NonePoint => ".",
+                    NumberFormatMode::SpaceComma | NumberFormatMode::PointComma | NumberFormatMode::NoneComma => ",",
+                    NumberFormatMode::SpacePoint | NumberFormatMode::CommaPoint | NumberFormatMode::NonePoint => ".",
                 };
                 let ctx_clone = ui.ctx().clone();
                 ui.columns(4, |cols| {
-                    let digit_cols = [
-                        ["7", "4", "1", "0"],
-                        ["8", "5", "2", dec_lbl],
-                        ["9", "6", "3", "="],
-                    ];
+                    let digit_cols = [["7", "4", "1", "0"], ["8", "5", "2", dec_lbl], ["9", "6", "3", "="]];
                     for (c_idx, col_keys) in digit_cols.iter().enumerate() {
                         for &lbl in col_keys {
                             let is_enter = lbl == "=";
-                            let fill = if is_enter {
-                                pal.primary
+                            let (fill, fg) = if is_enter {
+                                (pal.primary, pal.on_primary)
                             } else {
-                                pal.surface_container_high
+                                (pal.surface_container_high, pal.on_surface)
                             };
-                            let fg = if is_enter {
-                                pal.on_primary
-                            } else {
-                                pal.on_surface
-                            };
-                            if Self::key_btn(&mut cols[c_idx], lbl, digit_row_h, fill, fg) {
+                            if Self::key_btn(&mut cols[c_idx], lbl, row_h, fill, fg) {
                                 if is_enter {
                                     self.evaluate_current(Some(&ctx_clone));
                                 } else if lbl == dec_lbl {
@@ -2472,27 +2532,14 @@ impl NiobCalculatorApp {
                         }
                     }
 
-                    // Rightmost column (`rowSpan="4"` with 5 vertical buttons: `⌫`, `÷`, `×`, `+`, `−`)
                     // `⌫` gibt es nur in System-Symbolschriften; sonst Pfeil.
                     let del_lbl = if ctx_clone.fonts_mut(|f| f.has_glyph(&FontId::proportional(15.0), '⌫')) {
                         "⌫"
                     } else {
                         "←"
                     };
-                    for (op_lbl, op_tok) in [
-                        (del_lbl, "DEL"),
-                        ("÷", "/"),
-                        ("×", "*"),
-                        ("+", "+"),
-                        ("−", "-"),
-                    ] {
-                        if Self::key_btn(
-                            &mut cols[3],
-                            op_lbl,
-                            op_row_h,
-                            pal.secondary_container,
-                            pal.on_secondary_container,
-                        ) {
+                    for (op_lbl, op_tok) in [(del_lbl, "DEL"), ("÷", "/"), ("×", "*"), ("+", "+"), ("−", "-")] {
+                        if Self::key_btn(&mut cols[3], op_lbl, op_row_h, pal.secondary_container, pal.on_secondary_container) {
                             if op_tok == "DEL" {
                                 self.backspace();
                             } else {
@@ -2503,188 +2550,13 @@ impl NiobCalculatorApp {
                 });
             }
 
-            KeyboardSection::Operators => {
-                let row_h = ((avail_h - 16.0) / 3.0).max(34.0);
-                let grid = [
-                    [("(", "("), (")", ")"), ("π", "pi"), ("e", "e")],
-                    [
-                        ("x²", "^2"),
-                        ("xⁿ", "^("),
-                        ("√x", "sqrt("),
-                        ("ⁿ√x", "nthroot(3, "),
-                    ],
-                    [
-                        ("ln", "ln("),
-                        ("log₁₀", "log(10, "),
-                        ("10ⁿ", "10^("),
-                        ("ANS", "ans"),
-                    ],
-                ];
-                for row in grid {
-                    ui.columns(4, |cols| {
-                        for (i, (label, tok)) in row.iter().enumerate() {
-                            let is_accent = *label == "ANS" || *label == "π" || *label == "e";
-                            let fill = if is_accent {
-                                pal.primary_container
-                            } else {
-                                pal.surface_container_high
-                            };
-                            let fg = if is_accent {
-                                pal.on_primary_container
-                            } else {
-                                pal.on_surface
-                            };
-                            if Self::key_btn(&mut cols[i], label, row_h, fill, fg) {
-                                self.insert_token(tok);
-                            }
-                        }
-                    });
-                }
-            }
-
-            KeyboardSection::Trigonometry => {
-                // Top toggle row (`radians` | `degrees`) + 4x3 grid from `keyboard_trig_section.xml`
-                let top_h = 28.0;
-                let row_h = ((avail_h - top_h - 20.0) / 3.0).max(30.0);
-
-                ui.columns(2, |cols| {
-                    let is_rad = self.engine.angle_mode == AngleMode::Radians;
-                    if Self::key_btn(
-                        &mut cols[0],
-                        if self.german_ui {
-                            "Bogenmaß (rad)"
-                        } else {
-                            "radians"
-                        },
-                        top_h,
-                        if is_rad {
-                            pal.primary
-                        } else {
-                            pal.surface_container_high
-                        },
-                        if is_rad {
-                            pal.on_primary
-                        } else {
-                            pal.on_surface_variant
-                        },
-                    ) {
-                        self.engine.angle_mode = AngleMode::Radians;
-                        self.mark_state_dirty();
-                    }
-                    if Self::key_btn(
-                        &mut cols[1],
-                        if self.german_ui {
-                            "Gradmaß (deg)"
-                        } else {
-                            "degrees"
-                        },
-                        top_h,
-                        if !is_rad {
-                            pal.primary
-                        } else {
-                            pal.surface_container_high
-                        },
-                        if !is_rad {
-                            pal.on_primary
-                        } else {
-                            pal.on_surface_variant
-                        },
-                    ) {
-                        self.engine.angle_mode = AngleMode::Degrees;
-                        self.mark_state_dirty();
-                    }
-                });
-
-                let grid = [
-                    [
-                        ("sin", "sin("),
-                        ("sin⁻¹", "asin("),
-                        ("sinh", "sinh("),
-                        ("sinh⁻¹", "asinh("),
-                    ],
-                    [
-                        ("cos", "cos("),
-                        ("cos⁻¹", "acos("),
-                        ("cosh", "cosh("),
-                        ("cosh⁻¹", "acosh("),
-                    ],
-                    [
-                        ("tan", "tan("),
-                        ("tan⁻¹", "atan("),
-                        ("tanh", "tanh("),
-                        ("tanh⁻¹", "atanh("),
-                    ],
-                ];
-                for row in grid {
-                    ui.columns(4, |cols| {
-                        for (i, (label, tok)) in row.iter().enumerate() {
-                            if Self::key_btn(
-                                &mut cols[i],
-                                label,
-                                row_h,
-                                pal.surface_container_high,
-                                pal.on_surface,
-                            ) {
-                                self.insert_token(tok);
-                            }
-                        }
-                    });
-                }
-            }
-
-            KeyboardSection::AdvancedMath => {
-                // 4x3 grid from `keyboard_advanced_math_section.xml`:
-                // Row 1: `∑`, `∏`, `nCr`, `n!`
-                // Row 2: `∫`, `d/dx`, `mod`, `i`
-                // Row 3: `[ ]`, `A⁻¹`, `Aᵀ`, `det`
-                let row_h = ((avail_h - 16.0) / 3.0).max(34.0);
-                let grid = [
-                    [
-                        ("∑", "sum(k, k, 1, 10)"),
-                        ("∏", "prod(k, k, 1, 5)"),
-                        ("nCr", "binomial(5, 2)"),
-                        ("n!", "!"),
-                    ],
-                    [
-                        ("∫", "int(x^2, x, 0, 1)"),
-                        ("d/dx", "deriv(x^3, x, 2)"),
-                        ("mod", " mod "),
-                        ("i", "i"),
-                    ],
-                    [
-                        ("[ Matrix ]", "[["),
-                        ("A⁻¹", "inv("),
-                        ("Aᵀ", "trans("),
-                        ("det", "det("),
-                    ],
-                ];
-                for row in grid {
-                    ui.columns(4, |cols| {
-                        for (i, (label, tok)) in row.iter().enumerate() {
-                            if Self::key_btn(
-                                &mut cols[i],
-                                label,
-                                row_h,
-                                pal.surface_container_high,
-                                pal.on_surface,
-                            ) {
-                                self.insert_token(tok);
-                            }
-                        }
-                    });
-                }
-            }
-
             KeyboardSection::Variables => {
-                // 4x3 grid from `keyboard_variable_section.xml`:
-                // 11 customizable variable/constant slots + `more` button
-                let row_h = ((avail_h - 16.0) / 3.0).max(34.0);
+                // 11 belegbare Plätze + „:=“/Konstanten in einem 4×3-Raster
                 let slots = self.keyboard_slots.clone();
-
-                for r in 0..3 {
-                    ui.columns(4, |cols| {
-                        for c in 0..4 {
-                            let idx = r * 4 + c;
+                for r in 0..4 {
+                    ui.columns(3, |cols| {
+                        for c in 0..3 {
+                            let idx = r * 3 + c;
                             if idx < ASSIGNABLE_VARIABLE_SLOTS {
                                 let sym = &slots[idx];
                                 let badge = if let Some(val) = self.engine.variables.get(sym) {
@@ -2692,32 +2564,25 @@ impl NiobCalculatorApp {
                                 } else {
                                     sym.clone()
                                 };
-                                if Self::key_btn(
-                                    &mut cols[c],
-                                    &badge,
-                                    row_h,
-                                    pal.surface_container_high,
-                                    pal.on_surface,
-                                ) {
+                                if Self::key_btn(&mut cols[c], &badge, row_h, pal.surface_container_high, pal.on_surface) {
                                     self.insert_token(sym);
                                 }
                             } else {
-                                // Slot 11: `:= / Mehr…` button (`@id/key_variable_more`)
-                                let lbl = if self.german_ui {
-                                    ":= / Konst."
-                                } else {
-                                    ":= / more"
-                                };
-                                if Self::key_btn(
+                                let lbl = if de { ":= / Konst." } else { ":= / more" };
+                                let clicked = Self::key_btn_with_tip(
                                     &mut cols[c],
                                     lbl,
                                     row_h,
                                     pal.primary_container,
                                     pal.on_primary_container,
-                                ) {
-                                    if !self.input_expr.is_empty()
-                                        && USER_VARIABLES.contains(&self.input_expr.trim())
-                                    {
+                                    if de {
+                                        "Steht nur ein Variablenname in der Eingabe: „:=“ anhängen. Sonst: Konstanten & Variablen öffnen."
+                                    } else {
+                                        "If the input is just a variable name: append “:=”. Otherwise open constants & variables."
+                                    },
+                                );
+                                if clicked {
+                                    if !self.input_expr.is_empty() && USER_VARIABLES.contains(&self.input_expr.trim()) {
                                         self.insert_token(" := ");
                                     } else {
                                         self.active_tab = MainTab::VariablesAndConstants;
@@ -2729,114 +2594,104 @@ impl NiobCalculatorApp {
                 }
             }
 
-            KeyboardSection::More => {
-                // 2x2 grid from `keyboard_more_section.xml`
-                let row_h = ((avail_h - 12.0) / 2.0).max(48.0);
-                ui.columns(2, |cols| {
-                    if Self::key_btn(
-                        &mut cols[0],
-                        if self.german_ui {
-                            "Naturkonstanten & Variablen"
-                        } else {
-                            "Physical Constants & Variables"
-                        },
-                        row_h,
-                        pal.primary_container,
-                        pal.on_primary_container,
-                    ) {
-                        self.active_tab = MainTab::VariablesAndConstants;
-                    }
-                    if Self::key_btn(
-                        &mut cols[1],
-                        if self.german_ui {
-                            "2D-Funktionsplotter"
-                        } else {
-                            "2D Function Plotter"
-                        },
-                        row_h,
-                        pal.secondary_container,
-                        pal.on_secondary_container,
-                    ) {
-                        self.active_tab = MainTab::Plotter;
-                    }
-                });
-                ui.columns(2, |cols| {
-                    if Self::key_btn(
-                        &mut cols[0],
-                        if self.german_ui {
-                            "Einstellungen & Zahlenformat"
-                        } else {
-                            "Settings & Number Formatting"
-                        },
-                        row_h,
-                        pal.surface_container_high,
-                        pal.on_surface,
-                    ) {
-                        self.active_tab = MainTab::ConverterAndSettings;
-                    }
-                    let hex_lbl = if self.show_hex_row {
-                        if self.german_ui {
-                            "🔢 Hex-Zeile (A–F): Aktiv"
-                        } else {
-                            "🔢 Hex Row (A–F): On"
+            other => {
+                // Je 4 Reihen × 3 Tasten
+                let grid: [[(&str, &str); 3]; 4] = match other {
+                    KeyboardSection::Operators => [
+                        [("(", "("), (")", ")"), ("π", "pi")],
+                        [("x²", "^2"), ("xⁿ", "^("), ("e", "e")],
+                        [("√x", "sqrt("), ("ⁿ√x", "nthroot(3, "), ("10ⁿ", "10^(")],
+                        [("ln", "ln("), ("log₁₀", "log(10, "), ("ANS", "ans")],
+                    ],
+                    KeyboardSection::Trigonometry => [
+                        [("sin", "sin("), ("cos", "cos("), ("tan", "tan(")],
+                        [("sin⁻¹", "asin("), ("cos⁻¹", "acos("), ("tan⁻¹", "atan(")],
+                        [("sinh", "sinh("), ("cosh", "cosh("), ("tanh", "tanh(")],
+                        [("sinh⁻¹", "asinh("), ("cosh⁻¹", "acosh("), ("tanh⁻¹", "atanh(")],
+                    ],
+                    _ => [
+                        [("∑", "sum(k, k, 1, 10)"), ("∏", "prod(k, k, 1, 5)"), ("n!", "!")],
+                        [("∫", "int(x^2, x, 0, 1)"), ("d/dx", "deriv(x^3, x, 2)"), ("nCr", "binomial(5, 2)")],
+                        [("mod", " mod "), ("i", "i"), ("[ Matrix ]", "[[")],
+                        [("A⁻¹", "inv("), ("Aᵀ", "trans("), ("det", "det(")],
+                    ],
+                };
+                for row in grid {
+                    ui.columns(3, |cols| {
+                        for (i, (label, tok)) in row.iter().enumerate() {
+                            let accent = matches!(*label, "π" | "e" | "ANS");
+                            let (fill, fg) = if accent {
+                                (pal.primary_container, pal.on_primary_container)
+                            } else {
+                                (pal.surface_container_high, pal.on_surface)
+                            };
+                            if Self::key_btn(&mut cols[i], label, row_h, fill, fg) {
+                                self.insert_token(tok);
+                            }
                         }
-                    } else if self.german_ui {
-                        "🔢 Hex-Zeile (A–F) einblenden"
-                    } else {
-                        "🔢 Enable Hex Row (A–F)"
-                    };
-                    if Self::key_btn(
-                        &mut cols[1],
-                        hex_lbl,
-                        row_h,
-                        pal.tertiary_container,
-                        pal.on_tertiary_container,
-                    ) {
-                        self.show_hex_row = !self.show_hex_row;
-                        self.active_section = KeyboardSection::Numbers;
-                    }
-                });
+                    });
+                }
             }
         }
     }
 
     fn key_btn(ui: &mut Ui, label: &str, height: f32, fill: Color32, fg: Color32) -> bool {
+        Self::key_button(ui, label, height, fill, fg).clicked()
+    }
+
+    fn key_btn_with_tip(ui: &mut Ui, label: &str, height: f32, fill: Color32, fg: Color32, tip: &str) -> bool {
+        Self::key_button(ui, label, height, fill, fg).on_hover_text(tip).clicked()
+    }
+
+    fn key_button(ui: &mut Ui, label: &str, height: f32, fill: Color32, fg: Color32) -> egui::Response {
         let w = ui.available_width();
+        let short = label.chars().count() <= 6;
+        // Beschriftung wächst mit der Taste (große Fenster), bleibt aber in
+        // schmalen Tasten bei 15 px.
+        let size = if short {
+            (height * 0.38).min(w * 0.3).clamp(15.0, 26.0)
+        } else {
+            15.0
+        };
         // Hochzahlen (xⁿ, sin⁻¹, Aᵀ) als angehobenen Text setzen – die
         // eingebaute Schrift hat für ⁿ, ⁻ und ᵀ keine Zeichen.
         let btn = egui::Button::new(egui::WidgetText::from(mathview::rich_job(
             label,
-            FontId::proportional(15.0),
+            FontId::proportional(size),
             fg,
         )))
         .fill(fill)
         .corner_radius(CornerRadius::same(14))
         .min_size(egui::vec2(w, height));
         // Kurze Tastenbeschriftungen nie umbrechen („AN|S“, „log|10“)
-        let btn = if label.chars().count() <= 6 {
-            btn.wrap_mode(egui::TextWrapMode::Extend)
-        } else {
-            btn
-        };
-        ui.add(btn).clicked()
+        let btn = if short { btn.wrap_mode(egui::TextWrapMode::Extend) } else { btn };
+        // Der Button richtet seine Beschriftung nach dem umgebenden Layout aus;
+        // in `vertical_centered` steht sie mittig statt linksbündig.
+        ui.vertical_centered(|ui| ui.add(btn)).inner
     }
 
     fn render_plotter_tab(&mut self, ui: &mut Ui, pal: &MaterialYouPalette) {
-        // Function inputs panel
+        let de = self.german_ui;
+        let mut remove_idx: Option<usize> = None;
+        let mut add_function = false;
+        let (scale_min, scale_max) = PLOT_SCALE_RANGE;
+
+        // Funktionsliste
         Frame::new()
             .fill(pal.surface_container)
             .corner_radius(CornerRadius::same(16))
             .inner_margin(egui::Margin::same(10))
             .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
                 // Schmale Fenster: kurzer Titel, Knöpfe nur mit Symbol
                 let narrow = ui.available_width() < 720.0;
-                let hint = if self.german_ui {
+                let hint = if de {
                     "Ziehen zum Verschieben, Mausrad zum Zoomen"
                 } else {
                     "Drag to pan, scroll to zoom"
                 };
                 ui.horizontal(|ui| {
-                    let title = match (narrow, self.german_ui) {
+                    let title = match (narrow, de) {
                         (true, true) => "2D-Plotter".to_string(),
                         (true, false) => "2D Plotter".to_string(),
                         (false, true) => format!("2D-Funktionsplotter ({hint})"),
@@ -2845,45 +2700,65 @@ impl NiobCalculatorApp {
                     ui.label(RichText::new(title).font(FontId::proportional(14.5)).strong())
                         .on_hover_text(hint);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let reset_label = match (narrow, self.german_ui) {
+                        let reset_label = match (narrow, de) {
                             (true, _) => "⟳",
-                            (false, true) => "⟳ Ursprung zentrieren",
-                            (false, false) => "⟳ Reset View",
+                            (false, true) => "⟳ Ansicht zurücksetzen",
+                            (false, false) => "⟳ Reset view",
                         };
                         if ui
                             .small_button(reset_label)
-                            .on_hover_text(if self.german_ui { "Ursprung zentrieren" } else { "Reset view" })
+                            .on_hover_text(if de {
+                                "Ursprung zentrieren und Zoom zurücksetzen"
+                            } else {
+                                "Center the origin and reset the zoom"
+                            })
                             .clicked()
                         {
                             self.plot_center_x = 0.0;
                             self.plot_center_y = 0.0;
                             self.plot_scale = 48.0;
                         }
-                        if ui.small_button("🔍+").clicked() {
-                            self.plot_scale = (self.plot_scale * 1.25).min(400.0);
+                        if ui.small_button("🔍+").on_hover_text(if de { "Vergrößern" } else { "Zoom in" }).clicked() {
+                            self.plot_scale = (self.plot_scale * 1.25).clamp(scale_min, scale_max);
                         }
-                        if ui.small_button("🔍−").clicked() {
-                            self.plot_scale = (self.plot_scale / 1.25).max(8.0);
+                        if ui.small_button("🔍−").on_hover_text(if de { "Verkleinern" } else { "Zoom out" }).clicked() {
+                            self.plot_scale = (self.plot_scale / 1.25).clamp(scale_min, scale_max);
+                        }
+                        if self.plot_functions.len() < MAX_PLOT_FUNCTIONS {
+                            let add_label = match (narrow, de) {
+                                (true, _) => "+ f",
+                                (false, true) => "+ Funktion",
+                                (false, false) => "+ Function",
+                            };
+                            if ui
+                                .small_button(add_label)
+                                .on_hover_text(if de { "Weitere Funktion hinzufügen" } else { "Add another function" })
+                                .clicked()
+                            {
+                                add_function = true;
+                            }
                         }
                     });
                 });
+                if let Some(note) = &self.plot_notice {
+                    ui.label(RichText::new(note).font(FontId::proportional(12.0)).color(pal.on_surface_variant));
+                }
 
                 ui.add_space(4.0);
-                let de = self.german_ui;
                 let trace_x = self.plot_trace_x;
                 // Breite Fenster: Statuszeile neben dem Feld, sonst darunter
                 let wide = ui.available_width() >= 820.0;
                 for (i, pf) in self.plot_functions.iter_mut().enumerate() {
+                    let color = pal.plot_color(pf.color_idx);
                     let mut readout = None;
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut pf.visible, "");
-                        ui.label(
-                            mathview::rich_job(
-                                &format!("f{}(x) =", subscript_number(i + 1)),
-                                FontId::proportional(13.5),
-                                pf.color,
-                            ),
-                        );
+                        ui.checkbox(&mut pf.visible, "")
+                            .on_hover_text(if de { "Kurve ein-/ausblenden" } else { "Show/hide curve" });
+                        ui.label(mathview::rich_job(
+                            &format!("f{}(x) =", subscript_number(i + 1)),
+                            FontId::proportional(13.5),
+                            color,
+                        ));
                         // Gleiche Schreibweise wie in der Formelzeile des Rechners
                         let field_font = FontId::proportional(15.0);
                         let field_col = pal.on_surface;
@@ -2897,6 +2772,7 @@ impl NiobCalculatorApp {
                             .id(field_id)
                             .desired_width(ui.available_width().clamp(120.0, 220.0))
                             .font(field_font)
+                            .hint_text(if de { "z. B. sin(x)" } else { "e.g. sin(x)" })
                             .layouter(&mut layouter)
                             .show(ui);
                         if out.response.changed() {
@@ -2914,6 +2790,13 @@ impl NiobCalculatorApp {
                                 )));
                                 state.store(ui.ctx(), field_id);
                             }
+                        }
+                        if ui
+                            .add(egui::Button::new("×").min_size(egui::vec2(22.0, 22.0)))
+                            .on_hover_text(if de { "Funktion entfernen" } else { "Remove function" })
+                            .clicked()
+                        {
+                            remove_idx = Some(i);
                         }
                         // Formelspiegel mit Bruchstrichen und Wurzeln, wenn Platz ist
                         let readout_room = if wide { 340.0 } else { 0.0 };
@@ -2938,21 +2821,44 @@ impl NiobCalculatorApp {
                         }
                     });
                     if let Some(mut job) = readout {
-                        ui.horizontal(|ui| {
-                            ui.add_space(28.0);
-                            job.wrap.max_width = ui.available_width();
-                            ui.label(job);
-                        });
+                        if !job.text.is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.add_space(28.0);
+                                job.wrap.max_width = ui.available_width();
+                                ui.label(job);
+                            });
+                        }
                     }
                 }
             });
 
+        if let Some(i) = remove_idx {
+            if self.plot_functions.len() > 1 {
+                self.plot_functions.remove(i);
+            } else if let Some(pf) = self.plot_functions.first_mut() {
+                pf.expr.clear();
+            }
+            self.plot_notice = None;
+        }
+        if add_function {
+            self.add_plot_function(String::new());
+            self.plot_notice = None;
+        }
+
         ui.add_space(6.0);
 
-        // Plot Canvas (`FunctionPlotting2DView.onDraw` grid stroke mechanics)
+        // Zeichenfläche (`FunctionPlotting2DView.onDraw`). Nie höher als der
+        // verfügbare Platz, sonst rutscht sie unter die Navigationsleiste.
         let avail = ui.available_size();
         let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(avail.x, avail.y.max(200.0)), Sense::click_and_drag());
+            ui.allocate_exact_size(egui::vec2(avail.x, avail.y.max(60.0)), Sense::click_and_drag());
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Other,
+                true,
+                if de { "Funktionsgraph" } else { "Function graph" },
+            )
+        });
 
         if response.dragged() {
             let delta = response.drag_delta();
@@ -2963,10 +2869,9 @@ impl NiobCalculatorApp {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll.abs() > 0.1 {
                 let factor = (1.0 + scroll as f64 * 0.002).clamp(0.8, 1.25);
-                self.plot_scale = (self.plot_scale * factor).clamp(1e-5, 1e5);
+                self.plot_scale = (self.plot_scale * factor).clamp(scale_min, scale_max);
             }
-            self.plot_trace_x =
-                self.plot_center_x + ((hover_pos.x - rect.center().x) as f64) / self.plot_scale;
+            self.plot_trace_x = self.plot_center_x + ((hover_pos.x - rect.center().x) as f64) / self.plot_scale;
         }
 
         let painter = ui.painter_at(rect);
@@ -2976,8 +2881,8 @@ impl NiobCalculatorApp {
         let cy = rect.center().y;
         let scale = self.plot_scale as f32;
 
-        // Choose grid step based on zoom scale
-        let raw_step = (80.0 / self.plot_scale).max(1e-6);
+        // Gitterabstand passend zum Zoom (1, 2, 5 × 10ⁿ)
+        let raw_step = 80.0 / self.plot_scale;
         let mag = 10f64.powf(raw_step.log10().floor());
         let major_step = if raw_step / mag < 2.0 {
             mag
@@ -2987,13 +2892,14 @@ impl NiobCalculatorApp {
             5.0 * mag
         };
         let minor_step = major_step / 5.0;
+        let decimals = axis_decimals(major_step);
 
         let x_min = self.plot_center_x - ((rect.width() * 0.5) as f64) / self.plot_scale;
         let x_max = self.plot_center_x + ((rect.width() * 0.5) as f64) / self.plot_scale;
         let y_min = self.plot_center_y - ((rect.height() * 0.5) as f64) / self.plot_scale;
         let y_max = self.plot_center_y + ((rect.height() * 0.5) as f64) / self.plot_scale;
 
-        // Minor grid lines (`PLOTTER_MINOR_GRID_STROKE = 1.0` px)
+        // Nebengitter (`PLOTTER_MINOR_GRID_STROKE = 1.0` px)
         let mut gx = (x_min / minor_step).floor() * minor_step;
         while gx <= x_max {
             let sx = cx + ((gx - self.plot_center_x) as f32) * scale;
@@ -3013,8 +2919,10 @@ impl NiobCalculatorApp {
             gy += minor_step;
         }
 
-        // Major grid lines (`PLOTTER_MAJOR_GRID_STROKE = 1.25` px) & Axis labels (`PLOTTER_AXIS_LABEL_SIZE = 19.0`)
+        // Hauptgitter & Achsenbeschriftung. Beschriftungen, die über den Rand
+        // ragen würden, entfallen (sonst stand dort „0“ statt „−10“).
         let label_font = FontId::proportional((PLOTTER_AXIS_LABEL_SIZE * 0.65).max(11.5));
+        let label_col = pal.on_surface_variant;
         let mut mx = (x_min / major_step).floor() * major_step;
         while mx <= x_max {
             let sx = cx + ((mx - self.plot_center_x) as f32) * scale;
@@ -3022,16 +2930,14 @@ impl NiobCalculatorApp {
                 [Pos2::new(sx, rect.top()), Pos2::new(sx, rect.bottom())],
                 Stroke::new(PLOTTER_MAJOR_GRID_STROKE, pal.plotter_major_grid),
             );
-            if mx.abs() > 1e-9 {
+            if mx.abs() > major_step * 1e-6 {
                 let y_axis_screen =
                     (cy - ((-self.plot_center_y) as f32) * scale).clamp(rect.top() + 14.0, rect.bottom() - 18.0);
-                painter.text(
-                    Pos2::new(sx + 3.0, y_axis_screen + 4.0),
-                    egui::Align2::LEFT_TOP,
-                    format!("{:.2}", mx).trim_end_matches('0').trim_end_matches('.'),
-                    label_font.clone(),
-                    pal.on_surface_variant,
-                );
+                let galley = painter.layout_no_wrap(axis_label(mx, decimals), label_font.clone(), label_col);
+                let pos = Pos2::new(sx + 3.0, y_axis_screen + 4.0);
+                if pos.x >= rect.left() + 2.0 && pos.x + galley.size().x <= rect.right() - 2.0 {
+                    painter.galley(pos, galley, label_col);
+                }
             }
             mx += major_step;
         }
@@ -3042,21 +2948,23 @@ impl NiobCalculatorApp {
                 [Pos2::new(rect.left(), sy), Pos2::new(rect.right(), sy)],
                 Stroke::new(PLOTTER_MAJOR_GRID_STROKE, pal.plotter_major_grid),
             );
-            if my.abs() > 1e-9 {
+            if my.abs() > major_step * 1e-6 {
                 let x_axis_screen =
                     (cx + ((-self.plot_center_x) as f32) * scale).clamp(rect.left() + 6.0, rect.right() - 40.0);
-                painter.text(
-                    Pos2::new(x_axis_screen + 5.0, sy - 2.0),
-                    egui::Align2::LEFT_BOTTOM,
-                    format!("{:.2}", my).trim_end_matches('0').trim_end_matches('.'),
-                    label_font.clone(),
-                    pal.on_surface_variant,
-                );
+                let galley = painter.layout_no_wrap(axis_label(my, decimals), label_font.clone(), label_col);
+                let size = galley.size();
+                let pos = Pos2::new(x_axis_screen + 5.0, sy - 2.0 - size.y);
+                if pos.y >= rect.top() + 2.0
+                    && pos.y + size.y <= rect.bottom() - 2.0
+                    && pos.x + size.x <= rect.right() - 2.0
+                {
+                    painter.galley(pos, galley, label_col);
+                }
             }
             my += major_step;
         }
 
-        // X and Y Axes
+        // Achsen
         let x0_screen = cx + ((-self.plot_center_x) as f32) * scale;
         let y0_screen = cy - ((-self.plot_center_y) as f32) * scale;
         if x0_screen >= rect.left() && x0_screen <= rect.right() {
@@ -3072,12 +2980,13 @@ impl NiobCalculatorApp {
             );
         }
 
-        // Plot each visible function curve
+        // Kurven
         let samples = (rect.width() as usize).clamp(200, 900);
         for pf in &self.plot_functions {
             if !pf.visible || pf.expr.trim().is_empty() {
                 continue;
             }
+            let color = pal.plot_color(pf.color_idx);
             let expr = mathview::to_engine_syntax(&pf.expr);
             let mut prev_pt: Option<Pos2> = None;
             let mut prev_val: Option<(f64, f64)> = None;
@@ -3092,7 +3001,7 @@ impl NiobCalculatorApp {
                     if sy >= rect.top() - 200.0 && sy <= rect.bottom() + 200.0 {
                         if let Some(p) = prev_pt {
                             if (cur_pt.y - p.y).abs() < rect.height() * 0.9 {
-                                painter.line_segment([p, cur_pt], Stroke::new(2.4_f32, pf.color));
+                                painter.line_segment([p, cur_pt], Stroke::new(2.4_f32, color));
                             }
                         }
                         prev_pt = Some(cur_pt);
@@ -3100,15 +3009,13 @@ impl NiobCalculatorApp {
                         prev_pt = None;
                     }
 
-                    // Highlight roots (zero crossings)
+                    // Nullstellen markieren
                     if let Some((px, py)) = prev_val {
-                        if (py <= 0.0 && y_val >= 0.0 || py >= 0.0 && y_val <= 0.0)
-                            && (y_val - py).abs() < 5.0
-                        {
+                        if (py <= 0.0 && y_val >= 0.0 || py >= 0.0 && y_val <= 0.0) && (y_val - py).abs() < 5.0 {
                             let root_x = px - py * (x_val - px) / (y_val - py);
                             let rx = cx + ((root_x - self.plot_center_x) as f32) * scale;
                             if y0_screen >= rect.top() && y0_screen <= rect.bottom() {
-                                painter.circle_filled(Pos2::new(rx, y0_screen), 4.0, pf.color);
+                                painter.circle_filled(Pos2::new(rx, y0_screen), 4.0, color);
                             }
                         }
                     }
@@ -3119,17 +3026,13 @@ impl NiobCalculatorApp {
                 }
             }
 
-            // Draw trace point at `self.plot_trace_x`
+            // Spurpunkt bei `self.plot_trace_x`
             if let Some(ty) = self.engine.eval_for_x(&expr, self.plot_trace_x) {
                 let tx_s = cx + ((self.plot_trace_x - self.plot_center_x) as f32) * scale;
                 let ty_s = cy - ((ty - self.plot_center_y) as f32) * scale;
                 if rect.contains(Pos2::new(tx_s, ty_s)) {
-                    painter.circle_filled(Pos2::new(tx_s, ty_s), 5.5, pf.color);
-                    painter.circle_stroke(
-                        Pos2::new(tx_s, ty_s),
-                        5.5,
-                        Stroke::new(1.5_f32, pal.bg_surface),
-                    );
+                    painter.circle_filled(Pos2::new(tx_s, ty_s), 5.5, color);
+                    painter.circle_stroke(Pos2::new(tx_s, ty_s), 5.5, Stroke::new(1.5_f32, pal.bg_surface));
                 }
             }
         }
@@ -3142,658 +3045,728 @@ impl NiobCalculatorApp {
         );
     }
 
+    /// Reiter „Konstanten & Einheiten“: Variablen, Einheitenrechner, Naturkonstanten.
     fn render_variables_and_constants_tab(&mut self, ui: &mut Ui, pal: &MaterialYouPalette) {
-        // 1. User Variables Management (`Lc/a/a/e/h;` 11 assignable variables)
-        Frame::new()
-            .fill(pal.surface_container)
-            .corner_radius(CornerRadius::same(16))
-            .inner_margin(egui::Margin::same(12))
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new(if self.german_ui {
-                        "📌 Benutzer-Variablen (11 zuweisbare Speicherplätze: a, b, c, d, k, l, m, n, x, y, z)"
-                    } else {
-                        "📌 User Variables (11 assignable slots: a, b, c, d, k, l, m, n, x, y, z)"
-                    })
-                    .font(FontId::proportional(14.5))
-                    .strong(),
-                );
-                ui.add_space(4.0);
-
-                ui.horizontal_wrapped(|ui| {
-                    for &vname in &USER_VARIABLES {
-                        let val_opt = self.engine.variables.get(vname).copied();
-                        let txt = match val_opt {
-                            Some(v) => format!("{} = {}", vname, self.engine.number_format.format_f64(v.to_f64())),
-                            None => format!("{} (leer)", vname),
-                        };
-                        let btn = egui::Button::new(
-                            RichText::new(txt)
-                                .font(FontId::proportional(13.0))
-                                .strong()
-                                .color(if val_opt.is_some() {
-                                    pal.on_primary_container
-                                } else {
-                                    pal.on_surface_variant
-                                }),
-                        )
-                        .fill(if val_opt.is_some() {
-                            pal.primary_container
-                        } else {
-                            pal.surface_container_high
-                        })
-                        .corner_radius(CornerRadius::same(12));
-
-                        if ui
-                            .add(btn)
-                            .on_hover_text("Klicken zum Einfügen / Bearbeiten")
-                            .clicked()
-                        {
-                            self.var_edit_name = vname.to_string();
-                            if let Some(v) = val_opt {
-                                self.var_edit_value = v.to_string();
-                            }
-                            self.insert_token(vname);
-                        }
-                    }
-                });
-
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.label(if self.german_ui {
-                        "Variable setzen:"
-                    } else {
-                        "Assign variable:"
-                    });
-                    egui::ComboBox::from_id_salt("var_select_combo")
-                        .selected_text(&self.var_edit_name)
-                        .width(60.0)
-                        .show_ui(ui, |ui| {
-                            for &v in &USER_VARIABLES {
-                                ui.selectable_value(&mut self.var_edit_name, v.to_string(), v);
-                            }
-                        });
-                    ui.label(":=");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.var_edit_value)
-                            .desired_width(110.0)
-                            .font(FontId::monospace(13.5)),
-                    );
-                    if ui
-                        .button(if self.german_ui {
-                            "💾 Speichern"
-                        } else {
-                            "💾 Save"
-                        })
-                        .clicked()
-                    {
-                        if let Ok(out) = self.engine.evaluate_preview(&self.var_edit_value, false) {
-                            if let Some(val) = out.val {
-                                self.engine
-                                    .variables
-                                    .insert(self.var_edit_name.clone(), val);
-                                self.engine.matrix_variables.remove(&self.var_edit_name);
-                                self.mark_state_dirty();
-                            } else if let Some(c) = out.numeric_value {
-                                self.engine
-                                    .variables
-                                    .insert(self.var_edit_name.clone(), Value::from_complex(c));
-                                self.engine.matrix_variables.remove(&self.var_edit_name);
-                                self.mark_state_dirty();
-                            }
-                        }
-                    }
-                    if ui
-                        .button(if self.german_ui {
-                            "Löschen (unset)"
-                        } else {
-                            "Unset"
-                        })
-                        .clicked()
-                    {
-                        self.engine.variables.remove(&self.var_edit_name);
-                        self.engine.matrix_variables.remove(&self.var_edit_name);
-                        self.mark_state_dirty();
-                    }
-                });
-            });
-
-        ui.add_space(8.0);
-
-        // 2. Scientific Constants Library (`VariableMoreActivity` — 28 Constants in 4 categories)
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(if self.german_ui {
-                    "🔍 Naturkonstanten durchsuchen:"
-                } else {
-                    "🔍 Search Constants:"
-                })
-                .strong(),
-            );
-            ui.add(
-                egui::TextEdit::singleline(&mut self.constants_search)
-                    .desired_width(220.0)
-                    .hint_text("c₀, Planck, Avogadro, Faraday…"),
-            );
-            ui.separator();
-            ui.label(if self.german_ui {
-                "Tastatur-Slot für 'a b c' belegen:"
-            } else {
-                "Pin to 'a b c' slot:"
-            });
-            egui::ComboBox::from_id_salt("slot_pin_combo")
-                .selected_text(format!(
-                    "Slot #{} ({})",
-                    self.selected_slot_to_assign + 1,
-                    self.keyboard_slots[self.selected_slot_to_assign]
-                ))
-                .show_ui(ui, |ui| {
-                    for s_idx in 0..ASSIGNABLE_VARIABLE_SLOTS {
-                        ui.selectable_value(
-                            &mut self.selected_slot_to_assign,
-                            s_idx,
-                            format!("Slot #{} ({})", s_idx + 1, self.keyboard_slots[s_idx]),
-                        );
-                    }
-                });
+        ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            self.render_variables_card(ui, pal);
+            ui.add_space(8.0);
+            self.render_unit_converter_card(ui, pal);
+            ui.add_space(8.0);
+            self.render_constants_card(ui, pal);
         });
-
-        ui.add_space(6.0);
-
-        let query = self.constants_search.to_lowercase();
-        ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                for cat in [
-                    ConstantCategory::Universal,
-                    ConstantCategory::Electromagnetic,
-                    ConstantCategory::Chemical,
-                    ConstantCategory::Mathematical,
-                ] {
-                    let cat_title = if self.german_ui {
-                        cat.title_de()
-                    } else {
-                        cat.title_en()
-                    };
-                    Frame::new()
-                        .fill(pal.surface_container_low)
-                        .corner_radius(CornerRadius::same(14))
-                        .inner_margin(egui::Margin::same(10))
-                        .show(ui, |ui| {
-                            ui.label(
-                                RichText::new(cat_title)
-                                    .font(FontId::proportional(14.5))
-                                    .strong()
-                                    .color(pal.primary),
-                            );
-                            ui.add_space(4.0);
-
-                            for sc in SCIENTIFIC_CONSTANTS.iter().filter(|c| c.category == cat) {
-                                let name = if self.german_ui { sc.name_de } else { sc.name_en };
-                                if !query.is_empty()
-                                    && !name.to_lowercase().contains(&query)
-                                    && !sc.symbol.to_lowercase().contains(&query)
-                                    && !sc.token.to_lowercase().contains(&query)
-                                {
-                                    continue;
-                                }
-
-                                Frame::new()
-                                    .fill(pal.surface_container)
-                                    .corner_radius(CornerRadius::same(10))
-                                    .inner_margin(egui::Margin::symmetric(10, 6))
-                                    .show(ui, |ui| {
-                                        ui.horizontal(|ui| {
-                                            // Symbol badge
-                                            Frame::new()
-                                                .fill(pal.primary_container)
-                                                .corner_radius(CornerRadius::same(8))
-                                                .inner_margin(egui::Margin::symmetric(8, 4))
-                                                .show(ui, |ui| {
-                                                    ui.label(
-                                                        RichText::new(sc.symbol)
-                                                            .font(FontId::proportional(14.5))
-                                                            .strong()
-                                                            .color(pal.on_primary_container),
-                                                    );
-                                                });
-
-                                            ui.vertical(|ui| {
-                                                ui.label(
-                                                    RichText::new(name)
-                                                        .font(FontId::proportional(13.5))
-                                                        .strong(),
-                                                );
-                                                ui.label(
-                                                    RichText::new(format!(
-                                                        "{} {}",
-                                                        sc.display_value, sc.unit
-                                                    ))
-                                                    .font(FontId::monospace(12.0))
-                                                    .color(pal.on_surface_variant),
-                                                );
-                                            });
-
-                                            ui.with_layout(
-                                                Layout::right_to_left(Align::Center),
-                                                |ui| {
-                                                    if ui
-                                                        .button(if self.german_ui {
-                                                            "➕ In Rechner"
-                                                        } else {
-                                                            "➕ Insert"
-                                                        })
-                                                        .clicked()
-                                                    {
-                                                        self.insert_token(sc.token);
-                                                        self.active_tab = MainTab::Calculator;
-                                                    }
-                                                    if ui
-                                                        .small_button(if self.german_ui {
-                                                            "📌 Auf Tastatur"
-                                                        } else {
-                                                            "📌 Pin to Slot"
-                                                        })
-                                                        .clicked()
-                                                    {
-                                                        self.keyboard_slots
-                                                            [self.selected_slot_to_assign] =
-                                                            sc.token.to_string();
-                                                    }
-                                                },
-                                            );
-                                        });
-                                    });
-                            }
-                        });
-                    ui.add_space(6.0);
-                }
-            });
     }
 
-    fn render_converter_and_settings_tab(&mut self, ui: &mut Ui, pal: &MaterialYouPalette) {
-        ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                // 1. Offline Unit Converter (`gui.k1.a`)
-                Frame::new()
-                    .fill(pal.surface_container)
-                    .corner_radius(CornerRadius::same(16))
-                    .inner_margin(egui::Margin::same(12))
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new(if self.german_ui {
-                                "🔄 Einheitenrechner"
-                            } else {
-                                "🔄 Unit Converter"
-                            })
-                            .font(FontId::proportional(15.0))
+    fn render_variables_card(&mut self, ui: &mut Ui, pal: &MaterialYouPalette) {
+        let de = self.german_ui;
+        card(ui, pal, |ui| {
+            card_title(ui, pal, if de { "📌 Variablen" } else { "📌 Variables" });
+            ui.label(
+                RichText::new(if de {
+                    "11 Speicherplätze (a, b, c, d, k, l, m, n, x, y, z). Klick auf eine Variable wählt sie zum Bearbeiten aus."
+                } else {
+                    "11 memory slots (a, b, c, d, k, l, m, n, x, y, z). Click a variable to edit it."
+                })
+                .font(FontId::proportional(12.0))
+                .color(pal.on_surface_variant),
+            );
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                for &vname in &USER_VARIABLES {
+                    let scalar = self.engine.variables.get(vname).copied();
+                    let is_matrix = self.engine.matrix_variables.contains_key(vname);
+                    let txt = match scalar {
+                        Some(v) => format!("{} = {}", vname, self.engine.number_format.format_f64(v.to_f64())),
+                        None if is_matrix => format!("{} = [Matrix]", vname),
+                        None => format!("{} ({})", vname, if de { "leer" } else { "empty" }),
+                    };
+                    let filled = scalar.is_some() || is_matrix;
+                    let selected = self.var_edit_name == vname;
+                    let btn = egui::Button::new(
+                        RichText::new(txt)
+                            .font(FontId::proportional(13.0))
                             .strong()
-                            .color(pal.primary),
-                        );
-                        ui.add_space(4.0);
+                            .color(if filled { pal.on_primary_container } else { pal.on_surface_variant }),
+                    )
+                    .fill(if filled { pal.primary_container } else { pal.surface_container_high })
+                    .stroke(if selected { Stroke::new(2.0_f32, pal.primary) } else { Stroke::NONE })
+                    .corner_radius(CornerRadius::same(12));
+                    if ui
+                        .add(btn)
+                        .on_hover_text(if de { "Zum Bearbeiten auswählen" } else { "Select for editing" })
+                        .clicked()
+                    {
+                        self.select_variable(vname);
+                    }
+                }
+            });
 
-                        ui.horizontal_wrapped(|ui| {
-                            for cat in UnitCategory::ALL {
-                                let sel = self.unit_cat == cat;
-                                if ui
-                                    .selectable_label(sel, cat.name(self.german_ui))
-                                    .clicked()
-                                {
-                                    self.unit_cat = cat;
-                                    self.unit_from_idx = 0;
-                                    self.unit_to_idx = 1;
-                                }
-                            }
-                        });
-
-                        let units = self.unit_cat.units();
-                        self.unit_from_idx = self.unit_from_idx.min(units.len() - 1);
-                        self.unit_to_idx = self.unit_to_idx.min(units.len() - 1);
-
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.unit_input_str)
-                                    .desired_width(110.0)
-                                    .font(FontId::monospace(14.5)),
-                            );
-                            egui::ComboBox::from_id_salt("unit_from_cb")
-                                .selected_text(units[self.unit_from_idx].0)
-                                .show_ui(ui, |ui| {
-                                    for (i, (uname, _)) in units.iter().enumerate() {
-                                        ui.selectable_value(&mut self.unit_from_idx, i, *uname);
-                                    }
-                                });
-                            ui.label("➡");
-                            egui::ComboBox::from_id_salt("unit_to_cb")
-                                .selected_text(units[self.unit_to_idx].0)
-                                .show_ui(ui, |ui| {
-                                    for (i, (uname, _)) in units.iter().enumerate() {
-                                        ui.selectable_value(&mut self.unit_to_idx, i, *uname);
-                                    }
-                                });
-
-                            let in_val: f64 = self.unit_input_str.trim().parse().unwrap_or(0.0);
-                            let converted = if self.unit_cat == UnitCategory::Temperature {
-                                convert_temperature(in_val, self.unit_from_idx, self.unit_to_idx)
-                            } else {
-                                let base = in_val * units[self.unit_from_idx].1;
-                                base / units[self.unit_to_idx].1
-                            };
-                            let formatted = self.engine.number_format.format_f64(converted);
-                            ui.label(
-                                RichText::new(format!("= {}", formatted))
-                                    .font(FontId::proportional(16.0))
-                                    .strong()
-                                    .color(pal.primary),
-                            );
-                            if ui
-                                .small_button(if self.german_ui {
-                                    "In Rechner übernehmen"
-                                } else {
-                                    "Send to Calculator"
-                                })
-                                .clicked()
-                            {
-                                self.insert_token(&converted.to_string());
-                                self.active_tab = MainTab::Calculator;
-                            }
-                        });
-                    });
-
-                ui.add_space(10.0);
-
-                // 2. Material You & Niob Preferences (`res/xml/root_preferences.xml`)
-                Frame::new()
-                    .fill(pal.surface_container)
-                    .corner_radius(CornerRadius::same(16))
-                    .inner_margin(egui::Margin::same(12))
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new(if self.german_ui {
-                                "🎨 Material You Design & Darstellung"
-                            } else {
-                                "🎨 Material You Theme & Appearance"
-                            })
-                            .font(FontId::proportional(15.0))
-                            .strong()
-                            .color(pal.primary),
-                        );
-                        ui.add_space(6.0);
-
-                        ui.horizontal(|ui| {
-                            ui.label(if self.german_ui {
-                                "Farbmodus:"
-                            } else {
-                                "Color Mode:"
-                            });
-                            for mode in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Amoled] {
-                                let lbl = if self.german_ui {
-                                    mode.label_de()
-                                } else {
-                                    mode.label_en()
-                                };
-                                ui.selectable_value(&mut self.theme_mode, mode, lbl);
-                            }
-                        });
-
-                        ui.add_space(4.0);
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(if self.german_ui {
-                                "Material You Akzentfarbe:"
-                            } else {
-                                "Material You Seed Palette:"
-                            });
-                            for seed in AccentSeed::ALL {
-                                let selected = self.accent_seed == seed;
-                                let btn = egui::Button::new(
-                                    RichText::new(seed.name_de())
-                                        .color(if selected {
-                                            Color32::BLACK
-                                        } else {
-                                            pal.on_surface
-                                        })
-                                        .strong(),
-                                )
-                                .fill(if selected {
-                                    seed.seed_color()
-                                } else {
-                                    pal.surface_container_high
-                                })
-                                .corner_radius(CornerRadius::same(12));
-                                if ui.add(btn).clicked() {
-                                    self.accent_seed = seed;
-                                }
-                            }
-                        });
-
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            ui.label(if self.german_ui {
-                                "Tastaturgröße:"
-                            } else {
-                                "Keyboard Size:"
-                            });
-                            ui.selectable_value(
-                                &mut self.keyboard_scale,
-                                0.9,
-                                if self.german_ui { "Klein" } else { "Small" },
-                            );
-                            ui.selectable_value(
-                                &mut self.keyboard_scale,
-                                1.0,
-                                if self.german_ui { "Standard" } else { "Default" },
-                            );
-                            ui.selectable_value(
-                                &mut self.keyboard_scale,
-                                1.12,
-                                if self.german_ui { "Groß" } else { "Large" },
-                            );
-                        });
-                    });
-
-                ui.add_space(10.0);
-
-                // 3. Calculation & Number Formatting Settings (`Lc/a/a/a;`)
-                Frame::new()
-                    .fill(pal.surface_container)
-                    .corner_radius(CornerRadius::same(16))
-                    .inner_margin(egui::Margin::same(12))
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new(if self.german_ui {
-                                "🧮 Rechenwerk & Zahlenformatierung"
-                            } else {
-                                "🧮 Math Engine & Number Formatting"
-                            })
-                            .font(FontId::proportional(15.0))
-                            .strong()
-                            .color(pal.primary),
-                        );
-                        ui.add_space(6.0);
-
-                        let prev_nf = self.engine.number_format;
-                        let is_comma = matches!(
-                            self.engine.number_format,
-                            NumberFormatMode::SpaceComma
-                                | NumberFormatMode::PointComma
-                                | NumberFormatMode::NoneComma
-                        );
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(if self.german_ui {
-                                "Dezimaltrennzeichen:"
-                            } else {
-                                "Decimal Separator:"
-                            });
-                            if ui
-                                .selectable_label(
-                                    is_comma,
-                                    if self.german_ui {
-                                        "Europa (Komma ,)"
-                                    } else {
-                                        "Europe (Comma ,)"
-                                    },
-                                )
-                                .clicked()
-                                && !is_comma
-                            {
-                                self.engine.number_format = match self.engine.number_format {
-                                    NumberFormatMode::CommaPoint => NumberFormatMode::PointComma,
-                                    NumberFormatMode::NonePoint => NumberFormatMode::NoneComma,
-                                    _ => NumberFormatMode::SpaceComma,
-                                };
-                            }
-                            if ui
-                                .selectable_label(
-                                    !is_comma,
-                                    if self.german_ui {
-                                        "US (Punkt .)"
-                                    } else {
-                                        "US (Point .)"
-                                    },
-                                )
-                                .clicked()
-                                && is_comma
-                            {
-                                self.engine.number_format = match self.engine.number_format {
-                                    NumberFormatMode::PointComma => NumberFormatMode::CommaPoint,
-                                    NumberFormatMode::NoneComma => NumberFormatMode::NonePoint,
-                                    _ => NumberFormatMode::SpacePoint,
-                                };
-                            }
-                        });
-
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(if self.german_ui {
-                                "Zahlenformat (Tausendertrennzeichen & Dezimalzeichen):"
-                            } else {
-                                "Number Format:"
-                            });
-                            for nf in NumberFormatMode::ALL {
-                                ui.selectable_value(
-                                    &mut self.engine.number_format,
-                                    nf,
-                                    nf.example(),
-                                );
-                            }
-                        });
-                        if self.engine.number_format != prev_nf {
-                            self.mark_state_dirty();
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Variable");
+                let before = self.var_edit_name.clone();
+                egui::ComboBox::from_id_salt("var_select_combo")
+                    .selected_text(&self.var_edit_name)
+                    .width(56.0)
+                    .show_ui(ui, |ui| {
+                        for &v in &USER_VARIABLES {
+                            ui.selectable_value(&mut self.var_edit_name, v.to_string(), v);
                         }
-
-                        ui.add_space(4.0);
-                        material_switch(
-                            ui,
-                            pal,
-                            &mut self.engine.show_exact_first,
-                            if self.german_ui {
-                                "Exakte Ergebnisse (Brüche, π, Wurzeln) im Verlauf zuerst anzeigen"
-                            } else {
-                                "Show exact results (fractions, π, surds) first in history"
-                            },
-                        );
-                        if material_switch(
-                            ui,
-                            pal,
-                            &mut self.engine.modulo_always_positive,
-                            if self.german_ui {
-                                "Modulo-Ergebnis immer positiv (a mod b ≥ 0)"
-                            } else {
-                                "Modulo result always positive (a mod b ≥ 0)"
-                            },
-                        )
-                        .changed()
-                        {
-                            self.mark_state_dirty();
-                        }
-                        material_switch(
-                            ui,
-                            pal,
-                            &mut self.engine.auto_ans_insertion,
-                            if self.german_ui {
-                                "Automatisches Einfügen von ANS vor Operatoren (+, −, ×, ÷, ^)"
-                            } else {
-                                "Automatic ANS insertion before binary operators"
-                            },
-                        );
-                        material_switch(
-                            ui,
-                            pal,
-                            &mut self.dual_keyboard,
-                            if self.german_ui {
-                                "Zweittastatur (Dual-Ansicht: Wissenschaftlich + Ziffernblock gleichzeitig)"
-                            } else {
-                                "Dual / Auxiliary Keyboard (Show scientific pad + number pad side by side)"
-                            },
-                        );
-                        material_switch(
-                            ui,
-                            pal,
-                            &mut self.show_hex_row,
-                            if self.german_ui {
-                                "Hexadezimal-Zeile (A B C D E F) über dem Ziffernblock anzeigen"
-                            } else {
-                                "Show hexadecimal row (A B C D E F) above number pad"
-                            },
-                        );
                     });
+                if self.var_edit_name != before {
+                    let name = self.var_edit_name.clone();
+                    self.select_variable(&name);
+                }
+                ui.label(":=");
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut self.var_edit_value)
+                        .desired_width(150.0)
+                        .font(FontId::monospace(13.5))
+                        .hint_text(if de { "Wert oder Ausdruck" } else { "value or expression" }),
+                );
+                let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ui.button(if de { "💾 Speichern" } else { "💾 Save" }).clicked() || enter {
+                    self.save_variable();
+                }
+                if ui
+                    .button(if de { "Leeren" } else { "Clear" })
+                    .on_hover_text(if de { "Wert der Variablen löschen" } else { "Remove the variable's value" })
+                    .clicked()
+                {
+                    let name = self.var_edit_name.clone();
+                    self.engine.variables.remove(&name);
+                    self.engine.matrix_variables.remove(&name);
+                    self.var_edit_value.clear();
+                    self.mark_state_dirty();
+                    self.var_status = Some((
+                        if de { format!("✓ {name} ist jetzt leer.") } else { format!("✓ {name} is now empty.") },
+                        false,
+                    ));
+                }
+                if ui
+                    .button(if de { "➕ In Rechner" } else { "➕ Insert" })
+                    .on_hover_text(if de { "Variable in die Eingabe einfügen" } else { "Insert the variable into the input" })
+                    .clicked()
+                {
+                    let name = self.var_edit_name.clone();
+                    self.insert_token(&name);
+                    self.active_tab = MainTab::Calculator;
+                }
+            });
+            if let Some((msg, is_err)) = &self.var_status {
+                ui.label(
+                    RichText::new(msg)
+                        .font(FontId::proportional(12.5))
+                        .color(if *is_err { pal.error } else { pal.primary }),
+                );
+            }
+        });
+    }
 
-                ui.add_space(10.0);
+    fn select_variable(&mut self, name: &str) {
+        self.var_edit_name = name.to_string();
+        self.var_edit_value = self
+            .engine
+            .variables
+            .get(name)
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+        self.var_status = None;
+    }
 
-                // 4. Automated Original-App Compatibility & Bug Audit Suite (`verification.rs`)
-                Frame::new()
-                    .fill(pal.surface_container)
-                    .corner_radius(CornerRadius::same(16))
-                    .inner_margin(egui::Margin::same(12))
-                    .show(ui, |ui| {
-                        let checks = crate::verification::run_all_verification_checks();
-                        let passed_count = checks.iter().filter(|c| c.passed).count();
-                        ui.label(
-                            RichText::new(format!(
-                                "Kompatibilitäts- & Fehlerdiagnose ({}/{} Tests bestanden)",
-                                passed_count,
-                                checks.len()
-                            ))
-                            .font(FontId::proportional(15.0))
-                            .strong()
-                            .color(pal.primary),
-                        );
-                        ui.add_space(4.0);
-                        for chk in checks {
-                            let badge = match chk.kind {
-                                crate::verification::FindingKind::MatchesOriginal => "1:1 Original",
-                                crate::verification::FindingKind::RebuildBugFixed => "Nachbau-Fix",
-                                crate::verification::FindingKind::OriginalAppBugDiagnosed => "Original-APK Bug",
-                            };
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label(
-                                    RichText::new(format!("[{} | {}]", chk.id, badge))
-                                        .font(FontId::monospace(11.5))
-                                        .strong()
-                                        .color(pal.primary),
-                                );
-                                ui.label(
-                                    RichText::new(format!(
-                                        "{} ({}) -> {} ( Soll: {} )",
-                                        chk.category,
-                                        chk.expression,
-                                        chk.actual_behavior,
-                                        chk.expected_behavior
-                                    ))
-                                    .font(FontId::proportional(12.5))
-                                    .strong(),
-                                );
-                            });
-                            ui.label(
-                                RichText::new(chk.note)
-                                    .font(FontId::proportional(11.5))
-                                    .color(pal.on_surface_variant),
-                            );
-                            ui.add_space(4.0);
+    /// Wert aus dem Variablen-Editor übernehmen – mit Rückmeldung statt stillem Scheitern.
+    fn save_variable(&mut self) {
+        let de = self.german_ui;
+        let name = self.var_edit_name.clone();
+        let raw = mathview::to_engine_syntax(self.var_edit_value.trim());
+        if raw.is_empty() {
+            self.var_status = Some((
+                (if de { "⚠ Bitte einen Wert eingeben." } else { "⚠ Please enter a value." }).to_string(),
+                true,
+            ));
+            return;
+        }
+        match self.engine.evaluate_preview(&raw, false) {
+            Ok(out) => match out.val.or_else(|| out.numeric_value.map(Value::from_complex)) {
+                Some(val) => {
+                    self.engine.variables.insert(name.clone(), val);
+                    self.engine.matrix_variables.remove(&name);
+                    self.mark_state_dirty();
+                    let shown = self.engine.number_format.format_f64(val.to_f64());
+                    self.var_status = Some((
+                        if de { format!("✓ {name} = {shown} gespeichert.") } else { format!("✓ Saved {name} = {shown}.") },
+                        false,
+                    ));
+                }
+                None => {
+                    self.var_status = Some((
+                        if de {
+                            format!("⚠ Kein Zahlenwert. Matrizen bitte im Rechner mit „{name} := …“ zuweisen.")
+                        } else {
+                            format!("⚠ Not a number. Assign matrices in the calculator with “{name} := …”.")
+                        },
+                        true,
+                    ));
+                }
+            },
+            Err(err) => self.var_status = Some((format!("⚠ {err}"), true)),
+        }
+    }
+
+    fn render_unit_converter_card(&mut self, ui: &mut Ui, pal: &MaterialYouPalette) {
+        let de = self.german_ui;
+        card(ui, pal, |ui| {
+            card_title(ui, pal, if de { "🔄 Einheiten umrechnen" } else { "🔄 Unit converter" });
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                for cat in UnitCategory::ALL {
+                    if ui.selectable_label(self.unit_cat == cat, cat.name(de)).clicked() && self.unit_cat != cat {
+                        self.unit_cat = cat;
+                        self.unit_from_idx = 0;
+                        self.unit_to_idx = 1;
+                    }
+                }
+            });
+
+            let units = self.unit_cat.units();
+            self.unit_from_idx = self.unit_from_idx.min(units.len() - 1);
+            self.unit_to_idx = self.unit_to_idx.min(units.len() - 1);
+            let unit_name = |i: usize| if de { units[i].0 } else { units[i].1 };
+
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.unit_input_str)
+                        .desired_width(120.0)
+                        .font(FontId::monospace(14.5))
+                        .hint_text(if de { "Wert" } else { "value" }),
+                );
+                egui::ComboBox::from_id_salt("unit_from_cb")
+                    .selected_text(unit_name(self.unit_from_idx))
+                    .show_ui(ui, |ui| {
+                        for i in 0..units.len() {
+                            ui.selectable_value(&mut self.unit_from_idx, i, unit_name(i));
+                        }
+                    });
+                ui.label("➡");
+                egui::ComboBox::from_id_salt("unit_to_cb")
+                    .selected_text(unit_name(self.unit_to_idx))
+                    .show_ui(ui, |ui| {
+                        for i in 0..units.len() {
+                            ui.selectable_value(&mut self.unit_to_idx, i, unit_name(i));
                         }
                     });
             });
+
+            let converted = parse_user_number(&self.unit_input_str, self.engine.number_format).map(|v| {
+                if self.unit_cat == UnitCategory::Temperature {
+                    convert_temperature(v, self.unit_from_idx, self.unit_to_idx)
+                } else {
+                    v * units[self.unit_from_idx].2 / units[self.unit_to_idx].2
+                }
+            });
+            ui.horizontal_wrapped(|ui| match converted {
+                Some(c) => {
+                    ui.label(
+                        RichText::new(format!("= {}", self.engine.number_format.format_f64(c)))
+                            .font(FontId::proportional(16.0))
+                            .strong()
+                            .color(pal.primary),
+                    );
+                    if ui
+                        .small_button(if de { "In Rechner übernehmen" } else { "Send to calculator" })
+                        .clicked()
+                    {
+                        self.insert_token(&engine_number(c));
+                        self.active_tab = MainTab::Calculator;
+                    }
+                }
+                None => {
+                    ui.label(
+                        RichText::new(if self.unit_input_str.trim().is_empty() {
+                            if de { "Wert eingeben, z. B. 1,5" } else { "Enter a value, e.g. 1.5" }
+                        } else if de {
+                            "⚠ Keine gültige Zahl"
+                        } else {
+                            "⚠ Not a valid number"
+                        })
+                        .color(if self.unit_input_str.trim().is_empty() { pal.on_surface_variant } else { pal.error }),
+                    );
+                }
+            });
+        });
+    }
+
+    fn slot_label(&self, i: usize) -> String {
+        format!("{} {} ({})", if self.german_ui { "Platz" } else { "Slot" }, i + 1, self.keyboard_slots[i])
+    }
+
+    fn render_constants_card(&mut self, ui: &mut Ui, pal: &MaterialYouPalette) {
+        let de = self.german_ui;
+        card(ui, pal, |ui| {
+            card_title(ui, pal, if de { "Naturkonstanten (CODATA 2022)" } else { "Physical constants (CODATA 2022)" });
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label("🔍");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.constants_search)
+                        .desired_width(220.0)
+                        .hint_text(if de { "Suchen: c₀, Planck, Avogadro …" } else { "Search: c₀, Planck, Avogadro …" }),
+                );
+                ui.separator();
+                ui.label(if de { "„Auf Tastatur“ belegt:" } else { "“Pin” replaces:" });
+                let current = self.slot_label(self.selected_slot_to_assign);
+                let labels: Vec<String> = (0..ASSIGNABLE_VARIABLE_SLOTS).map(|i| self.slot_label(i)).collect();
+                egui::ComboBox::from_id_salt("slot_pin_combo")
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        for (i, lbl) in labels.iter().enumerate() {
+                            ui.selectable_value(&mut self.selected_slot_to_assign, i, lbl);
+                        }
+                    });
+            });
+            if let Some(msg) = &self.const_status {
+                ui.label(RichText::new(msg).font(FontId::proportional(12.5)).color(pal.primary));
+            }
+            ui.add_space(6.0);
+
+            let query = self.constants_search.trim().to_lowercase();
+            let matches = |sc: &crate::constants::ScientificConstant| {
+                let name = if de { sc.name_de } else { sc.name_en };
+                query.is_empty()
+                    || name.to_lowercase().contains(&query)
+                    || sc.symbol.to_lowercase().contains(&query)
+                    || sc.token.to_lowercase().contains(&query)
+            };
+            if !SCIENTIFIC_CONSTANTS.iter().any(|sc| matches(sc)) {
+                ui.label(
+                    RichText::new(if de {
+                        format!("Keine Konstante gefunden für „{}“.", self.constants_search.trim())
+                    } else {
+                        format!("No constant matches “{}”.", self.constants_search.trim())
+                    })
+                    .color(pal.on_surface_variant),
+                );
+                return;
+            }
+
+            let narrow = ui.available_width() < 560.0;
+            for cat in [
+                ConstantCategory::Universal,
+                ConstantCategory::Electromagnetic,
+                ConstantCategory::Chemical,
+                ConstantCategory::Mathematical,
+            ] {
+                let items: Vec<&crate::constants::ScientificConstant> =
+                    SCIENTIFIC_CONSTANTS.iter().filter(|c| c.category == cat && matches(c)).collect();
+                if items.is_empty() {
+                    continue;
+                }
+                ui.label(
+                    RichText::new(if de { cat.title_de() } else { cat.title_en() })
+                        .font(FontId::proportional(14.5))
+                        .strong()
+                        .color(pal.primary),
+                );
+                ui.add_space(2.0);
+                for sc in items {
+                    let mut insert = false;
+                    let mut pin = false;
+                    Frame::new()
+                        .fill(pal.surface_container_low)
+                        .corner_radius(CornerRadius::same(10))
+                        .inner_margin(egui::Margin::symmetric(10, 6))
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            let mut actions = |ui: &mut Ui| {
+                                insert |= ui.button(if de { "➕ In Rechner" } else { "➕ Insert" }).clicked();
+                                pin |= ui
+                                    .small_button(if de { "📌 Auf Tastatur" } else { "📌 Pin to keyboard" })
+                                    .on_hover_text(if de {
+                                        "Auf den oben gewählten Platz der „a b c“-Tastatur legen"
+                                    } else {
+                                        "Put on the keyboard slot selected above (“a b c” section)"
+                                    })
+                                    .clicked();
+                            };
+                            if narrow {
+                                ui.horizontal(|ui| constant_info(ui, sc, pal, de));
+                                ui.horizontal(|ui| actions(ui));
+                            } else {
+                                ui.horizontal(|ui| {
+                                    constant_info(ui, sc, pal, de);
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| actions(ui));
+                                });
+                            }
+                        });
+                    if insert {
+                        self.insert_token(sc.token);
+                        self.active_tab = MainTab::Calculator;
+                    }
+                    if pin {
+                        let slot = self.selected_slot_to_assign;
+                        self.keyboard_slots[slot] = sc.token.to_string();
+                        self.const_status = Some(if de {
+                            format!("✓ {} liegt jetzt auf Platz {} der „a b c“-Tastatur.", sc.symbol, slot + 1)
+                        } else {
+                            format!("✓ {} is now on slot {} of the “a b c” keyboard.", sc.symbol, slot + 1)
+                        });
+                    }
+                }
+                ui.add_space(6.0);
+            }
+        });
+    }
+
+    fn render_settings_tab(&mut self, ui: &mut Ui, pal: &MaterialYouPalette) {
+        let de = self.german_ui;
+        ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            card(ui, pal, |ui| {
+                card_title(ui, pal, if de { "🎨 Darstellung" } else { "🎨 Appearance" });
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(if de { "Farbmodus:" } else { "Color mode:" });
+                    for mode in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Amoled] {
+                        ui.selectable_value(&mut self.theme_mode, mode, if de { mode.label_de() } else { mode.label_en() });
+                    }
+                });
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(if de { "Akzentfarbe:" } else { "Accent color:" });
+                    for seed in AccentSeed::ALL {
+                        let selected = self.accent_seed == seed;
+                        let (fill, fg, dot) = if selected {
+                            let c = seed.seed_color();
+                            (c, readable_on(c), readable_on(c))
+                        } else {
+                            (pal.surface_container_high, pal.on_surface, seed.seed_color())
+                        };
+                        let font = FontId::proportional(13.5);
+                        let mut job = egui::text::LayoutJob::default();
+                        job.append("● ", 0.0, egui::TextFormat { font_id: font.clone(), color: dot, ..Default::default() });
+                        job.append(seed.name(de), 0.0, egui::TextFormat { font_id: font, color: fg, ..Default::default() });
+                        let btn = egui::Button::new(egui::WidgetText::from(job))
+                            .fill(fill)
+                            .corner_radius(CornerRadius::same(12));
+                        let resp = ui.add(btn);
+                        resp.widget_info(|| {
+                            egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, selected, seed.name(de))
+                        });
+                        if resp.clicked() {
+                            self.accent_seed = seed;
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(if de { "Sprache:" } else { "Language:" });
+                    ui.selectable_value(&mut self.german_ui, true, "Deutsch");
+                    ui.selectable_value(&mut self.german_ui, false, "English");
+                });
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(if de { "Tastaturgröße:" } else { "Keyboard size:" });
+                    for (scale, name_de, name_en) in [
+                        (KEYBOARD_SCALES[0], "Klein", "Small"),
+                        (KEYBOARD_SCALES[1], "Standard", "Default"),
+                        (KEYBOARD_SCALES[2], "Groß", "Large"),
+                    ] {
+                        ui.selectable_value(&mut self.keyboard_scale, scale, if de { name_de } else { name_en });
+                    }
+                });
+            });
+
+            ui.add_space(10.0);
+            card(ui, pal, |ui| {
+                card_title(ui, pal, if de { "∑ Rechenwerk & Zahlenformat" } else { "∑ Math engine & number format" });
+                ui.add_space(6.0);
+
+                // Dezimalzeichen und Tausendertrennung sind zwei unabhängige
+                // Fragen (vorher steuerten zwei Zeilen denselben Zustand).
+                let prev_nf = self.engine.number_format;
+                let (comma, grouping) = nf_parts(prev_nf);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(if de { "Dezimalzeichen:" } else { "Decimal separator:" });
+                    if ui.selectable_label(comma, if de { "Komma (1,5)" } else { "Comma (1,5)" }).clicked() {
+                        self.engine.number_format = nf_from(true, grouping);
+                    }
+                    if ui.selectable_label(!comma, if de { "Punkt (1.5)" } else { "Point (1.5)" }).clicked() {
+                        self.engine.number_format = nf_from(false, grouping);
+                    }
+                });
+                let (comma, grouping) = nf_parts(self.engine.number_format);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(if de { "Tausendertrennung:" } else { "Digit grouping:" });
+                    let mark = match (comma, de) {
+                        (true, true) => "Punkt (1.234)",
+                        (true, false) => "Point (1.234)",
+                        (false, true) => "Komma (1,234)",
+                        (false, false) => "Comma (1,234)",
+                    };
+                    for (g, label) in [
+                        (Grouping::Space, if de { "Leerzeichen (1 234)" } else { "Space (1 234)" }),
+                        (Grouping::Mark, mark),
+                        (Grouping::None, if de { "Keine (1234)" } else { "None (1234)" }),
+                    ] {
+                        if ui.selectable_label(grouping == g, label).clicked() {
+                            self.engine.number_format = nf_from(comma, g);
+                        }
+                    }
+                });
+                ui.label(
+                    RichText::new(format!(
+                        "{} {}",
+                        if de { "Beispiel:" } else { "Example:" },
+                        self.engine.number_format.example()
+                    ))
+                    .font(FontId::proportional(12.0))
+                    .color(pal.on_surface_variant),
+                );
+                if self.engine.number_format != prev_nf {
+                    self.mark_state_dirty();
+                }
+
+                ui.add_space(6.0);
+                material_switch(
+                    ui,
+                    pal,
+                    &mut self.engine.show_exact_first,
+                    if de {
+                        "Exakte Ergebnisse (Brüche, π, Wurzeln) im Verlauf zuerst anzeigen"
+                    } else {
+                        "Show exact results (fractions, π, surds) first in history"
+                    },
+                );
+                if material_switch(
+                    ui,
+                    pal,
+                    &mut self.engine.modulo_always_positive,
+                    if de { "Modulo-Ergebnis immer positiv (a mod b ≥ 0)" } else { "Modulo result always positive (a mod b ≥ 0)" },
+                )
+                .changed()
+                {
+                    self.mark_state_dirty();
+                }
+                material_switch(
+                    ui,
+                    pal,
+                    &mut self.engine.auto_ans_insertion,
+                    if de {
+                        "ANS automatisch vor Operatoren einfügen (+, −, ×, ÷, ^) bei leerer Eingabe"
+                    } else {
+                        "Insert ANS before operators (+, −, ×, ÷, ^) when the input is empty"
+                    },
+                );
+            });
+
+            ui.add_space(10.0);
+            card(ui, pal, |ui| {
+                card_title(ui, pal, if de { "⌨ Tastatur" } else { "⌨ Keyboard" });
+                ui.add_space(6.0);
+                material_switch(
+                    ui,
+                    pal,
+                    &mut self.dual_keyboard,
+                    if de {
+                        "Zweiteilige Tastatur: Funktionen links, Ziffernblock rechts"
+                    } else {
+                        "Split keyboard: functions on the left, number pad on the right"
+                    },
+                );
+                material_switch(
+                    ui,
+                    pal,
+                    &mut self.show_hex_row,
+                    if de { "Hex-Ziffern (A–F) über der Tastatur anzeigen" } else { "Show hex digits (A–F) above the keyboard" },
+                );
+            });
+        });
+    }
+}
+
+/// Karte mit voller Spaltenbreite (vorher schrumpften Karten auf ihren Inhalt
+/// und hatten unterschiedlich breite Ränder).
+fn card<R>(ui: &mut Ui, pal: &MaterialYouPalette, add: impl FnOnce(&mut Ui) -> R) -> R {
+    Frame::new()
+        .fill(pal.surface_container)
+        .corner_radius(CornerRadius::same(16))
+        .inner_margin(egui::Margin::same(12))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            add(ui)
+        })
+        .inner
+}
+
+fn card_title(ui: &mut Ui, pal: &MaterialYouPalette, text: &str) {
+    ui.label(RichText::new(text).font(FontId::proportional(15.0)).strong().color(pal.primary));
+}
+
+/// Symbol, Name und Wert einer Konstante.
+fn constant_info(ui: &mut Ui, sc: &crate::constants::ScientificConstant, pal: &MaterialYouPalette, de: bool) {
+    Frame::new()
+        .fill(pal.primary_container)
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(egui::Margin::symmetric(8, 4))
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(sc.symbol)
+                    .font(FontId::proportional(14.5))
+                    .strong()
+                    .color(pal.on_primary_container),
+            );
+        });
+    let value = if de { sc.display_value.to_string() } else { sc.display_value.replace("(exakt)", "(exact)") };
+    // Dimensionslose Größen ohne angehängte „1“
+    let value = if sc.unit == "1" { value } else { format!("{value} {}", sc.unit) };
+    ui.vertical(|ui| {
+        ui.label(
+            RichText::new(if de { sc.name_de } else { sc.name_en })
+                .font(FontId::proportional(13.5))
+                .strong(),
+        );
+        ui.label(RichText::new(value).font(FontId::monospace(12.0)).color(pal.on_surface_variant));
+    });
+}
+
+/// Spalte mit begrenzter Breite, waagerecht zentriert. Auf großen Fenstern
+/// liegen Eingabe, Ergebnis und Tasten so nah beieinander.
+fn centered_column<R>(ui: &mut Ui, max_width: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let avail = ui.available_rect_before_wrap();
+    let w = avail.width().min(max_width);
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(avail.center().x - w / 2.0, avail.top()),
+        egui::vec2(w, avail.height()),
+    );
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), add).inner
+}
+
+fn window_title(de: bool) -> &'static str {
+    if de {
+        "Niob — Wissenschaftlicher Rechner"
+    } else {
+        "Niob — Scientific Calculator"
+    }
+}
+
+/// Kommt im Ausdruck ein freies `x` vor (kein `exp`, kein `0x1F`, keine
+/// Laufvariable wie in `int(x^2, x, 0, 3)`)? Nur dann gibt es „Plotten“.
+fn plottable_in_x(raw: &str) -> bool {
+    let compact: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+    if compact.contains(",x,") {
+        return false;
+    }
+    let mut ident = String::new();
+    for ch in compact.chars().chain(std::iter::once(' ')) {
+        if ch.is_ascii_digit() && ident.is_empty() {
+            continue; // Zahl, z. B. die 2 in „2x“
+        }
+        if ch.is_alphanumeric() || ch == '_' {
+            ident.push(ch);
+        } else {
+            if ident == "x" {
+                return true;
+            }
+            ident.clear();
+        }
+    }
+    false
+}
+
+/// Eingabe des Einheitenrechners lesen. Akzeptiert Dezimalkomma und -punkt
+/// sowie Tausendertrennung passend zum gewählten Zahlenformat.
+fn parse_user_number(input: &str, nf: NumberFormatMode) -> Option<f64> {
+    let t: String = input
+        .trim()
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '\'')
+        .map(|c| if c == '−' { '-' } else { c })
+        .collect();
+    if t.is_empty() {
+        return None;
+    }
+    let comma_decimal = decimal_and_group_seps(nf).1 == ',';
+    let groups_of_three = |sep: char| t.split(sep).skip(1).all(|g| g.len() == 3);
+    let normalized = if t.contains(',') && t.contains('.') {
+        if comma_decimal {
+            t.replace('.', "").replace(',', ".")
+        } else {
+            t.replace(',', "")
+        }
+    } else if t.contains(',') {
+        if !comma_decimal && groups_of_three(',') {
+            t.replace(',', "")
+        } else {
+            t.replace(',', ".")
+        }
+    } else if t.contains('.') && comma_decimal && groups_of_three('.') && t.matches('.').count() > 1 {
+        t.replace('.', "")
+    } else {
+        t
+    };
+    normalized.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+/// Zahl in Engine-Schreibweise mit höchstens 12 gültigen Stellen
+/// (`1.2500000000000002` → `1.25`); negative Werte in Klammern.
+fn engine_number(v: f64) -> String {
+    let rounded: f64 = format!("{:.11e}", v).parse().unwrap_or(v);
+    let s = format!("{rounded:?}");
+    let s = s.strip_suffix(".0").map(str::to_string).unwrap_or(s);
+    if rounded < 0.0 {
+        format!("({s})")
+    } else {
+        s
+    }
+}
+
+/// Nachkommastellen der Achsenbeschriftung für einen Gitterabstand von 1, 2 oder 5 × 10ⁿ.
+fn axis_decimals(step: f64) -> usize {
+    (-step.log10()).ceil().clamp(0.0, 12.0) as usize
+}
+
+/// Achsenbeschriftung; sehr große und sehr kleine Werte in Exponentenschreibweise.
+fn axis_label(v: f64, decimals: usize) -> String {
+    let a = v.abs();
+    if a >= 1e6 || (a > 0.0 && a < 1e-4) {
+        let s = format!("{:.2e}", v);
+        let (mant, exp) = s.split_once('e').unwrap_or((&s, "0"));
+        let mant = if mant.contains('.') { mant.trim_end_matches('0').trim_end_matches('.') } else { mant };
+        return format!("{mant}e{exp}");
+    }
+    let s = format!("{:.*}", decimals, v);
+    match s.strip_prefix('-') {
+        Some(rest) if rest.chars().all(|c| c == '0' || c == '.') => rest.to_string(),
+        _ => s,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Grouping {
+    Space,
+    /// Punkt bei Dezimalkomma, Komma bei Dezimalpunkt
+    Mark,
+    None,
+}
+
+fn nf_parts(nf: NumberFormatMode) -> (bool, Grouping) {
+    match nf {
+        NumberFormatMode::SpacePoint => (false, Grouping::Space),
+        NumberFormatMode::CommaPoint => (false, Grouping::Mark),
+        NumberFormatMode::NonePoint => (false, Grouping::None),
+        NumberFormatMode::SpaceComma => (true, Grouping::Space),
+        NumberFormatMode::PointComma => (true, Grouping::Mark),
+        NumberFormatMode::NoneComma => (true, Grouping::None),
+    }
+}
+
+fn nf_from(comma_decimal: bool, grouping: Grouping) -> NumberFormatMode {
+    match (comma_decimal, grouping) {
+        (false, Grouping::Space) => NumberFormatMode::SpacePoint,
+        (false, Grouping::Mark) => NumberFormatMode::CommaPoint,
+        (false, Grouping::None) => NumberFormatMode::NonePoint,
+        (true, Grouping::Space) => NumberFormatMode::SpaceComma,
+        (true, Grouping::Mark) => NumberFormatMode::PointComma,
+        (true, Grouping::None) => NumberFormatMode::NoneComma,
     }
 }
 
@@ -3815,6 +3788,9 @@ fn material_switch(
             *on = !*on;
             response.mark_changed();
         }
+        // Für Screenreader: Schalter mit Beschriftung und Zustand
+        let state = *on;
+        response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, state, label));
         if ui.is_rect_visible(rect) {
             let how_on = ui.ctx().animate_bool_responsive(response.id, *on);
             let radius = rect.height() * 0.5;
@@ -3870,6 +3846,11 @@ impl eframe::App for NiobCalculatorApp {
 
         self.handle_keyboard_input(&ctx);
 
+        if self.window_title_de != Some(self.german_ui) {
+            self.window_title_de = Some(self.german_ui);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(window_title(self.german_ui).to_string()));
+        }
+
         egui::Panel::top("material_you_top_bar")
             .frame(
                 Frame::new()
@@ -3899,14 +3880,15 @@ impl eframe::App for NiobCalculatorApp {
                     .inner_margin(egui::Margin::same(12)),
             )
             .show_inside(ui, |ui| match self.active_tab {
-                MainTab::Calculator => self.render_calculator_tab(ui, &pal),
+                MainTab::Calculator => centered_column(ui, 1100.0, |ui| self.render_calculator_tab(ui, &pal)),
                 MainTab::Plotter => self.render_plotter_tab(ui, &pal),
                 MainTab::VariablesAndConstants => {
-                    self.render_variables_and_constants_tab(ui, &pal)
+                    centered_column(ui, 1000.0, |ui| self.render_variables_and_constants_tab(ui, &pal))
                 }
-                MainTab::ConverterAndSettings => self.render_converter_and_settings_tab(ui, &pal),
+                MainTab::Settings => centered_column(ui, 1000.0, |ui| self.render_settings_tab(ui, &pal)),
             });
 
+        self.persist_prefs_if_changed();
         self.handle_screenshot(&ctx);
     }
 }
@@ -3930,7 +3912,7 @@ fn main() -> eframe::Result {
     let screenshot_path = parse_screenshot_arg();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Niob — Wissenschaftlicher Rechner (Material You)")
+            .with_title(window_title(true))
             .with_inner_size([960.0, 680.0])
             .with_min_inner_size([420.0, 520.0]),
         ..Default::default()
@@ -4084,7 +4066,8 @@ mod ui_tests {
 
     #[test]
     fn keypad_and_cursor_editing() {
-        let mut app = NiobCalculatorApp::new(None);
+        // Testinstanz ohne Zugriff auf die echte Zustandsdatei
+        let mut app = NiobCalculatorApp::new(Some("review-fixture".into()));
         app.history.clear();
         app.clear_input();
         app.engine.auto_ans_insertion = false;
@@ -4108,5 +4091,94 @@ mod ui_tests {
         app.input_sel = (2, 2);
         app.backspace();
         assert_eq!(app.input_expr, "×π45");
+    }
+
+    /// Befund: „Plot“ erschien bei jedem Ausdruck mit einem „x“, auch bei exp(2).
+    #[test]
+    fn plot_button_only_for_a_free_x() {
+        for (expr, want) in [
+            ("x^2", true),
+            ("2x+1", true),
+            ("sin(x)", true),
+            ("sum(k, k, 1, x)", true),
+            ("exp(2)", false),
+            ("0x1F", false),
+            ("max", false),
+            ("int(x^2, x, 0, 3)", false),
+            ("deriv(x^3, x, 2)", false),
+        ] {
+            assert_eq!(plottable_in_x(expr), want, "{expr}");
+        }
+    }
+
+    /// Befund: „Plot“ im Verlauf überschrieb f₁ ohne Rückfrage.
+    #[test]
+    fn plotting_from_history_does_not_overwrite_silently() {
+        let mut app = NiobCalculatorApp::new(Some("review-fixture".into()));
+        let before: Vec<String> = app.plot_functions.iter().map(|p| p.expr.clone()).collect();
+        app.plot_expression("x^3");
+        assert_eq!(app.plot_functions.len(), before.len() + 1);
+        assert!(before.iter().zip(&app.plot_functions).all(|(b, p)| *b == p.expr));
+        app.plot_expression("x^3");
+        assert_eq!(app.plot_functions.len(), before.len() + 1, "kein Duplikat");
+        while app.plot_functions.len() < MAX_PLOT_FUNCTIONS {
+            let n = app.plot_functions.len();
+            app.plot_expression(&format!("x+{n}"));
+        }
+        assert!(app.plot_notice.is_none());
+        app.plot_expression("x-1");
+        assert_eq!(app.plot_functions.len(), MAX_PLOT_FUNCTIONS);
+        assert!(app.plot_notice.is_some(), "Ersetzen wird angezeigt");
+        let mut colors: Vec<usize> = app.plot_functions.iter().map(|p| p.color_idx).collect();
+        colors.dedup();
+        assert_eq!(colors.len(), MAX_PLOT_FUNCTIONS, "jede Kurve hat eine eigene Farbe");
+    }
+
+    /// Befund: Einheitenrechner machte aus „1,5“ stillschweigend 0.
+    #[test]
+    fn unit_converter_reads_locale_numbers() {
+        use NumberFormatMode::*;
+        assert_eq!(parse_user_number("1,5", SpaceComma), Some(1.5));
+        assert_eq!(parse_user_number("1,5", SpacePoint), Some(1.5));
+        assert_eq!(parse_user_number("1.5", SpaceComma), Some(1.5));
+        assert_eq!(parse_user_number("1,250", CommaPoint), Some(1250.0));
+        assert_eq!(parse_user_number("1.250,75", PointComma), Some(1250.75));
+        assert_eq!(parse_user_number("1.250.000", PointComma), Some(1_250_000.0));
+        assert_eq!(parse_user_number("1 250.5", SpacePoint), Some(1250.5));
+        assert_eq!(parse_user_number("−3", SpacePoint), Some(-3.0));
+        assert_eq!(parse_user_number("abc", SpacePoint), None);
+        assert_eq!(parse_user_number("  ", SpacePoint), None);
+        assert_eq!(engine_number(1.25 + 2e-16), "1.25");
+        assert_eq!(engine_number(1250.0), "1250");
+        assert_eq!(engine_number(-0.5), "(-0.5)");
+        assert_eq!(engine_number(1e-20), "1e-20");
+    }
+
+    /// Befund: am linken Rand stand „0“ statt „−10“; bei starkem Zoom leere Beschriftungen.
+    #[test]
+    fn axis_labels_follow_the_grid_step() {
+        assert_eq!(axis_label(-10.0, axis_decimals(2.0)), "-10");
+        assert_eq!(axis_label(0.05, axis_decimals(0.05)), "0.05");
+        assert_eq!(axis_label(0.1, axis_decimals(0.05)), "0.10");
+        assert_eq!(axis_label(0.0003, axis_decimals(0.0001)), "0.0003");
+        assert_eq!(axis_label(2e-6, axis_decimals(1e-6)), "2e-6");
+        assert_eq!(axis_label(5e6, axis_decimals(1e6)), "5e6");
+        assert_eq!(axis_label(-0.30000000004, axis_decimals(0.1)), "-0.3");
+        assert_eq!(axis_label(-0.00000000001, axis_decimals(0.5)), "-1e-11");
+    }
+
+    /// Befund: frische Installation hatte a = 5, b = 3, x = 2, sodass `x+1` 3 ergab.
+    #[test]
+    fn fresh_start_has_no_preset_variables() {
+        let app = NiobCalculatorApp::new(Some("review-fixture".into()));
+        assert!(app.engine.variables.is_empty());
+    }
+
+    #[test]
+    fn number_format_parts_round_trip() {
+        for nf in NumberFormatMode::ALL {
+            let (comma, grouping) = nf_parts(nf);
+            assert_eq!(nf_from(comma, grouping), nf);
+        }
     }
 }

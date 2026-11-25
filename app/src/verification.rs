@@ -17,6 +17,9 @@ pub enum FindingKind {
     OriginalAppBugDiagnosed,
 }
 
+/// Nur noch Testmaterial: Die Ergebnisse erscheinen nicht mehr in der
+/// Oberfläche, daher werden Ausdruck, Art und Notiz nur im Debug-Format gelesen.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct VerificationCheck {
     pub id: &'static str,

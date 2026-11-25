@@ -27,7 +27,93 @@ impl ThemeMode {
             Self::Amoled => "AMOLED Pure Black",
         }
     }
+
+    /// Kurzname für die Kopfleiste.
+    pub fn short_label(self, de: bool) -> &'static str {
+        match (self, de) {
+            (Self::Dark, true) => "Dunkel",
+            (Self::Dark, false) => "Dark",
+            (Self::Light, true) => "Hell",
+            (Self::Light, false) => "Light",
+            (Self::Amoled, _) => "AMOLED",
+        }
+    }
+
+    /// Schlüssel für die gespeicherten Einstellungen.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+            Self::Amoled => "amoled",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        [Self::Dark, Self::Light, Self::Amoled].into_iter().find(|m| m.key() == key)
+    }
 }
+
+/// Relative Leuchtdichte nach WCAG 2.x.
+fn relative_luminance(c: Color32) -> f64 {
+    let channel = |v: u8| {
+        let s = v as f64 / 255.0;
+        if s <= 0.03928 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(c.r()) + 0.7152 * channel(c.g()) + 0.0722 * channel(c.b())
+}
+
+/// Kontrastverhältnis nach WCAG (1 … 21).
+pub fn contrast_ratio(a: Color32, b: Color32) -> f64 {
+    let (la, lb) = (relative_luminance(a), relative_luminance(b));
+    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// `c` schrittweise abdunkeln (heller Hintergrund) bzw. aufhellen (dunkler
+/// Hintergrund), bis der Kontrast zu allen `backgrounds` mindestens `min` ist.
+/// Der Farbton bleibt erhalten, nur die Helligkeit ändert sich.
+pub fn ensure_contrast(c: Color32, backgrounds: &[Color32], min: f64) -> Color32 {
+    let Some(&first) = backgrounds.first() else {
+        return c;
+    };
+    let target = if relative_luminance(first) > 0.18 {
+        Color32::BLACK
+    } else {
+        Color32::WHITE
+    };
+    let ok = |col: Color32| backgrounds.iter().all(|&bg| contrast_ratio(col, bg) >= min);
+    let mut t: f32 = 0.0;
+    let mut out = c;
+    while !ok(out) && t < 1.0 {
+        t += 0.02;
+        out = blend(c, target, t.min(1.0));
+    }
+    out
+}
+
+/// Schwarz oder Weiß, je nachdem, was auf `bg` besser lesbar ist.
+pub fn readable_on(bg: Color32) -> Color32 {
+    if contrast_ratio(Color32::BLACK, bg) >= contrast_ratio(Color32::WHITE, bg) {
+        Color32::BLACK
+    } else {
+        Color32::WHITE
+    }
+}
+
+/// Grundfarben der Plotter-Kurven f₁ … f₆.
+const PLOT_BASE_COLORS: [Color32; 6] = [
+    Color32::from_rgb(0x3D, 0xDC, 0x84),
+    Color32::from_rgb(0x64, 0xB5, 0xF6),
+    Color32::from_rgb(0xFF, 0xB7, 0x4D),
+    Color32::from_rgb(0xF0, 0x62, 0x92),
+    Color32::from_rgb(0xBA, 0x68, 0xC8),
+    Color32::from_rgb(0x4D, 0xD0, 0xE1),
+];
+pub const PLOT_COLOR_COUNT: usize = PLOT_BASE_COLORS.len();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccentSeed {
@@ -64,6 +150,45 @@ impl AccentSeed {
             Self::CrimsonRed => "Karminrot",
             Self::GoldenAmber => "Sonnengelb",
         }
+    }
+
+    pub fn name_en(self) -> &'static str {
+        match self {
+            Self::NiobEmerald => "Niob Emerald",
+            Self::DynamicViolet => "Material Violet",
+            Self::OceanBlue => "Ocean Blue",
+            Self::SunsetOrange => "Amber Orange",
+            Self::RosePink => "Pastel Pink",
+            Self::ForestGreen => "Forest Green",
+            Self::CrimsonRed => "Crimson Red",
+            Self::GoldenAmber => "Sunny Yellow",
+        }
+    }
+
+    pub fn name(self, de: bool) -> &'static str {
+        if de {
+            self.name_de()
+        } else {
+            self.name_en()
+        }
+    }
+
+    /// Schlüssel für die gespeicherten Einstellungen.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::NiobEmerald => "niob_emerald",
+            Self::DynamicViolet => "dynamic_violet",
+            Self::OceanBlue => "ocean_blue",
+            Self::SunsetOrange => "sunset_orange",
+            Self::RosePink => "rose_pink",
+            Self::ForestGreen => "forest_green",
+            Self::CrimsonRed => "crimson_red",
+            Self::GoldenAmber => "golden_amber",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.key() == key)
     }
 
     pub fn seed_color(self) -> Color32 {
@@ -113,7 +238,43 @@ fn blend(a: Color32, b: Color32, t: f32) -> Color32 {
 }
 
 impl MaterialYouPalette {
+    /// Palette für Farbmodus und Akzent. Text- und Akzentfarben werden so
+    /// nachgeregelt, dass sie WCAG AA (4,5:1) auf allen Flächen erreichen,
+    /// auf denen sie vorkommen – auch bei hellen Akzenten im Hell-Modus.
     pub fn generate(mode: ThemeMode, seed: AccentSeed) -> Self {
+        let mut pal = Self::base(mode, seed);
+        let surfaces = [
+            pal.bg_surface,
+            pal.surface_container_low,
+            pal.surface_container,
+            pal.surface_container_high,
+        ];
+        const AA: f64 = 4.6; // kleine Reserve über 4,5
+        pal.primary = ensure_contrast(pal.primary, &surfaces, AA);
+        if contrast_ratio(pal.on_primary, pal.primary) < AA {
+            pal.on_primary = readable_on(pal.primary);
+        }
+        pal.error = ensure_contrast(pal.error, &surfaces, AA);
+        pal.on_surface_variant = ensure_contrast(pal.on_surface_variant, &surfaces, AA);
+        pal.on_primary_container = ensure_contrast(pal.on_primary_container, &[pal.primary_container], AA);
+        pal.on_secondary_container =
+            ensure_contrast(pal.on_secondary_container, &[pal.secondary_container], AA);
+        pal.on_tertiary_container =
+            ensure_contrast(pal.on_tertiary_container, &[pal.tertiary_container], AA);
+        pal
+    }
+
+    /// Farbe der Plotter-Kurve `idx`, lesbar auf dem Plot-Hintergrund und als
+    /// Beschriftung („f₁(x) =“) auf den Karten.
+    pub fn plot_color(&self, idx: usize) -> Color32 {
+        ensure_contrast(
+            PLOT_BASE_COLORS[idx % PLOT_COLOR_COUNT],
+            &[self.surface_container_low, self.surface_container],
+            4.5,
+        )
+    }
+
+    fn base(mode: ThemeMode, seed: AccentSeed) -> Self {
         let base = seed.seed_color();
         match mode {
             ThemeMode::Dark => {
@@ -255,10 +416,50 @@ impl MaterialYouPalette {
 
         visuals.selection.bg_fill = self.primary_container;
         visuals.selection.stroke = Stroke::new(1.5_f32, self.primary);
+        visuals.text_cursor.stroke.color = self.primary;
 
         style.visuals = visuals;
         style.spacing.item_spacing = egui::vec2(6.0, 6.0);
         style.spacing.button_padding = egui::vec2(10.0, 6.0);
         ctx.set_global_style(style);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Befund aus der UI-Bewertung: Im Hell-Modus lagen Ergebnistext und
+    /// „=“-Taste mit hellen Akzenten bei 2,2–3,7:1.
+    #[test]
+    fn all_palettes_reach_wcag_aa_for_text() {
+        for mode in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Amoled] {
+            for seed in AccentSeed::ALL {
+                let p = MaterialYouPalette::generate(mode, seed);
+                let surfaces = [p.bg_surface, p.surface_container_low, p.surface_container, p.surface_container_high];
+                for bg in surfaces {
+                    assert!(contrast_ratio(p.primary, bg) >= 4.5, "{mode:?}/{seed:?} primary");
+                    assert!(contrast_ratio(p.error, bg) >= 4.5, "{mode:?}/{seed:?} error");
+                    assert!(contrast_ratio(p.on_surface_variant, bg) >= 4.5, "{mode:?}/{seed:?} variant");
+                }
+                assert!(contrast_ratio(p.on_primary, p.primary) >= 4.5, "{mode:?}/{seed:?} on_primary");
+                assert!(contrast_ratio(p.on_primary_container, p.primary_container) >= 4.5);
+                assert!(contrast_ratio(p.on_secondary_container, p.secondary_container) >= 4.5);
+                assert!(contrast_ratio(p.on_tertiary_container, p.tertiary_container) >= 4.5);
+                for i in 0..PLOT_COLOR_COUNT {
+                    assert!(contrast_ratio(p.plot_color(i), p.surface_container) >= 4.5, "{mode:?} plot {i}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn theme_and_accent_keys_round_trip() {
+        for seed in AccentSeed::ALL {
+            assert_eq!(AccentSeed::from_key(seed.key()), Some(seed));
+        }
+        for mode in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Amoled] {
+            assert_eq!(ThemeMode::from_key(mode.key()), Some(mode));
+        }
     }
 }

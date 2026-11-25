@@ -1124,6 +1124,11 @@ impl Layouter<'_> {
 /// Darstellungsbaum zeichnen. Liefert die Antwort des belegten Bereichs.
 pub fn math_widget(ui: &mut Ui, node: &MathNode, size: f32, color: Color32, sense: Sense) -> Response {
     let laid = Layouter { ui, color }.layout(node, size);
+    paint_laid(ui, laid, color, sense)
+}
+
+/// Gesetzten Block als eine Fläche belegen und zeichnen.
+fn paint_laid(ui: &mut Ui, laid: Laid, color: Color32, sense: Sense) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(laid.w.ceil(), laid.h().ceil()), sense);
     if ui.is_rect_visible(rect) {
         let origin = Pos2::new(rect.left(), rect.top() + laid.asc);
@@ -1176,6 +1181,93 @@ pub fn show_math(
     let mut job = rich_job(fallback, FontId::proportional(size), color);
     job.wrap.max_width = max_width.max(40.0);
     ui.add(egui::Label::new(job).sense(sense))
+}
+
+/// Teilt `s` an Kommas außerhalb von Klammern.
+fn split_top_level(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
+/// Matrixliteral `[[a, b], [c, d]]` in Zeilen mit Elementtexten zerlegen.
+/// `None`, wenn es kein rechteckiges Literal ist.
+pub fn parse_matrix_literal(src: &str) -> Option<Vec<Vec<String>>> {
+    let inner = src.trim().strip_prefix('[')?.strip_suffix(']')?.trim();
+    let mut rows = Vec::new();
+    for row in split_top_level(inner) {
+        let cells = row.trim().strip_prefix('[')?.strip_suffix(']')?;
+        let cells: Vec<String> = split_top_level(cells).into_iter().map(|c| c.trim().to_string()).collect();
+        if cells.iter().any(|c| c.is_empty() || c.contains('[')) {
+            return None;
+        }
+        rows.push(cells);
+    }
+    let width = rows.first()?.len();
+    rows.iter().all(|r| r.len() == width).then_some(rows)
+}
+
+/// Matrix mit eckigen Klammern setzen; Elemente mit Formelsatz (Brüche,
+/// Wurzeln), spaltenweise zentriert. Die Matrix wird als ein Block gesetzt
+/// und belegt nur eine Fläche – so passt sie auch in rechtsbündige Zeilen.
+pub fn matrix_widget(ui: &mut Ui, rows: &[Vec<String>], size: f32, color: Color32, sense: Sense) -> Response {
+    let laid = {
+        let lay = Layouter { ui, color };
+        let cells: Vec<Vec<Laid>> = rows
+            .iter()
+            .map(|r| {
+                r.iter()
+                    .map(|c| lay.layout(&parse_math(c).unwrap_or_else(|| MathNode::text(c)), size))
+                    .collect()
+            })
+            .collect();
+        let ncols = cells.first().map_or(0, Vec::len);
+        let (gap_x, gap_y, pad) = (size * 0.9, size * 0.25, size * 0.6);
+        let col_w: Vec<f32> = (0..ncols)
+            .map(|j| cells.iter().map(|r| r[j].w).fold(0.0, f32::max))
+            .collect();
+        let row_asc: Vec<f32> = cells.iter().map(|r| r.iter().map(|c| c.asc).fold(0.0, f32::max)).collect();
+        let row_desc: Vec<f32> = cells.iter().map(|r| r.iter().map(|c| c.desc).fold(0.0, f32::max)).collect();
+        let content_h: f32 = row_asc.iter().zip(&row_desc).map(|(a, d)| a + d).sum::<f32>()
+            + gap_y * (cells.len().saturating_sub(1)) as f32;
+        let mut out = Laid::empty();
+        out.w = 2.0 * pad + col_w.iter().sum::<f32>() + gap_x * (ncols.saturating_sub(1)) as f32;
+        out.asc = content_h / 2.0 + 3.0;
+        out.desc = content_h / 2.0 + 3.0;
+        let mut top = -content_h / 2.0;
+        for (i, row) in cells.into_iter().enumerate() {
+            let baseline = top + row_asc[i];
+            let mut x = pad;
+            for (j, cell) in row.into_iter().enumerate() {
+                let dx = x + (col_w[j] - cell.w) / 2.0;
+                out.place(cell, dx, baseline);
+                x += col_w[j] + gap_x;
+            }
+            top = baseline + row_desc[i] + gap_y;
+        }
+        let lw = (size * 0.07).max(1.2);
+        let (y0, y1, tick) = (-out.asc + 1.0, out.desc - 1.0, size * 0.3);
+        for (x, dir) in [(pad * 0.3, 1.0), (out.w - pad * 0.3, -1.0)] {
+            out.prims.push(Prim::Line(Vec2::new(x, y0), Vec2::new(x, y1), lw));
+            out.prims.push(Prim::Line(Vec2::new(x, y0), Vec2::new(x + dir * tick, y0), lw));
+            out.prims.push(Prim::Line(Vec2::new(x, y1), Vec2::new(x + dir * tick, y1), lw));
+        }
+        out
+    };
+    paint_laid(ui, laid, color, sense)
 }
 
 // ---------------------------------------------------------------------------
@@ -1359,5 +1451,16 @@ mod tests {
         assert_eq!(job.sections.len(), 3);
         assert_eq!(job.sections[1].format.color, Color32::TRANSPARENT);
         assert_eq!(job.sections[2].format.valign, Align::TOP);
+    }
+
+    #[test]
+    fn matrix_literals_split_into_cells() {
+        let rows = parse_matrix_literal("[[-2, 1], [3 / 2, -1 / 2]]").unwrap();
+        assert_eq!(rows, vec![vec!["-2", "1"], vec!["3 / 2", "-1 / 2"]]);
+        let rows = parse_matrix_literal("[[sqrt(2), f(1, 2)]]").unwrap();
+        assert_eq!(rows, vec![vec!["sqrt(2)", "f(1, 2)"]]);
+        assert!(parse_matrix_literal("[[1, 2], [3]]").is_none());
+        assert!(parse_matrix_literal("42").is_none());
+        assert!(parse_matrix_literal("[[1, ], [2, 3]]").is_none());
     }
 }
