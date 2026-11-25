@@ -764,6 +764,70 @@ public final class CalculatorRegressionTest {
                 require(rejected, invalid + " must be rejected");
             }
         });
+        add("exact_flag_and_large_factorial", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            CalculatorEngine.Result fact25 = engine.evaluate("25!");
+            require(fact25.isExact, "25! must be exact");
+            require("15511210043330985984000000".equals(fact25.exactText),
+                    "25! exact text mismatch: " + fact25.exactText);
+            require("15511210043330985984000000".equals(fact25.decimalText),
+                    "25! decimal text mismatch: " + fact25.decimalText);
+
+            CalculatorEngine.Result fact171 = engine.evaluate("171!");
+            require(fact171.isExact, "171! must be exact");
+            require(fact171.exactText.length() == 310 && fact171.exactText.startsWith("124101807021766782"),
+                    "171! exact text mismatch: len=" + fact171.exactText.length());
+            CalculatorEngine.Result factRatio = engine.evaluate("171!/170!");
+            require(factRatio.isExact && "171".equals(factRatio.exactText),
+                    "171!/170! mismatch: " + factRatio.exactText);
+
+            for (String bigExpr : new String[]{"1001!", "exp(1000)"}) {
+                String errMsg = null;
+                try {
+                    engine.evaluate(bigExpr);
+                } catch (RuntimeException expected) {
+                    errMsg = expected.getMessage();
+                }
+                require(errMsg != null && (errMsg.contains("Wert zu groß") || errMsg.contains("Überlauf")),
+                        bigExpr + " must report overflow error, got: " + errMsg);
+            }
+
+            for (String exactExpr : new String[]{"1/3", "sqrt(2)", "sin(pi/3)", "c0", "h", "e_charge", "k_B", "N_A", "F", "R"}) {
+                require(engine.evaluate(exactExpr).isExact, exactExpr + " must be exact");
+            }
+            for (String inexactExpr : new String[]{"tan(90)", "sin(1)", "ln(2)", "G", "sqrt(2)+1e-10"}) {
+                require(!engine.evaluate(inexactExpr).isExact, inexactExpr + " (RAD) must not be marked exact");
+            }
+            engine.setRadiansMode(false);
+            require(!engine.evaluate("tan(90)").isExact, "tan(90) (DEG) must not be marked exact");
+        });
+        add("codata_2022_constants", () -> {
+            CalculatorEngine engine = new CalculatorEngine();
+            number(engine.evaluate("G"), 6.67430e-11, 0.0, 1e-12);
+            number(engine.evaluate("mu0"), 1.25663706127e-6, 0.0, 1e-12);
+            number(engine.evaluate("eps0"), 8.8541878188e-12, 0.0, 1e-12);
+            number(engine.evaluate("alpha_fs"), 7.2973525643e-3, 0.0, 1e-12);
+            number(engine.evaluate("Z0"), 376.730313412, 0.0, 1e-12);
+            number(engine.evaluate("R_inf"), 10973731.568157, 0.0, 1e-12);
+            number(engine.evaluate("E_h"), 4.3597447222060e-18, 0.0, 1e-12);
+            number(engine.evaluate("mu_B"), 9.2740100657e-24, 0.0, 1e-12);
+            number(engine.evaluate("mu_e"), -9.2847646917e-24, 0.0, 1e-12);
+            number(engine.evaluate("u"), 1.66053906892e-27, 0.0, 1e-12);
+            number(engine.evaluate("m_e"), 9.1093837139e-31, 0.0, 1e-12);
+            number(engine.evaluate("m_p"), 1.67262192595e-27, 0.0, 1e-12);
+            number(engine.evaluate("m_n"), 1.67492750056e-27, 0.0, 1e-12);
+            number(engine.evaluate("r_e"), 2.8179403205e-15, 0.0, 1e-12);
+            number(engine.evaluate("lambda_C"), 2.42631023538e-12, 0.0, 1e-12);
+            number(engine.evaluate("a_0"), 5.29177210544e-11, 0.0, 1e-12);
+            number(engine.evaluate("mu_N"), 5.0507837393e-27, 0.0, 1e-12);
+
+            CalculatorEngine.Result c0 = engine.evaluate("c0");
+            require("299792458".equals(c0.exactText) && c0.isExact, "c0 must be exact 299792458");
+            number(engine.evaluate("h"), 6.62607015e-34, 0.0, 1e-12);
+            number(engine.evaluate("e_charge"), 1.602176634e-19, 0.0, 1e-12);
+            number(engine.evaluate("k_B"), 1.380649e-23, 0.0, 1e-12);
+            number(engine.evaluate("N_A"), 6.02214076e23, 0.0, 1e-12);
+        });
     }
 
     public static void main(String[] args) throws Exception {

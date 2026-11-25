@@ -1155,7 +1155,7 @@ impl NumberFormatMode {
             return "0".to_string();
         }
         // Scientific notation for very large or very small numbers
-        if abs_v >= 1e12 || (abs_v > 0.0 && abs_v < 1e-6) {
+        if abs_v >= 1e12 || (abs_v > 0.0 && abs_v < 1e-4) {
             let mut exp = abs_v.log10().floor() as i32;
             let mut mantissa = if exp < -290 {
                 (val * 1e200) * 10f64.powi(-(exp + 200))
@@ -1181,12 +1181,13 @@ impl NumberFormatMode {
             return format!("{} × 10{}", m_formatted, to_superscript(exp));
         }
 
-        let int_digits = if abs_v < 1.0 {
-            1
+        let max_decimals = if abs_v < 1.0 {
+            let leading_zeros = ((-abs_v.log10().floor()) as isize - 1).max(0) as usize;
+            (12 + leading_zeros).min(15)
         } else {
-            (abs_v.log10().floor() as usize) + 1
+            let int_digits = (abs_v.log10().floor() as usize) + 1;
+            15usize.saturating_sub(int_digits).min(10)
         };
-        let max_decimals = 15usize.saturating_sub(int_digits).min(10);
         let raw = trim_float(val, max_decimals);
         self.apply_separators(&raw)
     }
@@ -1768,6 +1769,7 @@ pub struct EvalOutput {
     pub exact_text: String,
     pub decimal_text: String,
     pub has_distinct_exact: bool,
+    pub is_exact: bool,
     pub numeric_value: Option<Complex>,
     pub val: Option<Value>,
     pub integration_report: Option<IntegrationReport>,
@@ -1957,6 +1959,7 @@ impl MathEngine {
                     exact_text: format!("{} gelöscht (unset)", vname),
                     decimal_text: format!("{} gelöscht (unset)", vname),
                     has_distinct_exact: false,
+                    is_exact: false,
                     numeric_value: None,
                     val: None,
                     integration_report: None,
@@ -1997,6 +2000,7 @@ impl MathEngine {
                     exact_text: format!("{} := {}", var_name, exact),
                     decimal_text: format!("{} := {}", var_name, decimal),
                     has_distinct_exact: exact != decimal,
+                    is_exact: false,
                     numeric_value: None,
                     val: None,
                     integration_report: None,
@@ -2014,6 +2018,7 @@ impl MathEngine {
                     exact_text: format!("{} := {}", var_name, rhs_out.exact_text),
                     decimal_text: format!("{} := {}", var_name, rhs_out.decimal_text),
                     has_distinct_exact: rhs_out.has_distinct_exact,
+                    is_exact: rhs_out.is_exact,
                     numeric_value: Some(val.c),
                     val: Some(val),
                     integration_report: None,
@@ -2062,6 +2067,7 @@ impl MathEngine {
                     if val.c.re.is_finite() {
                         let dec_str = self.format_value_decimal(val);
                         let exact_opt = self.try_format_exact_val(trimmed, val);
+                        let is_exact = val.rat.is_some() || exact_opt.is_some();
                         let (exact_text, has_distinct_exact) = match exact_opt {
                             Some(ex) if ex != dec_str => (ex, true),
                             _ => (dec_str.clone(), false),
@@ -2070,6 +2076,7 @@ impl MathEngine {
                             exact_text,
                             decimal_text: dec_str,
                             has_distinct_exact,
+                            is_exact,
                             numeric_value: Some(val.c),
                             val: Some(val),
                             integration_report: None,
@@ -2112,6 +2119,7 @@ impl MathEngine {
                         exact_text: exact_str,
                         decimal_text: dec_str,
                         has_distinct_exact,
+                        is_exact: true,
                         numeric_value: approx.is_finite().then(|| Complex::real(approx)),
                         val: approx.is_finite().then(|| Value::from_f64(approx)),
                         integration_report: None,
@@ -2136,11 +2144,15 @@ impl MathEngine {
                 }
 
                 if !val.c.re.is_finite() || !val.c.im.is_finite() {
-                    return Err("Ungültiges Rechenergebnis".to_string());
+                    if val.c.re.is_infinite() || val.c.im.is_infinite() {
+                        return Err("Wert zu groß (Überlauf)".to_string());
+                    }
+                    return Err("Ergebnis nicht definiert".to_string());
                 }
 
                 let dec_str = self.format_value_decimal(val);
                 let exact_opt = self.try_format_exact_val(trimmed, val);
+                let is_exact = val.rat.is_some() || exact_opt.is_some();
                 let (exact_text, has_distinct_exact) = match exact_opt {
                     Some(ex) if ex != dec_str => (ex, true),
                     _ => (dec_str.clone(), false),
@@ -2150,6 +2162,7 @@ impl MathEngine {
                     exact_text,
                     decimal_text: dec_str,
                     has_distinct_exact,
+                    is_exact,
                     numeric_value: Some(val.c),
                     val: Some(val),
                     integration_report: self.get_last_integration_report(),
@@ -2171,18 +2184,24 @@ impl MathEngine {
     }
 
     pub fn eval_for_x(&self, expr: &str, x_val: f64) -> Option<f64> {
+        self.eval_for_x_result(expr, x_val).ok()
+    }
+
+    /// Wie [`Self::eval_for_x`], liefert aber die Fehlermeldung (z. B.
+    /// „Unbekannte Funktion 'fao'“), damit der Plotter Eingabefehler anzeigen kann.
+    pub fn eval_for_x_result(&self, expr: &str, x_val: f64) -> Result<f64, String> {
         let mut ov = HashMap::new();
         ov.insert("x".to_string(), Value::from_f64(x_val));
         let mut parser = ExprParser::new(expr, self, Some(&ov));
-        let val = parser.parse_expr().ok()?;
+        let val = parser.parse_expr()?;
         parser.skip_ws();
         if parser.pos < parser.chars.len() {
-            return None;
+            return Err(format!("Unerwartetes Zeichen '{}'", parser.chars[parser.pos]));
         }
         if val.c.is_real() && val.c.re.is_finite() {
-            Some(val.c.re)
+            Ok(val.c.re)
         } else {
-            None
+            Err("Nicht reell definiert".to_string())
         }
     }
 
@@ -2196,6 +2215,7 @@ impl MathEngine {
                             exact_text: res.clone(),
                             decimal_text: res,
                             has_distinct_exact: true,
+                            is_exact: true,
                             numeric_value: None,
                             val: None,
                             integration_report: None,
@@ -2214,6 +2234,7 @@ impl MathEngine {
                                 exact_text: res.clone(),
                                 decimal_text: res,
                                 has_distinct_exact: true,
+                                is_exact: true,
                                 numeric_value: None,
                                 val: None,
                                 integration_report: None,
@@ -2235,6 +2256,7 @@ impl MathEngine {
                 exact_text: res.clone(),
                 decimal_text: res,
                 has_distinct_exact: true,
+                is_exact: true,
                 numeric_value: None,
                 val: None,
                 integration_report: None,
@@ -2315,6 +2337,16 @@ impl MathEngine {
 
     fn try_exact_from_ast(&self, ast: &AstNode) -> Option<String> {
         match ast {
+            AstNode::Var(name) => match name.as_str() {
+                "h" | "h_planck" => Some("6.62607015e-34".to_string()),
+                "e_charge" => Some("1.602176634e-19".to_string()),
+                "k_B" => Some("1.380649e-23".to_string()),
+                "N_A" => Some("6.02214076e23".to_string()),
+                "F" | "F_faraday" => Some("96485.3321233100184".to_string()),
+                "R" | "R_gas" => Some("8.31446261815324".to_string()),
+                "g" | "g_earth" => Some("9.80665".to_string()),
+                _ => None,
+            },
             AstNode::Neg(inner) => {
                 let s = self.try_exact_from_ast(inner)?;
                 if let Some(stripped) = s.strip_prefix('-') {
@@ -2496,6 +2528,7 @@ impl MathEngine {
                 };
                 return Ok((EvalOutput {
                     has_distinct_exact: exact != dec,
+                    is_exact: true,
                     exact_text: exact,
                     decimal_text: dec,
                     numeric_value: Some(val.c),
@@ -2507,9 +2540,12 @@ impl MathEngine {
             }
             if let MatrixOrScalar::Scalar(val) = self.eval_matrix_or_scalar_ast(&ast)? {
                 let dec = self.format_value_decimal(val);
-                let exact = Self::format_exact_real(val).unwrap_or_else(|| dec.clone());
+                let exact_opt = Self::format_exact_real(val);
+                let is_exact = exact_opt.is_some();
+                let exact = exact_opt.unwrap_or_else(|| dec.clone());
                 return Ok((EvalOutput {
                     has_distinct_exact: exact != dec,
+                    is_exact,
                     exact_text: exact,
                     decimal_text: dec,
                     numeric_value: Some(val.c),
@@ -2536,6 +2572,7 @@ impl MathEngine {
                 };
                 return Ok((EvalOutput {
                     has_distinct_exact: exact != dec,
+                    is_exact: true,
                     exact_text: exact,
                     decimal_text: dec,
                     numeric_value: Some(det.c),
@@ -2546,9 +2583,12 @@ impl MathEngine {
             }
             let det = matrix_det(&mat)?;
             let dec = self.format_value_decimal(det);
-            let exact = Self::format_exact_real(det).unwrap_or_else(|| dec.clone());
+            let exact_opt = Self::format_exact_real(det);
+            let is_exact = exact_opt.is_some();
+            let exact = exact_opt.unwrap_or_else(|| dec.clone());
             return Ok((EvalOutput {
                 has_distinct_exact: exact != dec,
+                is_exact,
                 exact_text: exact,
                 decimal_text: dec,
                 numeric_value: Some(det.c),
@@ -2559,6 +2599,7 @@ impl MathEngine {
         }
 
         let mat = self.eval_matrix_expr(trimmed)?;
+        let is_exact = mat.iter().all(|row| row.iter().all(|v| v.rat.is_some()));
         let decimal = Self::format_matrix(&mat, |value| self.format_value_decimal(value));
         let exact = Self::format_matrix(&mat, |value| {
             Self::format_exact_real(value).unwrap_or_else(|| self.format_value_decimal(value))
@@ -2566,6 +2607,7 @@ impl MathEngine {
         let reusable = Self::format_matrix(&mat, Value::reusable_expression);
         Ok((EvalOutput {
             has_distinct_exact: exact != decimal,
+            is_exact,
             exact_text: exact,
             decimal_text: decimal,
             numeric_value: None,
@@ -7739,7 +7781,7 @@ impl<'a> ExprParser<'a> {
                         return Err("Fakultät ist nur für nicht-negative ganze Zahlen definiert".to_string());
                     }
                     if val.c.re > 170.0 {
-                        return Err("Fakultät übersteigt Rechenbereich".to_string());
+                        return Err("Wert zu groß (Fakultät bis 1000! unterstützt)".to_string());
                     }
                     val = Value::from_f64(factorial_or_gamma(val.c.re));
                 }
@@ -8676,6 +8718,9 @@ impl<'a> ExprParser<'a> {
         }
         for c in SCIENTIFIC_CONSTANTS {
             if c.token == ident || c.symbol == ident || c.key == ident {
+                if c.key == "speed_of_light" {
+                    return Ok(Value::from_int(299_792_458));
+                }
                 return Ok(Value::from_f64(c.value));
             }
         }

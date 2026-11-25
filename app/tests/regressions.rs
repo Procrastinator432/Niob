@@ -1016,3 +1016,92 @@ fn complex_overflow_standalone_y_and_underscore_rejection() {
         );
     }
 }
+
+#[test]
+fn exact_flag_and_large_factorial() {
+    let mut engine = new_engine();
+    let fact25 = engine.evaluate_preview("25!", false).unwrap();
+    assert!(fact25.is_exact, "25! must be exact");
+    assert_eq!(fact25.exact_text, "15511210043330985984000000");
+    assert_eq!(fact25.decimal_text, "15511210043330985984000000");
+
+    let fact171 = engine.evaluate_preview("171!", false).unwrap();
+    assert!(fact171.is_exact, "171! must be exact");
+    assert_eq!(fact171.exact_text.len(), 310);
+    assert!(
+        fact171.exact_text.starts_with("124101807021766782"),
+        "unexpected 171! prefix: {}",
+        &fact171.exact_text[..fact171.exact_text.len().min(30)]
+    );
+    let fact_ratio = engine.evaluate_preview("171!/170!", false).unwrap();
+    assert!(fact_ratio.is_exact && fact_ratio.exact_text == "171");
+
+    let err_1001 = engine
+        .evaluate_preview("1001!", false)
+        .expect_err("1001! must fail cleanly");
+    assert!(
+        err_1001.contains("Wert zu groß"),
+        "unexpected 1001! error: {err_1001}"
+    );
+    let err_exp = engine
+        .evaluate_preview("exp(1000)", false)
+        .expect_err("exp(1000) must fail cleanly");
+    assert!(
+        err_exp.contains("Wert zu groß") || err_exp.contains("Überlauf"),
+        "unexpected exp(1000) error: {err_exp}"
+    );
+
+    for exact_expr in [
+        "1/3", "sqrt(2)", "sin(pi/3)", "c0", "h", "e_charge", "k_B", "N_A", "F", "R",
+    ] {
+        assert!(
+            engine.evaluate_preview(exact_expr, false).unwrap().is_exact,
+            "{exact_expr} must be exact"
+        );
+    }
+    for inexact_expr in ["tan(90)", "sin(1)", "ln(2)", "G", "sqrt(2)+1e-10"] {
+        assert!(
+            !engine.evaluate_preview(inexact_expr, false).unwrap().is_exact,
+            "{inexact_expr} (RAD) must not be marked exact"
+        );
+    }
+    engine.angle_mode = AngleMode::Degrees;
+    assert!(
+        !engine.evaluate_preview("tan(90)", false).unwrap().is_exact,
+        "tan(90) (DEG) must not be marked exact"
+    );
+}
+
+#[test]
+fn codata_2022_constants() {
+    let mut engine = new_engine();
+    let cases = [
+        ("G", 6.67430e-11),
+        ("mu0", 1.25663706127e-6),
+        ("eps0", 8.8541878188e-12),
+        ("alpha_fs", 7.2973525643e-3),
+        ("Z0", 376.730313412),
+        ("R_inf", 10973731.568157),
+        ("E_h", 4.3597447222060e-18),
+        ("mu_B", 9.2740100657e-24),
+        ("mu_e", -9.2847646917e-24),
+        ("u", 1.66053906892e-27),
+        ("m_e", 9.1093837139e-31),
+        ("m_p", 1.67262192595e-27),
+        ("m_n", 1.67492750056e-27),
+        ("r_e", 2.8179403205e-15),
+        ("lambda_C", 2.42631023538e-12),
+        ("a_0", 5.29177210544e-11),
+        ("mu_N", 5.0507837393e-27),
+    ];
+    for (expr, expected) in cases {
+        check_number(engine.evaluate_preview(expr, false).unwrap(), expected, 0.0, 1e-12);
+    }
+
+    let c0 = engine.evaluate_preview("c0", false).unwrap();
+    assert!(c0.is_exact && c0.exact_text == "299792458");
+    check_number(engine.evaluate_preview("h", false).unwrap(), 6.62607015e-34, 0.0, 1e-12);
+    check_number(engine.evaluate_preview("e_charge", false).unwrap(), 1.602176634e-19, 0.0, 1e-12);
+    check_number(engine.evaluate_preview("k_B", false).unwrap(), 1.380649e-23, 0.0, 1e-12);
+    check_number(engine.evaluate_preview("N_A", false).unwrap(), 6.02214076e23, 0.0, 1e-12);
+}

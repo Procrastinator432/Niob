@@ -70,7 +70,7 @@ binomial_fractional	binomial(5.5,2)	binomial(5.5,2)	number	12.375	1e-12	1e-12
 sum_non_integer_bound	sum(k,k,1,2.5)	sum(k,k,1,2.5)	error	Non-integer sum bounds must be rejected	0	0
 deriv_domain_boundary	deriv(sqrt(x),x,0)	d(sqrt(x),x,0)	error	Derivative at domain boundary must be rejected	0	0
 multivar_poly_expand	(y+1)^2	(y+1)^2	exact	y^2+2*y+1|1+2*y+y^2|y^2+2y+1	0	0
-proton_less_than_neutron	m_n-m_p	m_n-m_p	number	2.30557435e-30	1e-36	1e-8
+proton_less_than_neutron	m_n-m_p	m_n-m_p	number	2.30557461e-30	1e-36	1e-8
 integral_wide_exp	int(exp(-x),x,0,10000)	defint(exp(-x),x,0,10000)	number	1	1e-8	1e-8
 integral_very_wide_exp	int(exp(-x),x,0,1000000)	defint(exp(-x),x,0,1000000)	number	1	1e-8	1e-8
 integral_gaussian_wide	int(exp(-x^2),x,-1000,1000)	defint(exp(-x^2),x,-1000,1000)	number	1.772453850905516	1e-8	1e-8
@@ -96,7 +96,7 @@ deriv_sqrt_small	deriv(sqrt(x),x,0.001)	d(sqrt(x),x,0.001)	number	15.81138830084
 matrix_power_10	[[1,1],[1,0]]^10	[[1,1],[1,0]]^10	exact	[[89,55],[55,34]]	0	0
 codata_na_kb_r	N_A*k_B-R	N_A*k_B-R	number	0	1e-22	0
 codata_sigma	sigma	sigma	number	5.670374419e-8	0	1e-9
-codata_amu	u	u	number	1.66053906660e-27	0	1e-11
+codata_amu	u	u	number	1.66053906892e-27	0	1e-11
 deriv_tiny_sin	deriv(sin(x),x,1e-9)	d(sin(x),x,1e-9)	number	1	1e-9	1e-10
 deriv_tiny_exp	deriv(exp(x),x,1e-9)	d(exp(x),x,1e-9)	number	1.000000001	1e-11	1e-10
 deriv_pow3_cancel	deriv(x^3,x,1e-4)	d(x^3,x,1e-4)	number	3e-8	1e-15	1e-6

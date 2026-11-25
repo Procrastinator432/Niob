@@ -17,7 +17,9 @@ import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.InsetDrawable;
 import android.graphics.drawable.RippleDrawable;
+import android.graphics.drawable.StateListDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -45,6 +47,7 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.PopupMenu;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -99,6 +102,7 @@ public class MainActivity extends Activity {
     private int colOnSecondaryContainer;
     private int colOnSurface;
     private int colOnSurfaceVariant;
+    private static final int COL_PLOT_CURVE_2 = 0xFF64B5F6;
 
     private static class HistoryEntry {
         String expr;
@@ -107,6 +111,7 @@ public class MainActivity extends Activity {
         String reusableText;
         String reportText;
         boolean showingExact;
+        boolean hasExact;
         String formulaLayout = "";
 
         HistoryEntry(String expr, String exactText, String decimalText, boolean showingExact) {
@@ -114,16 +119,21 @@ public class MainActivity extends Activity {
         }
 
         HistoryEntry(String expr, String exactText, String decimalText, String reportText, boolean showingExact) {
-            this(expr, exactText, decimalText, exactText, reportText, showingExact);
+            this(expr, exactText, decimalText, exactText, reportText, showingExact, false);
         }
 
         HistoryEntry(String expr, String exactText, String decimalText, String reusableText, String reportText, boolean showingExact) {
+            this(expr, exactText, decimalText, reusableText, reportText, showingExact, false);
+        }
+
+        HistoryEntry(String expr, String exactText, String decimalText, String reusableText, String reportText, boolean showingExact, boolean hasExact) {
             this.expr = expr;
             this.exactText = exactText;
             this.decimalText = decimalText;
             this.reusableText = (reusableText != null && !reusableText.isEmpty()) ? reusableText : exactText;
             this.reportText = reportText;
             this.showingExact = showingExact;
+            this.hasExact = hasExact;
         }
     }
 
@@ -202,7 +212,7 @@ public class MainActivity extends Activity {
         plotFormula1 = makePlotFormula("f₁(x)", colPrimary,
                 drafts.getString("plot_layout_1", prefs.getString("plot_layout_1", "")),
                 drafts.getString("plot_expr_1", prefs.getString("plot_expr_1", "sin(x) * cos(x/2)")));
-        plotFormula2 = makePlotFormula("f₂(x)", colOnSecondaryContainer,
+        plotFormula2 = makePlotFormula("f₂(x)", COL_PLOT_CURVE_2,
                 drafts.getString("plot_layout_2", prefs.getString("plot_layout_2", "")),
                 drafts.getString("plot_expr_2", prefs.getString("plot_expr_2", "x^2 / 4 - 2")));
 
@@ -215,9 +225,12 @@ public class MainActivity extends Activity {
                 String reuse = prefs.getString("hist_reuse_" + i, "");
                 String rep = prefs.getString("hist_rep_" + i, "");
                 boolean showEx = prefs.getBoolean("hist_show_ex_" + i, showExactFirst);
+                boolean hasEx = prefs.contains("hist_has_ex_" + i)
+                        ? prefs.getBoolean("hist_has_ex_" + i, false)
+                        : (!ex.equals(dec) || isPlainIntegerResult(ex));
                 if (!expr.isEmpty()) {
                     HistoryEntry entry = new HistoryEntry(expr, ex, dec, reuse.isEmpty() ? legacyResult(ex, dec) : reuse,
-                            rep.isEmpty() ? null : rep, showEx);
+                            rep.isEmpty() ? null : rep, showEx, hasEx);
                     entry.formulaLayout = prefs.getString("hist_layout_" + i, "");
                     history.add(entry);
                 }
@@ -297,6 +310,14 @@ public class MainActivity extends Activity {
         ed.putString("hist_reuse_" + index, entry.reusableText);
         ed.putString("hist_rep_" + index, entry.reportText != null ? entry.reportText : "");
         ed.putBoolean("hist_show_ex_" + index, entry.showingExact);
+        ed.putBoolean("hist_has_ex_" + index, entry.hasExact);
+    }
+
+    private static boolean isPlainIntegerResult(String s) {
+        if (s == null) return false;
+        int assignIdx = s.indexOf(":=");
+        String rhs = (assignIdx >= 0 ? s.substring(assignIdx + 2) : s).trim();
+        return rhs.matches("[+-]?\\d+");
     }
 
     private void writeVarsAndAnsToEditor(SharedPreferences.Editor ed) {
@@ -456,7 +477,7 @@ public class MainActivity extends Activity {
             String dec = result.decimalText;
             String ex = result.exactText;
             String rep = getIntegrationReportText(expr);
-            history.add(new HistoryEntry(expr, ex, dec, rep, false));
+            history.add(new HistoryEntry(expr, ex, dec, result.reusableText, rep, false, result.isExact));
         } catch (Exception ignored) {
         }
     }
@@ -1316,71 +1337,84 @@ private static class FilledBackspaceDrawable extends Drawable {
             resRow.setOrientation(LinearLayout.HORIZONTAL);
             resRow.setGravity(Gravity.CENTER_VERTICAL);
 
-            Button exactBadge = makeMaterialButton(
-                    item.showingExact ? "dezimal" : "exakt",
-                    colPrimary,
-                    colOnPrimary,
-                    14,
-                    12.5f,
-                    1.4f,
-                    true
-            );
-            exactBadge.setSingleLine(true);
-            exactBadge.setIncludeFontPadding(false);
-            exactBadge.setMinimumWidth(dp(60));
-            exactBadge.setMinimumHeight(dp(28));
-            exactBadge.setPadding(dp(9), dp(3), dp(9), dp(3));
-            exactBadge.setOnClickListener(v -> {
-                if (resultWritePending) return;
-                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-                item.showingExact = !item.showingExact;
-                saveState();
-                refreshHistoryViews(false);
-            });
-            resRow.addView(exactBadge, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            String rawExact = item.exactText != null ? item.exactText : "";
+            String rawDecimal = item.decimalText != null ? item.decimalText : "";
+            String cleanExact = rawExact.replace(" ", "");
+            boolean isExactFrac = item.hasExact && cleanExact.matches("^-?\\d+/\\d+$");
+            boolean isMatrix = rawExact.contains("[[") || rawDecimal.contains("[[");
+            String exactShown = item.hasExact ? formatExactDisplayNumber(rawExact) : "";
+            String decimalShown = formatDisplayNumber(rawDecimal);
+            boolean canToggle = item.hasExact && !isMatrix && (isExactFrac
+                    || !exactShown.replace("\u200B", "").equals(decimalShown.replace("\u200B", "")));
+            boolean showExactNow = canToggle && item.showingExact;
+
+            if (canToggle) {
+                Button exactBadge = makeMaterialButton(
+                        showExactNow ? "exakt" : "dezimal",
+                        colPrimary,
+                        colOnPrimary,
+                        14,
+                        12.5f,
+                        1.4f,
+                        true
+                );
+                exactBadge.setSingleLine(true);
+                exactBadge.setIncludeFontPadding(false);
+                exactBadge.setMinimumWidth(dp(60));
+                exactBadge.setMinimumHeight(dp(28));
+                exactBadge.setPadding(dp(9), dp(3), dp(9), dp(3));
+                exactBadge.setOnClickListener(v -> {
+                    if (resultWritePending) return;
+                    v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                    item.showingExact = !item.showingExact;
+                    saveState();
+                    refreshHistoryViews(false);
+                });
+                resRow.addView(exactBadge, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
 
             TextView eqTv = new TextView(this);
-            eqTv.setText("  =  ");
+            eqTv.setText(canToggle ? "  =  " : "=  ");
             eqTv.setTextColor(colPrimary);
             setScaledTextSize(eqTv, 18f, 2.0f);
             eqTv.setTypeface(Typeface.DEFAULT_BOLD);
             resRow.addView(eqTv);
 
-            View resSpacer = new View(this);
-            resRow.addView(resSpacer, new LinearLayout.LayoutParams(0, 0, 1f));
-
-            String rawShown = item.showingExact ? item.exactText : item.decimalText;
-            String reuseVal = (item.reusableText != null && !item.reusableText.isEmpty()) ? item.reusableText : item.exactText;
-            String cleanFrac = rawShown != null ? rawShown.replace(" ", "") : "";
-            boolean isFractionResult = item.showingExact && cleanFrac.matches("^-?\\d+/\\d+$");
+            boolean useExact = canToggle ? item.showingExact : item.hasExact;
+            String rawShown = useExact ? rawExact : rawDecimal;
+            String reuseVal = (item.reusableText != null && !item.reusableText.isEmpty()) ? item.reusableText : rawExact;
+            boolean isFractionResult = showExactNow && isExactFrac;
 
             View matrixResult = formula.matrixResult(rawShown, 15f, () -> insertHistoryValue(reuseVal));
             if (matrixResult != null) {
+                View resSpacer = new View(this);
+                resRow.addView(resSpacer, new LinearLayout.LayoutParams(0, 0, 1f));
                 resRow.addView(matrixResult);
             } else if (isFractionResult) {
-                String[] fracParts = cleanFrac.split("/");
+                View resSpacer = new View(this);
+                resRow.addView(resSpacer, new LinearLayout.LayoutParams(0, 0, 1f));
+                String[] fracParts = cleanExact.split("/");
                 View fracResultView = createFractionView(fracParts[0].trim(), fracParts[1].trim(), 20f);
-                fracResultView.setOnClickListener(v -> {
-                    insertHistoryValue(reuseVal);
-                });
+                fracResultView.setOnClickListener(v -> insertHistoryValue(reuseVal));
                 LinearLayout.LayoutParams fracLp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
                 fracLp.gravity = Gravity.END | Gravity.CENTER_VERTICAL;
                 resRow.addView(fracResultView, fracLp);
             } else {
                 TextView resTv = new TextView(this);
-                String shown = formatDisplayNumber(rawShown);
+                String shown = useExact ? exactShown : decimalShown;
                 resTv.setText(shown);
                 resTv.setGravity(Gravity.END);
+                resTv.setTextAlignment(View.TEXT_ALIGNMENT_VIEW_END);
+                resTv.setBreakStrategy(Layout.BREAK_STRATEGY_SIMPLE);
+                resTv.setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE);
                 resTv.setTextColor(colOnSurface);
                 setScaledTextSize(resTv, 23f, 2.0f);
                 resTv.setTypeface(Typeface.DEFAULT_BOLD);
-                resTv.setOnClickListener(v -> {
-                    insertHistoryValue(reuseVal);
-                });
+                resTv.setOnClickListener(v -> insertHistoryValue(reuseVal));
                 resRow.addView(resTv, new LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
             }
 
             itemBox.addView(resRow, new LinearLayout.LayoutParams(
@@ -1484,8 +1518,9 @@ private static class FilledBackspaceDrawable extends Drawable {
                         return;
                     }
                     String dec = formatDisplayNumber(result.decimalText);
-                    if (result.exactText != null && !result.exactText.isEmpty() && !result.exactText.equals(result.decimalText)) {
-                        previewDisplayView.setText("= " + dec + "  (" + result.exactText + ")");
+                    String ex = result.isExact ? formatExactDisplayNumber(result.exactText).replace("\u200B", "") : "";
+                    if (result.isExact && !ex.isEmpty() && ex.length() <= 20 && !ex.equals(dec)) {
+                        previewDisplayView.setText("= " + dec + "  (" + ex + ")");
                     } else {
                         previewDisplayView.setText("= " + dec);
                     }
@@ -1499,29 +1534,50 @@ private static class FilledBackspaceDrawable extends Drawable {
                             || resultWritePending || isFinishing() || isDestroyed()) {
                         return;
                     }
-                    previewDisplayView.setVisibility(View.VISIBLE);
-                    previewMatrix.removeAllViews();
-                    previewMatrix.setVisibility(View.GONE);
-                    if (msg.contains("Division durch Null") || msg.contains("Division by zero")) {
-                        previewDisplayView.setText("⚠ Division durch Null");
-                        previewDisplayView.setTextColor(0xFFFFB4AB);
-                    } else if (msg.contains("Zeitlimit") || msg.contains("Zeitüberschreitung") || msg.contains("Time limit")) {
-                        previewDisplayView.setText("…");
-                        previewDisplayView.setTextColor(colOnSurfaceVariant);
-                    } else {
-                        boolean isIncomplete = cur.endsWith("+") || cur.endsWith("-") || cur.endsWith("*")
-                                || cur.endsWith("/") || cur.endsWith("÷") || cur.endsWith("×") || cur.endsWith("−")
-                                || cur.endsWith("^") || cur.endsWith("(") || cur.endsWith(",") || cur.endsWith(":=");
-                        if (isIncomplete) {
-                            previewDisplayView.setText("");
-                        } else {
-                            previewDisplayView.setText("⚠ Ungültiger Ausdruck");
-                            previewDisplayView.setTextColor(colOnSurfaceVariant);
-                        }
-                    }
+                    showPreviewError(msg, cur, false);
                 });
             }
         });
+    }
+
+    private static String classifyEvalError(String msg, String cur, boolean submitted) {
+        if (msg.contains("Division durch Null") || msg.contains("Division by zero") || msg.contains("Modulo durch Null")) {
+            return "⚠ Division durch Null";
+        }
+        if (msg.contains("Wert zu groß") || msg.contains("Überlauf") || msg.contains("übersteigt Rechenbereich")
+                || msg.contains("zu groß") || msg.contains("overflow") || msg.contains("Overflow")) {
+            return "⚠ Wert zu groß";
+        }
+        if (msg.contains("Zeitlimit") || msg.contains("Zeitüberschreitung") || msg.contains("Time limit")) {
+            return submitted ? "⚠ Zeitlimit überschritten" : "…";
+        }
+        if (msg.contains("Fakultät ist nur")) {
+            return "⚠ Fakultät: nur ganze Zahlen ≥ 0";
+        }
+        if (msg.contains("nicht definiert") || msg.contains("singulär")
+                || msg.contains("differenzierbar") || msg.contains("divergiert")) {
+            return "⚠ Nicht definiert";
+        }
+        if (!submitted && cur != null) {
+            boolean isIncomplete = cur.endsWith("+") || cur.endsWith("-") || cur.endsWith("*")
+                    || cur.endsWith("/") || cur.endsWith("÷") || cur.endsWith("×") || cur.endsWith("−")
+                    || cur.endsWith("^") || cur.endsWith("(") || cur.endsWith(",") || cur.endsWith(":=");
+            if (isIncomplete) {
+                return "";
+            }
+        }
+        return "⚠ Ungültiger Ausdruck";
+    }
+
+    private void showPreviewError(String msg, String cur, boolean submitted) {
+        if (previewDisplayView == null) return;
+        previewDisplayView.setVisibility(View.VISIBLE);
+        previewMatrix.removeAllViews();
+        previewMatrix.setVisibility(View.GONE);
+        String text = classifyEvalError(msg != null ? msg : "", cur, submitted);
+        previewDisplayView.setText(text);
+        boolean highlightError = text.startsWith("⚠ ") && !text.equals("⚠ Ungültiger Ausdruck");
+        previewDisplayView.setTextColor(highlightError ? 0xFFFFB4AB : colOnSurfaceVariant);
     }
 
     private static final class KeyDef {
@@ -2030,8 +2086,10 @@ private static class FilledBackspaceDrawable extends Drawable {
                             Map<String, CalculatorEngine.Value> previousVariables = engine.getUserVariables();
                             Map<String, double[][]> previousMatrixVariables = engine.getMatrixVariables();
                             engine.copyEvaluatedStateFrom(snapshot);
+                            boolean initialExact = result.isExact && showExactFirst
+                                    && (result.exactText == null || result.exactText.length() <= 400);
                             HistoryEntry entry = new HistoryEntry(expression, result.exactText, result.decimalText,
-                                    result.reusableText, rep, showExactFirst);
+                                    result.reusableText, rep, initialExact, result.isExact);
                             entry.formulaLayout = layoutState;
                             persistResult(entry, previousAns, previousMatrixAns, previousVariables, previousMatrixVariables, submittedDraft);
                         });
@@ -2043,16 +2101,7 @@ private static class FilledBackspaceDrawable extends Drawable {
                                 return;
                             }
                             formula.performHapticFeedback(HapticFeedbackConstants.REJECT);
-                            if (msg.contains("Zeitlimit") || msg.contains("Zeitüberschreitung") || msg.contains("Time limit")) {
-                                if (previewDisplayView != null) {
-                                    previewDisplayView.setVisibility(View.VISIBLE);
-                                    previewMatrix.setVisibility(View.GONE);
-                                    previewDisplayView.setText("⚠ Zeitlimit überschritten");
-                                    previewDisplayView.setTextColor(0xFFFFB4AB);
-                                }
-                            } else {
-                                updatePreviewOnly();
-                            }
+                            showPreviewError(msg, expression, true);
                         });
                     }
                 });
@@ -2148,7 +2197,7 @@ private static class FilledBackspaceDrawable extends Drawable {
         formulas.setOrientation(landscape ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
         float formulaSize = landscape ? 16f : 19f;
         addPlotFormula(formulas, "f₁(x)", plotFormula1, colPrimary, formulaSize, landscape);
-        addPlotFormula(formulas, "f₂(x)", plotFormula2, colOnSecondaryContainer, formulaSize, landscape);
+        addPlotFormula(formulas, "f₂(x)", plotFormula2, COL_PLOT_CURVE_2, formulaSize, landscape);
         preparePlotFormula(plotFormula1);
         preparePlotFormula(plotFormula2);
         header.addView(formulas);
@@ -2177,6 +2226,16 @@ private static class FilledBackspaceDrawable extends Drawable {
                                 float formulaSize, boolean landscape) {
         LinearLayout row = new LinearLayout(this);
         row.setGravity(Gravity.CENTER_VERTICAL);
+
+        View dot = new View(this);
+        GradientDrawable dotBg = new GradientDrawable();
+        dotBg.setShape(GradientDrawable.OVAL);
+        dotBg.setColor(color);
+        dot.setBackground(dotBg);
+        LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dp(10), dp(10));
+        dotParams.rightMargin = dp(6);
+        row.addView(dot, dotParams);
+
         TextView name = new TextView(this);
         name.setText(label + " =");
         name.setTextColor(color);
@@ -2216,23 +2275,35 @@ private static class FilledBackspaceDrawable extends Drawable {
     }
 
     private class Plotter2DView extends View {
+        private static final double MIN_SCALE = 1e-6;
+        private static final double MAX_SCALE = 1e6;
         private final Paint minorPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint majorPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint axisPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint labelPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint curve1Paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint curve2Paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final ScaleGestureDetector scaleDetector;
         private ScheduledThreadPoolExecutor plotExecutor;
         private Future<?> pendingCurves;
-        private int renderGeneration;
+        private int formulaVersion;
+        private CalculatorEngine plotContext;
+        private boolean workerRunning;
+        private boolean recomputeQueued;
         private float[] cachedSegments1;
         private float[] cachedSegments2;
+        private double cachedCenterX;
+        private double cachedCenterY;
+        private double cachedScale = 64.0;
+        private int cachedWidth;
+        private int cachedHeight;
         private final Runnable computeCurves = this::scheduleCurveCompute;
-        private float centerX = 0f;
-        private float centerY = 0f;
-        private float scale = 64f;
+        private double centerX = 0.0;
+        private double centerY = 0.0;
+        private double scale = 64.0;
         private float lastTouchX;
         private float lastTouchY;
+        private int activePointerId = MotionEvent.INVALID_POINTER_ID;
 
         Plotter2DView(Context ctx) {
             super(ctx);
@@ -2245,20 +2316,38 @@ private static class FilledBackspaceDrawable extends Drawable {
             axisPaint.setColor(colOnSurfaceVariant);
             axisPaint.setTextSize(19.0f);
 
+            labelPaint.setColor(colOnSurface);
+            labelPaint.setTextSize(dp(11));
+            labelPaint.setTypeface(Typeface.DEFAULT_BOLD);
+
             curve1Paint.setStrokeWidth(4.0f);
             curve1Paint.setStyle(Paint.Style.STROKE);
+            curve1Paint.setStrokeCap(Paint.Cap.ROUND);
+            curve1Paint.setStrokeJoin(Paint.Join.ROUND);
             curve1Paint.setColor(colPrimary);
 
             curve2Paint.setStrokeWidth(4.0f);
             curve2Paint.setStyle(Paint.Style.STROKE);
-            curve2Paint.setColor(0xFF64B5F6);
+            curve2Paint.setStrokeCap(Paint.Cap.ROUND);
+            curve2Paint.setStrokeJoin(Paint.Join.ROUND);
+            curve2Paint.setColor(COL_PLOT_CURVE_2);
 
             scaleDetector = new ScaleGestureDetector(ctx, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
                 @Override
                 public boolean onScale(ScaleGestureDetector detector) {
-                    float factor = detector.getScaleFactor();
-                    scale = Math.max(8f, Math.min(2048f, scale * factor));
-                    requestCurves();
+                    double factor = detector.getScaleFactor();
+                    if (!Double.isFinite(factor) || factor <= 0.0) return false;
+                    double newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, scale * factor));
+                    if (newScale != scale && getWidth() > 0 && getHeight() > 0) {
+                        double fx = detector.getFocusX() - getWidth() * 0.5;
+                        double fy = detector.getFocusY() - getHeight() * 0.5;
+                        double worldX = centerX + fx / scale;
+                        double worldY = centerY - fy / scale;
+                        scale = newScale;
+                        centerX = worldX - fx / scale;
+                        centerY = worldY + fy / scale;
+                        onViewportChanged();
+                    }
                     return true;
                 }
             });
@@ -2267,34 +2356,103 @@ private static class FilledBackspaceDrawable extends Drawable {
         @Override
         public boolean onTouchEvent(MotionEvent event) {
             scaleDetector.onTouchEvent(event);
+            int action = event.getActionMasked();
             if (scaleDetector.isInProgress()) {
-                lastTouchX = event.getX();
-                lastTouchY = event.getY();
+                int idx = activePointerId != MotionEvent.INVALID_POINTER_ID
+                        ? event.findPointerIndex(activePointerId) : 0;
+                if (idx >= 0) {
+                    lastTouchX = event.getX(idx);
+                    lastTouchY = event.getY(idx);
+                }
                 return true;
             }
-            int action = event.getActionMasked();
             if (action == MotionEvent.ACTION_DOWN) {
                 finishPlotEditing();
-                lastTouchX = event.getX();
-                lastTouchY = event.getY();
+                int idx = event.getActionIndex();
+                activePointerId = event.getPointerId(idx);
+                lastTouchX = event.getX(idx);
+                lastTouchY = event.getY(idx);
                 return true;
             } else if (action == MotionEvent.ACTION_POINTER_DOWN) {
-                lastTouchX = event.getX();
-                lastTouchY = event.getY();
+                int idx = activePointerId != MotionEvent.INVALID_POINTER_ID
+                        ? event.findPointerIndex(activePointerId) : 0;
+                if (idx >= 0) {
+                    lastTouchX = event.getX(idx);
+                    lastTouchY = event.getY(idx);
+                }
                 return true;
             } else if (action == MotionEvent.ACTION_MOVE) {
                 if (event.getPointerCount() == 1) {
-                    float dx = event.getX() - lastTouchX;
-                    float dy = event.getY() - lastTouchY;
-                    centerX -= dx / scale;
-                    centerY += dy / scale;
-                    requestCurves();
+                    int idx = activePointerId != MotionEvent.INVALID_POINTER_ID
+                            ? event.findPointerIndex(activePointerId) : 0;
+                    if (idx < 0) idx = 0;
+                    float x = event.getX(idx);
+                    float y = event.getY(idx);
+                    double dx = x - lastTouchX;
+                    double dy = y - lastTouchY;
+                    if (dx != 0.0 || dy != 0.0) {
+                        centerX -= dx / scale;
+                        centerY += dy / scale;
+                        onViewportChanged();
+                    }
+                    lastTouchX = x;
+                    lastTouchY = y;
                 }
-                lastTouchX = event.getX();
-                lastTouchY = event.getY();
+                return true;
+            } else if (action == MotionEvent.ACTION_POINTER_UP) {
+                int leavingIdx = event.getActionIndex();
+                int leavingId = event.getPointerId(leavingIdx);
+                if (leavingId == activePointerId && event.getPointerCount() > 1) {
+                    int nextIdx = (leavingIdx == 0) ? 1 : 0;
+                    activePointerId = event.getPointerId(nextIdx);
+                    lastTouchX = event.getX(nextIdx);
+                    lastTouchY = event.getY(nextIdx);
+                }
+                onViewportChanged();
+                return true;
+            } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                activePointerId = MotionEvent.INVALID_POINTER_ID;
+                onViewportChanged();
                 return true;
             }
             return super.onTouchEvent(event);
+        }
+
+        private String trimFixedDecimals(double val, int decimals) {
+            String s = String.format(java.util.Locale.US, "%." + decimals + "f", val);
+            int end = s.length();
+            if (decimals > 0 && s.indexOf('.') >= 0) {
+                while (end > 0 && s.charAt(end - 1) == '0') end--;
+                if (end > 0 && s.charAt(end - 1) == '.') end--;
+            }
+            String out = s.substring(0, end);
+            if (out.equals("-0") || out.isEmpty()) return "0";
+            return out;
+        }
+
+        private String formatAxisValue(double v, double step) {
+            if (Math.abs(v) <= 1e-9 * step) return "0";
+            double absV = Math.abs(v);
+            if (absV >= 1e6 || absV < 1e-3) {
+                int exp = (int) Math.floor(Math.log10(absV) + 1e-12);
+                double pow10 = Math.pow(10.0, exp);
+                double mant = v / pow10;
+                if (Math.abs(Math.abs(mant) - 10.0) < 1e-6) {
+                    mant /= 10.0;
+                    exp += 1;
+                }
+                String sup = toSuperscript(exp);
+                if (Math.abs(Math.abs(mant) - 1.0) < 1e-4) {
+                    return (mant < 0 ? "−10" : "10") + sup;
+                }
+                String mStr = trimFixedDecimals(mant, 2);
+                if (useCommaDecimal) mStr = mStr.replace('.', ',');
+                return mStr.replace('-', '−') + "×10" + sup;
+            }
+            int decimals = step >= 1.0 ? 0 : Math.min(4, (int) Math.ceil(-Math.log10(step) - 1e-9));
+            String s = trimFixedDecimals(v, decimals);
+            if (useCommaDecimal) s = s.replace('.', ',');
+            return s.replace('-', '−');
         }
 
         @Override
@@ -2303,35 +2461,125 @@ private static class FilledBackspaceDrawable extends Drawable {
             canvas.drawColor(colSurfaceContainer);
             int w = getWidth();
             int h = getHeight();
-            float cx = w * 0.5f;
-            float cy = h * 0.5f;
+            if (w <= 0 || h <= 0) return;
+            double cx = w * 0.5;
+            double cy = h * 0.5;
 
-            float xMin = centerX - (w * 0.5f) / scale;
-            float xMax = centerX + (w * 0.5f) / scale;
-            float yMin = centerY - (h * 0.5f) / scale;
-            float yMax = centerY + (h * 0.5f) / scale;
+            double xMin = centerX - cx / scale;
+            double xMax = centerX + cx / scale;
+            double yMin = centerY - cy / scale;
+            double yMax = centerY + cy / scale;
 
-            for (float gx = (float) Math.floor(xMin); gx <= xMax; gx += 0.5f) {
-                float sx = cx + (gx - centerX) * scale;
-                boolean major = Math.abs(gx - Math.round(gx)) < 0.01f;
-                canvas.drawLine(sx, 0, sx, h, major ? majorPaint : minorPaint);
+            double rawStep = dp(56) / scale;
+            double mag = Math.pow(10.0, Math.floor(Math.log10(Math.max(rawStep, 1e-12))));
+            double norm = rawStep / mag;
+            double majorStep = (norm < 1.5) ? mag : (norm < 3.5) ? 2.0 * mag : (norm < 7.5) ? 5.0 * mag : 10.0 * mag;
+            double minorStep = majorStep / 2.0;
+
+            long minStartX = (long) Math.floor(xMin / minorStep);
+            long minEndX = (long) Math.ceil(xMax / minorStep);
+            if (minEndX - minStartX <= 200) {
+                for (long i = minStartX; i <= minEndX; i++) {
+                    float sx = (float) (cx + (i * minorStep - centerX) * scale);
+                    canvas.drawLine(sx, 0, sx, h, minorPaint);
+                }
             }
-            for (float gy = (float) Math.floor(yMin); gy <= yMax; gy += 0.5f) {
-                float sy = cy - (gy - centerY) * scale;
-                boolean major = Math.abs(gy - Math.round(gy)) < 0.01f;
-                canvas.drawLine(0, sy, w, sy, major ? majorPaint : minorPaint);
+            long minStartY = (long) Math.floor(yMin / minorStep);
+            long minEndY = (long) Math.ceil(yMax / minorStep);
+            if (minEndY - minStartY <= 200) {
+                for (long i = minStartY; i <= minEndY; i++) {
+                    float sy = (float) (cy - (i * minorStep - centerY) * scale);
+                    canvas.drawLine(0, sy, w, sy, minorPaint);
+                }
             }
 
-            float x0 = cx - centerX * scale;
-            float y0 = cy + centerY * scale;
-            canvas.drawLine(x0, 0, x0, h, axisPaint);
-            canvas.drawLine(0, y0, w, y0, axisPaint);
-
-            if (cachedSegments1 != null && cachedSegments1.length >= 4) {
-                canvas.drawLines(cachedSegments1, curve1Paint);
+            long majStartX = (long) Math.floor(xMin / majorStep);
+            long majEndX = (long) Math.ceil(xMax / majorStep);
+            if (majEndX - majStartX <= 200) {
+                for (long i = majStartX; i <= majEndX; i++) {
+                    float sx = (float) (cx + (i * majorStep - centerX) * scale);
+                    canvas.drawLine(sx, 0, sx, h, majorPaint);
+                }
             }
-            if (cachedSegments2 != null && cachedSegments2.length >= 4) {
-                canvas.drawLines(cachedSegments2, curve2Paint);
+            long majStartY = (long) Math.floor(yMin / majorStep);
+            long majEndY = (long) Math.ceil(yMax / majorStep);
+            if (majEndY - majStartY <= 200) {
+                for (long i = majStartY; i <= majEndY; i++) {
+                    float sy = (float) (cy - (i * majorStep - centerY) * scale);
+                    canvas.drawLine(0, sy, w, sy, majorPaint);
+                }
+            }
+
+            double x0d = cx - centerX * scale;
+            double y0d = cy + centerY * scale;
+            if (x0d >= -4 && x0d <= w + 4) {
+                canvas.drawLine((float) x0d, 0, (float) x0d, h, axisPaint);
+            }
+            if (y0d >= -4 && y0d <= h + 4) {
+                canvas.drawLine(0, (float) y0d, w, (float) y0d, axisPaint);
+            }
+
+            float x0 = (float) Math.max(-1e4, Math.min(1e4, x0d));
+            float y0 = (float) Math.max(-1e4, Math.min(1e4, y0d));
+            float tick = dp(3);
+            float xTickY = Math.max(tick, Math.min(h - tick, y0));
+            float xLabelY = Math.max(dp(14), Math.min(h - dp(6), y0 + dp(14)));
+            labelPaint.setTextAlign(Paint.Align.CENTER);
+            if (majEndX - majStartX <= 200) {
+                for (long i = majStartX; i <= majEndX; i++) {
+                    if (i == 0L) continue;
+                    double gx = i * majorStep;
+                    float sx = (float) (cx + (gx - centerX) * scale);
+                    if (sx >= dp(18) && sx <= w - dp(18)) {
+                        if (y0d >= -tick && y0d <= h + tick) {
+                            canvas.drawLine(sx, xTickY - tick, sx, xTickY + tick, axisPaint);
+                        }
+                        canvas.drawText(formatAxisValue(gx, majorStep), sx, xLabelY, labelPaint);
+                    }
+                }
+            }
+
+            float yTickX = Math.max(tick, Math.min(w - tick, x0));
+            float yLabelX = Math.max(dp(6), Math.min(w - dp(46), x0 + dp(6)));
+            labelPaint.setTextAlign(Paint.Align.LEFT);
+            if (majEndY - majStartY <= 200) {
+                for (long i = majStartY; i <= majEndY; i++) {
+                    if (i == 0L) continue;
+                    double gy = i * majorStep;
+                    float sy = (float) (cy - (gy - centerY) * scale);
+                    if (sy >= dp(14) && sy <= h - dp(10)) {
+                        if (x0d >= -tick && x0d <= w + tick) {
+                            canvas.drawLine(yTickX - tick, sy, yTickX + tick, sy, axisPaint);
+                        }
+                        canvas.drawText(formatAxisValue(gy, majorStep), yLabelX, sy + dp(4), labelPaint);
+                    }
+                }
+            }
+
+            if (x0d >= dp(14) && x0d <= w - dp(10) && y0d >= dp(10) && y0d <= h - dp(16)) {
+                canvas.drawText("0", (float) x0d - dp(10), (float) y0d + dp(14), labelPaint);
+            }
+
+            if ((cachedSegments1 != null || cachedSegments2 != null) && cachedWidth > 0 && cachedHeight > 0 && cachedScale > 0) {
+                float ratio = (float) (scale / cachedScale);
+                float cachedCx = cachedWidth * 0.5f;
+                float cachedCy = cachedHeight * 0.5f;
+                float mappedCachedCenterX = (float) (cx + (cachedCenterX - centerX) * scale);
+                float mappedCachedCenterY = (float) (cy - (cachedCenterY - centerY) * scale);
+                canvas.save();
+                canvas.translate(mappedCachedCenterX, mappedCachedCenterY);
+                canvas.scale(ratio, ratio);
+                canvas.translate(-cachedCx, -cachedCy);
+                float invRatio = 1.0f / Math.max(0.25f, Math.min(20.0f, ratio));
+                curve1Paint.setStrokeWidth(4.0f * invRatio);
+                curve2Paint.setStrokeWidth(4.0f * invRatio);
+                if (cachedSegments1 != null && cachedSegments1.length >= 4) {
+                    canvas.drawLines(cachedSegments1, curve1Paint);
+                }
+                if (cachedSegments2 != null && cachedSegments2.length >= 4) {
+                    canvas.drawLines(cachedSegments2, curve2Paint);
+                }
+                canvas.restore();
             }
         }
 
@@ -2340,6 +2588,8 @@ private static class FilledBackspaceDrawable extends Drawable {
             super.onAttachedToWindow();
             plotExecutor = new ScheduledThreadPoolExecutor(1);
             plotExecutor.setRemoveOnCancelPolicy(true);
+            workerRunning = false;
+            recomputeQueued = false;
             requestCurves();
         }
 
@@ -2352,13 +2602,17 @@ private static class FilledBackspaceDrawable extends Drawable {
         @Override
         protected void onDetachedFromWindow() {
             cancelCurves();
-            plotExecutor.shutdownNow();
-            plotExecutor = null;
+            if (plotExecutor != null) {
+                plotExecutor.shutdownNow();
+                plotExecutor = null;
+            }
             super.onDetachedFromWindow();
         }
 
         private void cancelCurves() {
-            ++renderGeneration;
+            ++formulaVersion;
+            workerRunning = false;
+            recomputeQueued = false;
             removeCallbacks(computeCurves);
             if (pendingCurves != null) {
                 pendingCurves.cancel(true);
@@ -2367,66 +2621,144 @@ private static class FilledBackspaceDrawable extends Drawable {
         }
 
         void requestCurves() {
-            cancelCurves();
-            cachedSegments1 = null;
-            cachedSegments2 = null;
+            ++formulaVersion;
+            plotContext = engine.snapshotForPlot();
+            if (compiledPlotFn1 == null) cachedSegments1 = null;
+            if (compiledPlotFn2 == null) cachedSegments2 = null;
+            removeCallbacks(computeCurves);
+            if (pendingCurves != null) {
+                pendingCurves.cancel(true);
+                pendingCurves = null;
+            }
+            workerRunning = false;
+            recomputeQueued = false;
             invalidate();
             if (plotExecutor != null) postOnAnimation(computeCurves);
+        }
+
+        private void onViewportChanged() {
+            invalidate();
+            if (plotExecutor == null) return;
+            if (workerRunning) {
+                recomputeQueued = true;
+            } else {
+                removeCallbacks(computeCurves);
+                scheduleCurveCompute();
+            }
         }
 
         private void scheduleCurveCompute() {
             int w = getWidth();
             int h = getHeight();
-            if (plotExecutor == null || w <= 0 || h <= 0
-                    || compiledPlotFn1 == null && compiledPlotFn2 == null) return;
-            int generation = renderGeneration;
-            float x = centerX;
-            float y = centerY;
-            float zoom = scale;
-            CalculatorEngine context = engine.snapshotForPlot();
-            CalculatorEngine.PlotFunction fn1 = compiledPlotFn1 == null ? null : compiledPlotFn1.withContext(context);
-            CalculatorEngine.PlotFunction fn2 = compiledPlotFn2 == null ? null : compiledPlotFn2.withContext(context);
+            if (plotExecutor == null || w <= 0 || h <= 0) return;
+            if (compiledPlotFn1 == null && compiledPlotFn2 == null) {
+                cachedSegments1 = null;
+                cachedSegments2 = null;
+                return;
+            }
+            if (workerRunning) {
+                recomputeQueued = true;
+                return;
+            }
+            if (plotContext == null) {
+                plotContext = engine.snapshotForPlot();
+            }
+            final int reqVersion = formulaVersion;
+            final double reqX = centerX;
+            final double reqY = centerY;
+            final double reqScale = scale;
+            final int reqW = w;
+            final int reqH = h;
+            final CalculatorEngine context = plotContext;
+            final CalculatorEngine.PlotFunction fn1 = compiledPlotFn1 == null ? null : compiledPlotFn1.withContext(context);
+            final CalculatorEngine.PlotFunction fn2 = compiledPlotFn2 == null ? null : compiledPlotFn2.withContext(context);
+            workerRunning = true;
+            recomputeQueued = false;
             pendingCurves = plotExecutor.submit(() -> {
                 try {
-                    float[] first = computeCurveSegments(fn1, w, h, x, y, zoom);
-                    float[] second = computeCurveSegments(fn2, w, h, x, y, zoom);
+                    float[] first = computeCurveSegments(fn1, reqW, reqH, reqX, reqY, reqScale);
+                    float[] second = computeCurveSegments(fn2, reqW, reqH, reqX, reqY, reqScale);
                     post(() -> {
-                        if (generation != renderGeneration) return;
-                        cachedSegments1 = first;
-                        cachedSegments2 = second;
-                        invalidate();
+                        workerRunning = false;
+                        if (plotExecutor == null) return;
+                        if (reqVersion == formulaVersion) {
+                            cachedSegments1 = first;
+                            cachedSegments2 = second;
+                            cachedCenterX = reqX;
+                            cachedCenterY = reqY;
+                            cachedScale = reqScale;
+                            cachedWidth = reqW;
+                            cachedHeight = reqH;
+                            invalidate();
+                        }
+                        if (recomputeQueued || reqVersion != formulaVersion
+                                || reqX != centerX || reqY != centerY || reqScale != scale) {
+                            recomputeQueued = false;
+                            scheduleCurveCompute();
+                        }
                     });
                 } catch (CancellationException ignored) {
-                    // An edit or a viewport change superseded this request.
+                    post(() -> {
+                        workerRunning = false;
+                        if (plotExecutor != null && recomputeQueued) {
+                            recomputeQueued = false;
+                            scheduleCurveCompute();
+                        }
+                    });
                 }
             });
         }
 
+        private float clampScreenY(double y, int h) {
+            return (float) Math.max(-2.0 * h, Math.min(3.0 * h, y));
+        }
+
         private float[] computeCurveSegments(CalculatorEngine.PlotFunction fn, int w, int h,
-                                             float reqCenterX, float reqCenterY, float reqScale) {
+                                             double reqCenterX, double reqCenterY, double reqScale) {
             if (fn == null) return null;
-            float cx = w * 0.5f;
-            float cy = h * 0.5f;
-            int maxSegs = (w / 3) + 2;
+            double cx = w * 0.5;
+            double cy = h * 0.5;
+            int pxStart = -w / 2;
+            int pxEnd = w + w / 2;
+            int maxSegs = ((pxEnd - pxStart) / 3) + 4;
             float[] buf = new float[maxSegs * 4];
             int count = 0;
-            float prevX = 0f, prevY = 0f;
+            double prevXv = 0.0, prevYv = 0.0;
+            float prevPx = 0f;
+            double prevSy = 0.0;
             boolean hasPrev = false;
-            for (int px = 0; px <= w; px += 3) {
+            for (int px = pxStart; px <= pxEnd; px += 3) {
                 if (Thread.currentThread().isInterrupted()) throw new CancellationException();
                 double xv = reqCenterX + (px - cx) / reqScale;
                 try {
                     double yv = fn.evaluate(xv);
                     if (Double.isFinite(yv)) {
-                        float sy = (float) (cy - (yv - reqCenterY) * reqScale);
-                        if (hasPrev && Math.abs(sy - prevY) < h && count + 4 <= buf.length) {
-                            buf[count++] = prevX;
-                            buf[count++] = prevY;
-                            buf[count++] = px;
-                            buf[count++] = sy;
+                        double sy = cy - (yv - reqCenterY) * reqScale;
+                        if (hasPrev && count + 4 <= buf.length) {
+                            boolean sameSideOffscreen = (prevSy < -h && sy < -h) || (prevSy > 2.0 * h && sy > 2.0 * h);
+                            if (!sameSideOffscreen) {
+                                boolean draw = Math.abs(sy - prevSy) < h;
+                                if (!draw) {
+                                    try {
+                                        double midYv = fn.evaluate(0.5 * (prevXv + xv));
+                                        draw = Double.isFinite(midYv)
+                                                && ((midYv >= prevYv && midYv <= yv) || (midYv <= prevYv && midYv >= yv));
+                                    } catch (RuntimeException ignored) {
+                                        draw = false;
+                                    }
+                                }
+                                if (draw) {
+                                    buf[count++] = prevPx;
+                                    buf[count++] = clampScreenY(prevSy, h);
+                                    buf[count++] = px;
+                                    buf[count++] = clampScreenY(sy, h);
+                                }
+                            }
                         }
-                        prevX = px;
-                        prevY = sy;
+                        prevXv = xv;
+                        prevYv = yv;
+                        prevPx = px;
+                        prevSy = sy;
                         hasPrev = true;
                     } else {
                         hasPrev = false;
@@ -2459,12 +2791,18 @@ private static class FilledBackspaceDrawable extends Drawable {
         final String token;
         final String name;
         final String displayValue;
+        final boolean exactSi;
 
         ConstantDef(String symbol, String token, String name, String displayValue) {
+            this(symbol, token, name, displayValue, false);
+        }
+
+        ConstantDef(String symbol, String token, String name, String displayValue, boolean exactSi) {
             this.symbol = symbol;
             this.token = token;
             this.name = name;
             this.displayValue = displayValue;
+            this.exactSi = exactSi;
         }
     }
 
@@ -2482,41 +2820,41 @@ private static class FilledBackspaceDrawable extends Drawable {
         return new CategoryDef[]{
                 new CategoryDef("Benutzerdefinierte Variablen", new ConstantDef[]{}),
                 new CategoryDef("Universelle physikalische Konstanten", new ConstantDef[]{
-                        new ConstantDef("k_B", "k_B", "Boltzmann-Konstante", "1,380 6×10⁻²³"),
-                        new ConstantDef("ε₀", "eps0", "Elektrische Feldkonstante", "8,854 2×10⁻¹²"),
-                        new ConstantDef("e⁻", "e_charge", "Elementarladung", "1,602 2×10⁻¹⁹"),
-                        new ConstantDef("α", "alpha_fs", "Feinstrukturkonstante", "7,297 4×10⁻³"),
-                        new ConstantDef("G", "G", "Gravitationskonstante", "6,673 8×10⁻¹¹"),
-                        new ConstantDef("g", "g", "Gravitationsbeschleunigung", "9,806 7"),
-                        new ConstantDef("c₀", "c0", "Lichtgeschwindigkeit", "2,997 9×10⁸"),
-                        new ConstantDef("μ₀", "mu0", "Magnetische Feldkonstante", "12,566×10⁻⁷"),
-                        new ConstantDef("h", "h", "Plancksches Wirkungsquantum", "6,626 1×10⁻³⁴")
+                        new ConstantDef("k_B", "k_B", "Boltzmann-Konstante", "1,380 649×10⁻²³", true),
+                        new ConstantDef("ε₀", "eps0", "Elektrische Feldkonstante", "8,854 188×10⁻¹²"),
+                        new ConstantDef("e⁻", "e_charge", "Elementarladung", "1,602 176 634×10⁻¹⁹", true),
+                        new ConstantDef("α", "alpha_fs", "Feinstrukturkonstante", "7,297 353×10⁻³"),
+                        new ConstantDef("G", "G", "Gravitationskonstante", "6,674 30×10⁻¹¹"),
+                        new ConstantDef("g", "g", "Gravitationsbeschleunigung", "9,806 65", true),
+                        new ConstantDef("c₀", "c0", "Lichtgeschwindigkeit", "299 792 458", true),
+                        new ConstantDef("μ₀", "mu0", "Magnetische Feldkonstante", "1,256 637×10⁻⁶"),
+                        new ConstantDef("h", "h", "Plancksches Wirkungsquantum", "6,626 070 15×10⁻³⁴", true)
                 }),
                 new CategoryDef("Elektromagnetische Konstanten", new ConstantDef[]{
-                        new ConstantDef("Z₀", "Z0", "Wellenwiderstand des Vakuums", "376,73"),
-                        new ConstantDef("Φ₀", "Phi0", "Magnetisches Flussquant", "2,067 8×10⁻¹⁵"),
-                        new ConstantDef("K_J", "K_J", "Josephson-Konstante", "4,835×10¹⁴"),
-                        new ConstantDef("R_K", "R_K", "Von-Klitzing-Konstante", "25813,0"),
-                        new ConstantDef("G₀", "G0", "Leitwertquant", "7,748 1×10⁻⁵"),
-                        new ConstantDef("σ", "sigma", "Stefan-Boltzmann-Konstante", "5,670 4×10⁻⁸"),
-                        new ConstantDef("R_∞", "R_inf", "Rydberg-Konstante", "1,097 4×10⁷"),
-                        new ConstantDef("E_h", "E_h", "Hartree-Energie", "4,359 7×10⁻¹⁸"),
-                        new ConstantDef("μ_B", "mu_B", "Bohrsches Magneton", "1,399 6×10¹⁰"),
-                        new ConstantDef("μ_e", "mu_e", "Magnetisches Moment d. Elektrons", "−9,284 8×10⁻²⁴")
+                        new ConstantDef("Z₀", "Z0", "Wellenwiderstand des Vakuums", "376,730 3"),
+                        new ConstantDef("Φ₀", "Phi0", "Magnetisches Flussquant", "2,067 834×10⁻¹⁵", true),
+                        new ConstantDef("K_J", "K_J", "Josephson-Konstante", "4,835 978×10¹⁴", true),
+                        new ConstantDef("R_K", "R_K", "Von-Klitzing-Konstante", "25 812,81", true),
+                        new ConstantDef("G₀", "G0", "Leitwertquant", "7,748 092×10⁻⁵", true),
+                        new ConstantDef("σ", "sigma", "Stefan-Boltzmann-Konstante", "5,670 374×10⁻⁸", true),
+                        new ConstantDef("R_∞", "R_inf", "Rydberg-Konstante", "1,097 373×10⁷"),
+                        new ConstantDef("E_h", "E_h", "Hartree-Energie", "4,359 745×10⁻¹⁸"),
+                        new ConstantDef("μ_B", "mu_B", "Bohrsches Magneton", "9,274 010×10⁻²⁴"),
+                        new ConstantDef("μ_e", "mu_e", "Magnetisches Moment d. Elektrons", "−9,284 765×10⁻²⁴")
                 }),
                 new CategoryDef("Chemische Konstanten", new ConstantDef[]{
-                        new ConstantDef("N_A", "N_A", "Avogadro-Konstante", "6,022 1×10²³"),
-                        new ConstantDef("m_u", "m_u", "Atomare Masseneinheit", "1,660 5×10⁻²⁷"),
-                        new ConstantDef("F", "F", "Faraday-Konstante", "96485,0"),
-                        new ConstantDef("R", "R", "Universelle Gaskonstante", "8,314 5"),
-                        new ConstantDef("m_e", "m_e", "Elektronenmasse", "9,109 4×10⁻³¹"),
-                        new ConstantDef("m_p", "m_p", "Protonenmasse", "1,672 6×10⁻²⁷"),
-                        new ConstantDef("m_n", "m_n", "Neutronenmasse", "1,674 9×10⁻²⁷")
+                        new ConstantDef("N_A", "N_A", "Avogadro-Konstante", "6,022 140 76×10²³", true),
+                        new ConstantDef("m_u", "m_u", "Atomare Masseneinheit", "1,660 539×10⁻²⁷"),
+                        new ConstantDef("F", "F", "Faraday-Konstante", "96 485,33", true),
+                        new ConstantDef("R", "R", "Universelle Gaskonstante", "8,314 463", true),
+                        new ConstantDef("m_e", "m_e", "Elektronenmasse", "9,109 384×10⁻³¹"),
+                        new ConstantDef("m_p", "m_p", "Protonenmasse", "1,672 622×10⁻²⁷"),
+                        new ConstantDef("m_n", "m_n", "Neutronenmasse", "1,674 928×10⁻²⁷")
                 }),
                 new CategoryDef("Planck- & Naturkonstanten", new ConstantDef[]{
-                        new ConstantDef("m_P", "m_P", "Planck-Masse", "2,176 5×10⁻⁸"),
-                        new ConstantDef("t_P", "t_P", "Planck-Zeit", "5,391 1×10⁻⁴⁴"),
-                        new ConstantDef("l_P", "l_P", "Planck-Länge", "1,616 2×10⁻³⁵")
+                        new ConstantDef("m_P", "m_P", "Planck-Masse", "2,176 434×10⁻⁸"),
+                        new ConstantDef("t_P", "t_P", "Planck-Zeit", "5,391 247×10⁻⁴⁴"),
+                        new ConstantDef("l_P", "l_P", "Planck-Länge", "1,616 255×10⁻³⁵")
                 }),
                 new CategoryDef("Mathematische Konstanten", new ConstantDef[]{
                         new ConstantDef("π", "pi", "Kreiszahl Pi", "3,14159…"),
@@ -2768,9 +3106,10 @@ private static class FilledBackspaceDrawable extends Drawable {
                     valTv.setTextColor(colOnSurfaceVariant);
                     valTv.setGravity(Gravity.CENTER);
                     valTv.setSingleLine(true);
-                    setScaledTextSize(valTv, 11f, 1.3f);
+                    valTv.setAutoSizeTextTypeUniformWithConfiguration(
+                            7, 11, 1, TypedValue.COMPLEX_UNIT_DIP);
                     LinearLayout.LayoutParams valLp = new LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                            ViewGroup.LayoutParams.MATCH_PARENT, dp(16));
                     valLp.topMargin = dp(4);
                     tile.addView(valTv, valLp);
 
@@ -2791,6 +3130,19 @@ private static class FilledBackspaceDrawable extends Drawable {
                             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
                     nameLp.topMargin = dp(2);
                     tile.addView(nameTv, nameLp);
+
+                    if (item.exactSi) {
+                        TextView exactSiTv = new TextView(this);
+                        exactSiTv.setText("exakt (SI)");
+                        exactSiTv.setTextColor(colPrimary);
+                        exactSiTv.setGravity(Gravity.CENTER);
+                        exactSiTv.setSingleLine(true);
+                        setScaledTextSize(exactSiTv, 8.5f, 1.3f);
+                        LinearLayout.LayoutParams exLp = new LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                        exLp.topMargin = dp(1);
+                        tile.addView(exactSiTv, exLp);
+                    }
 
                     tile.setClickable(true);
                     tile.setFocusable(true);
@@ -2887,7 +3239,171 @@ private static class FilledBackspaceDrawable extends Drawable {
         }
 
         sv.addView(list);
+
+        TextView codataFooter = new TextView(this);
+        codataFooter.setText("Stand: CODATA 2022 / SI 2019");
+        codataFooter.setTextColor(colOnSurfaceVariant);
+        codataFooter.setGravity(Gravity.CENTER);
+        setScaledTextSize(codataFooter, 11f, 1.5f);
+        codataFooter.setPadding(0, dp(4), 0, dp(4));
+        list.addView(codataFooter);
+
         parent.addView(sv);
+    }
+
+    private interface SwitchChangeListener {
+        void onChanged(boolean checked);
+    }
+
+    private static class SwitchThumbDrawable extends Drawable {
+        private final int widthPx;
+        private final int heightPx;
+        private final float radiusPx;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        SwitchThumbDrawable(int widthPx, int heightPx, float radiusPx, int color) {
+            this.widthPx = widthPx;
+            this.heightPx = heightPx;
+            this.radiusPx = radiusPx;
+            paint.setColor(color);
+            paint.setStyle(Paint.Style.FILL);
+        }
+
+        @Override
+        public void draw(Canvas canvas) {
+            Rect b = getBounds();
+            canvas.drawCircle(b.exactCenterX(), b.exactCenterY(), radiusPx, paint);
+        }
+
+        @Override public int getIntrinsicWidth() { return widthPx; }
+        @Override public int getIntrinsicHeight() { return heightPx; }
+        @Override public boolean getPadding(Rect padding) { padding.set(0, 0, 0, 0); return false; }
+        @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); }
+        @Override public void setColorFilter(ColorFilter cf) { paint.setColorFilter(cf); }
+        @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
+    }
+
+    private Drawable makeMaterialSwitchTrack() {
+        StateListDrawable sld = new StateListDrawable();
+        GradientDrawable on = new GradientDrawable();
+        on.setShape(GradientDrawable.RECTANGLE);
+        on.setCornerRadius(dp(16));
+        on.setSize(dp(60), dp(32));
+        on.setColor(colPrimary);
+
+        GradientDrawable off = new GradientDrawable();
+        off.setShape(GradientDrawable.RECTANGLE);
+        off.setCornerRadius(dp(16));
+        off.setSize(dp(60), dp(32));
+        off.setColor(colSurfaceHigh);
+        off.setStroke(dp(2), colOnSurfaceVariant);
+
+        sld.addState(new int[]{android.R.attr.state_checked}, on);
+        sld.addState(new int[]{}, off);
+        return sld;
+    }
+
+    private Drawable makeMaterialSwitchThumb() {
+        StateListDrawable sld = new StateListDrawable();
+        sld.addState(new int[]{android.R.attr.state_checked},
+                new SwitchThumbDrawable(dp(30), dp(32), dp(12), colOnPrimary));
+        sld.addState(new int[]{},
+                new SwitchThumbDrawable(dp(30), dp(32), dp(8), colOnSurfaceVariant));
+        return sld;
+    }
+
+    private LinearLayout buildSwitchSettingCard(String title, String subtitle, boolean initialValue,
+                                                SwitchChangeListener onChanged, TextView[] subtitleOut) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.HORIZONTAL);
+        card.setGravity(Gravity.CENTER_VERTICAL);
+        card.setBackground(materialRipple(colSurfaceContainer, 14));
+        card.setPadding(dp(14), dp(12), dp(14), dp(12));
+        card.setClickable(true);
+        card.setFocusable(true);
+
+        LinearLayout textCol = new LinearLayout(this);
+        textCol.setOrientation(LinearLayout.VERTICAL);
+
+        TextView titleTv = new TextView(this);
+        titleTv.setText(title);
+        titleTv.setTextColor(colOnSurface);
+        setScaledTextSize(titleTv, 14.5f, 1.8f);
+        titleTv.setTypeface(Typeface.DEFAULT_BOLD);
+        textCol.addView(titleTv);
+
+        TextView subTv = new TextView(this);
+        subTv.setText(subtitle);
+        subTv.setTextColor(colOnSurfaceVariant);
+        setScaledTextSize(subTv, 12f, 1.8f);
+        subTv.setPadding(0, dp(2), 0, 0);
+        textCol.addView(subTv);
+        if (subtitleOut != null && subtitleOut.length > 0) {
+            subtitleOut[0] = subTv;
+        }
+
+        LinearLayout.LayoutParams textLp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        textLp.rightMargin = dp(12);
+        card.addView(textCol, textLp);
+
+        Switch sw = new Switch(this);
+        sw.setShowText(false);
+        sw.setText("");
+        sw.setSwitchMinWidth(dp(60));
+        sw.setSplitTrack(false);
+        sw.setTrackDrawable(makeMaterialSwitchTrack());
+        sw.setThumbDrawable(makeMaterialSwitchThumb());
+        sw.setChecked(initialValue);
+        sw.setContentDescription(title);
+        sw.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            buttonView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+            onChanged.onChanged(isChecked);
+        });
+        card.addView(sw, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        card.setOnClickListener(v -> sw.toggle());
+        return card;
+    }
+
+    private TextView buildSettingSectionLabel(String title) {
+        TextView label = new TextView(this);
+        label.setText(title);
+        label.setTextColor(colOnSurface);
+        setScaledTextSize(label, 14f, 1.8f);
+        label.setTypeface(Typeface.DEFAULT_BOLD);
+        label.setPadding(dp(2), 0, 0, dp(6));
+        return label;
+    }
+
+    private Button addSegmentedOption(LinearLayout row, String label, boolean selected,
+                                      boolean addLeftMargin, boolean addRightMargin,
+                                      View.OnClickListener onClick) {
+        Button btn = makeMaterialButton(
+                label,
+                selected ? colPrimary : colSurfaceContainer,
+                selected ? colOnPrimary : colOnSurface,
+                14, 13.5f, 1.8f, selected);
+        btn.setSingleLine(true);
+        btn.setAutoSizeTextTypeUniformWithConfiguration(
+                9, 14, 1, TypedValue.COMPLEX_UNIT_DIP);
+        btn.setPadding(dp(8), dp(10), dp(8), dp(10));
+        btn.setOnClickListener(onClick);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        if (addLeftMargin) lp.leftMargin = dp(4);
+        if (addRightMargin) lp.rightMargin = dp(4);
+        row.addView(btn, lp);
+        return btn;
+    }
+
+    private static String formatThousandsExample() {
+        if (thousandsGrouping == 1) {
+            return useCommaDecimal ? "Beispiel: 2.443,73" : "Beispiel: 2,443.73";
+        } else if (thousandsGrouping == 2) {
+            return useCommaDecimal ? "Beispiel: 2 443,73" : "Beispiel: 2 443.73";
+        }
+        return useCommaDecimal ? "Beispiel: 2443,73" : "Beispiel: 2443.73";
     }
 
     private void buildConverterTab(FrameLayout parent) {
@@ -2910,126 +3426,138 @@ private static class FilledBackspaceDrawable extends Drawable {
         desc.setPadding(0, dp(4), 0, dp(14));
         col.addView(desc);
 
-        // Setting 0: Number format (Europa vs. US) & Thousands grouping
-        TextView nfLabel = new TextView(this);
-        nfLabel.setText("Zahlenformat (Punkt & Komma)");
-        nfLabel.setTextColor(colOnSurface);
-        setScaledTextSize(nfLabel, 14f, 1.8f);
-        nfLabel.setTypeface(Typeface.DEFAULT_BOLD);
-        nfLabel.setPadding(dp(2), 0, 0, dp(6));
-        col.addView(nfLabel);
+        // Setting 0: Number format (Europa vs. US)
+        col.addView(buildSettingSectionLabel("Zahlenformat (Punkt & Komma)"));
 
         LinearLayout nfRow = new LinearLayout(this);
         nfRow.setOrientation(LinearLayout.HORIZONTAL);
         nfRow.setGravity(Gravity.CENTER_VERTICAL);
-
-        Button euBtn = makeMaterialButton(
-                "Europa (Komma ,)",
-                useCommaDecimal ? colPrimary : colSurfaceContainer,
-                useCommaDecimal ? colOnPrimary : colOnSurface,
-                14, 13.5f, 1.8f, useCommaDecimal);
-        euBtn.setPadding(dp(10), dp(10), dp(10), dp(10));
-        euBtn.setOnClickListener(v -> {
+        addSegmentedOption(nfRow, "Europa (Komma ,)", useCommaDecimal, false, true, v -> {
             if (!useCommaDecimal) {
+                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
                 useCommaDecimal = true;
                 applyNumberFormatToEditors();
                 saveState();
                 rebuildScreen();
             }
         });
-        LinearLayout.LayoutParams euLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        euLp.rightMargin = dp(4);
-        nfRow.addView(euBtn, euLp);
-
-        Button usBtn = makeMaterialButton(
-                "US (Punkt .)",
-                !useCommaDecimal ? colPrimary : colSurfaceContainer,
-                !useCommaDecimal ? colOnPrimary : colOnSurface,
-                14, 13.5f, 1.8f, !useCommaDecimal);
-        usBtn.setPadding(dp(10), dp(10), dp(10), dp(10));
-        usBtn.setOnClickListener(v -> {
+        addSegmentedOption(nfRow, "US (Punkt .)", !useCommaDecimal, true, false, v -> {
             if (useCommaDecimal) {
+                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
                 useCommaDecimal = false;
                 applyNumberFormatToEditors();
                 saveState();
                 rebuildScreen();
             }
         });
-        LinearLayout.LayoutParams usLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        usLp.leftMargin = dp(4);
-        nfRow.addView(usBtn, usLp);
         col.addView(nfRow);
 
         View sp0 = new View(this);
-        col.addView(sp0, new LinearLayout.LayoutParams(dp(1), dp(8)));
+        col.addView(sp0, new LinearLayout.LayoutParams(dp(1), dp(12)));
 
-        String groupingDesc;
-        if (thousandsGrouping == 1) {
-            groupingDesc = useCommaDecimal ? "Punkt (2.443,73)" : "Komma (2,443.73)";
-        } else if (thousandsGrouping == 2) {
-            groupingDesc = useCommaDecimal ? "Leerzeichen (2 443,73)" : "Leerzeichen (2 443.73)";
-        } else {
-            groupingDesc = useCommaDecimal ? "Aus (2443,73)" : "Aus (2443.73)";
+        // Setting 1: Thousands grouping segmented selector
+        col.addView(buildSettingSectionLabel("Tausendertrennzeichen"));
+        TextView groupExampleTv = new TextView(this);
+        groupExampleTv.setText(formatThousandsExample());
+        groupExampleTv.setTextColor(colOnSurfaceVariant);
+        setScaledTextSize(groupExampleTv, 12f, 1.6f);
+        groupExampleTv.setPadding(dp(2), 0, 0, dp(6));
+        col.addView(groupExampleTv);
+
+        LinearLayout grpRow = new LinearLayout(this);
+        grpRow.setOrientation(LinearLayout.HORIZONTAL);
+        grpRow.setGravity(Gravity.CENTER_VERTICAL);
+        String[] grpLabels = {"Aus", useCommaDecimal ? "Punkt" : "Komma", "Leerzeichen"};
+        for (int gIdx = 0; gIdx < grpLabels.length; gIdx++) {
+            final int mode = gIdx;
+            addSegmentedOption(grpRow, grpLabels[gIdx], thousandsGrouping == mode, gIdx > 0, gIdx < 2, v -> {
+                if (thousandsGrouping != mode) {
+                    v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                    thousandsGrouping = mode;
+                    saveState();
+                    rebuildScreen();
+                }
+            });
         }
-        Button toggleGrouping = makeMaterialButton(
-                "Tausendertrennzeichen: " + groupingDesc,
-                colSurfaceContainer, colOnSurface, 14, 14f, 2.0f);
-        toggleGrouping.setOnClickListener(v -> {
-            thousandsGrouping = (thousandsGrouping + 1) % 3;
-            saveState();
-            rebuildScreen();
-        });
-        col.addView(toggleGrouping);
+        col.addView(grpRow);
 
         View sp0b = new View(this);
-        col.addView(sp0b, new LinearLayout.LayoutParams(dp(1), dp(8)));
+        col.addView(sp0b, new LinearLayout.LayoutParams(dp(1), dp(12)));
 
-        // Setting 1: Exact first
-        Button toggleExact = makeMaterialButton(
-                "Exakte Brüche zuerst anzeigen: " + (showExactFirst ? "AN" : "AUS"),
-                colSurfaceContainer, colOnSurface, 14, 14f, 2.0f);
-        toggleExact.setOnClickListener(v -> {
-            showExactFirst = !showExactFirst;
-            saveState();
-            rebuildScreen();
-        });
-        col.addView(toggleExact);
+        // Setting 2: Exact results first switch
+        LinearLayout exactCard = buildSwitchSettingCard(
+                "Exakte Ergebnisse zuerst anzeigen",
+                "Brüche, Wurzeln und ganze Zahlen bevorzugt exakt anzeigen",
+                showExactFirst,
+                checked -> {
+                    showExactFirst = checked;
+                    saveState();
+                },
+                null
+        );
+        col.addView(exactCard, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         View sp1 = new View(this);
-        col.addView(sp1, new LinearLayout.LayoutParams(dp(1), dp(8)));
+        col.addView(sp1, new LinearLayout.LayoutParams(dp(1), dp(10)));
 
-        // Setting 2: Modulo always positive
-        Button toggleModulo = makeMaterialButton(
-                "Modulo immer positiv: " + (engine.isModuloAlwaysPositive() ? "AN (−7 mod 3 = 2)" : "AUS (−7 mod 3 = −1)"),
-                colSurfaceContainer, colOnSurface, 14, 14f, 2.0f);
-        toggleModulo.setOnClickListener(v -> {
-            engine.setModuloAlwaysPositive(!engine.isModuloAlwaysPositive());
-            saveState();
-            rebuildScreen();
-        });
-        col.addView(toggleModulo);
+        // Setting 3: Modulo always positive switch
+        final TextView[] modSub = new TextView[1];
+        String modSubtitle = engine.isModuloAlwaysPositive()
+                ? "−7 mod 3 = 2 (immer ≥ 0)"
+                : "−7 mod 3 = −1 (Rest mit Vorzeichen)";
+        LinearLayout moduloCard = buildSwitchSettingCard(
+                "Modulo immer positiv",
+                modSubtitle,
+                engine.isModuloAlwaysPositive(),
+                checked -> {
+                    engine.setModuloAlwaysPositive(checked);
+                    if (modSub[0] != null) {
+                        modSub[0].setText(checked
+                                ? "−7 mod 3 = 2 (immer ≥ 0)"
+                                : "−7 mod 3 = −1 (Rest mit Vorzeichen)");
+                    }
+                    saveState();
+                },
+                modSub
+        );
+        col.addView(moduloCard, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         View sp2 = new View(this);
-        col.addView(sp2, new LinearLayout.LayoutParams(dp(1), dp(8)));
+        col.addView(sp2, new LinearLayout.LayoutParams(dp(1), dp(12)));
 
-        // Setting 3: Angle mode
-        Button toggleAngle = makeMaterialButton(
-                "Standard-Winkelmodus: " + (engine.isRadiansMode() ? "RAD (Bogenmaß)" : "DEG (Grad)"),
-                colSurfaceContainer, colOnSurface, 14, 14f, 2.0f);
-        toggleAngle.setOnClickListener(v -> {
-            engine.setRadiansMode(!engine.isRadiansMode());
-            saveState();
-            rebuildScreen();
+        // Setting 4: Angle mode segmented selector
+        col.addView(buildSettingSectionLabel("Standard-Winkelmodus"));
+        LinearLayout angRow = new LinearLayout(this);
+        angRow.setOrientation(LinearLayout.HORIZONTAL);
+        angRow.setGravity(Gravity.CENTER_VERTICAL);
+        addSegmentedOption(angRow, "RAD (Bogenmaß)", engine.isRadiansMode(), false, true, v -> {
+            if (!engine.isRadiansMode()) {
+                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                engine.setRadiansMode(true);
+                saveState();
+                rebuildScreen();
+            }
         });
-        col.addView(toggleAngle);
+        addSegmentedOption(angRow, "DEG (Grad)", !engine.isRadiansMode(), true, false, v -> {
+            if (engine.isRadiansMode()) {
+                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                engine.setRadiansMode(false);
+                saveState();
+                rebuildScreen();
+            }
+        });
+        col.addView(angRow);
 
         View sp3 = new View(this);
-        col.addView(sp3, new LinearLayout.LayoutParams(dp(1), dp(12)));
+        col.addView(sp3, new LinearLayout.LayoutParams(dp(1), dp(14)));
 
-        // Setting 4: Clear history
+        // Setting 5: Clear history
         Button clearHist = makeMaterialButton(
                 "Verlauf vollständig leeren",
                 colSecondaryContainer, colOnSecondaryContainer, 14, 14f, 2.0f);
+        clearHist.setPadding(dp(12), dp(12), dp(12), dp(12));
         clearHist.setOnClickListener(v -> {
             new AlertDialog.Builder(this)
                     .setTitle("Verlauf leeren")
@@ -3100,27 +3628,136 @@ private static class FilledBackspaceDrawable extends Drawable {
         return sb.toString();
     }
 
-    public static String formatDisplayNumber(String numStr) {
+    private static String groupDigitsForWrap(String intPart) {
+        if (intPart == null || intPart.isEmpty()) return "";
+        String sign = "";
+        String digits = intPart;
+        if (digits.charAt(0) == '+' || digits.charAt(0) == '-') {
+            sign = digits.substring(0, 1);
+            digits = digits.substring(1);
+        }
+        if (digits.length() <= 3) return sign + digits;
+        String sep;
+        if (thousandsGrouping == 2) {
+            sep = " ";
+        } else if (thousandsGrouping == 1) {
+            sep = (useCommaDecimal ? "." : ",") + "\u200B";
+        } else {
+            sep = "\u200B";
+        }
+        StringBuilder sb = new StringBuilder(digits.length() * 2);
+        sb.append(sign);
+        for (int i = 0; i < digits.length(); i++) {
+            if (i > 0 && (digits.length() - i) % 3 == 0) {
+                sb.append(sep);
+            }
+            sb.append(digits.charAt(i));
+        }
+        return sb.toString();
+    }
+
+    private static String groupFractionDigits(String fracPart) {
+        if (fracPart == null || fracPart.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder(fracPart.length() + fracPart.length() / 3);
+        for (int i = 0; i < fracPart.length(); i++) {
+            if (i > 0 && i % 3 == 0) sb.append(' ');
+            sb.append(fracPart.charAt(i));
+        }
+        return sb.toString();
+    }
+
+    public static String formatExactDisplayNumber(String numStr) {
         if (numStr == null || numStr.isEmpty()) return "";
         if (numStr.contains("[")) {
             return numStr;
+        }
+        int assignIdx = numStr.indexOf(":=");
+        if (assignIdx >= 0) {
+            String lhs = numStr.substring(0, assignIdx + 2).trim();
+            String rhs = numStr.substring(assignIdx + 2).trim();
+            return lhs + " " + formatExactDisplayNumber(rhs);
         }
         if (numStr.contains("i")) {
             return useCommaDecimal
                     ? numStr.replaceAll("(\\d)\\.(\\d)", "$1,$2")
                     : FormulaEditor.localizeDecimalLiterals(numStr, false);
         }
-        if (numStr.matches("^-?\\d+(\\.\\d+)?[eE][+-]?\\d+$")) {
-            String[] p = numStr.split("[eE]");
-            String mantissa = formatDisplayNumber(p[0]);
+        String clean = numStr.trim().replace(',', '.');
+        if (clean.matches("[+-]?\\d+")) {
+            return groupDigitsForWrap(clean);
+        }
+        if (clean.matches("^[+-]?\\d+(?:\\.\\d+)?[eE][+-]?\\d+$")) {
+            int eIdx = Math.max(clean.indexOf('e'), clean.indexOf('E'));
+            String mant = clean.substring(0, eIdx);
             try {
-                int exp = Integer.parseInt(p[1]);
-                return mantissa + " × 10" + toSuperscript(exp);
-            } catch (Exception ignored) {
-                return numStr;
+                int exp = Integer.parseInt(clean.substring(eIdx + 1));
+                int mDot = mant.indexOf('.');
+                String mInt = mDot >= 0 ? mant.substring(0, mDot) : mant;
+                String mFrac = mDot >= 0 ? mant.substring(mDot + 1) : "";
+                String sign = "";
+                if (mInt.startsWith("+") || mInt.startsWith("-")) {
+                    sign = mInt.substring(0, 1);
+                    mInt = mInt.substring(1);
+                }
+                String decSep = useCommaDecimal ? "," : ".";
+                StringBuilder res = new StringBuilder();
+                res.append(sign).append(mInt);
+                if (!mFrac.isEmpty()) {
+                    res.append(decSep).append(groupFractionDigits(mFrac));
+                }
+                return res.append(" × 10").append(toSuperscript(exp)).toString();
+            } catch (NumberFormatException ignored) {
             }
         }
-        String clean = numStr.replace(',', '.');
+        if (clean.matches("[+-]?\\d+\\.\\d+")) {
+            int dot = clean.indexOf('.');
+            String intPart = groupDigitsForWrap(clean.substring(0, dot));
+            String fracPart = groupFractionDigits(clean.substring(dot + 1));
+            String decSep = useCommaDecimal ? "," : ".";
+            return intPart + decSep + fracPart;
+        }
+        return formatUnchainedSuperscripts(numStr);
+    }
+
+    public static String formatDisplayNumber(String numStr) {
+        if (numStr == null || numStr.isEmpty()) return "";
+        if (numStr.contains("[")) {
+            return numStr;
+        }
+        int assignIdx = numStr.indexOf(":=");
+        if (assignIdx >= 0) {
+            String lhs = numStr.substring(0, assignIdx + 2).trim();
+            String rhs = numStr.substring(assignIdx + 2).trim();
+            return lhs + " " + formatDisplayNumber(rhs);
+        }
+        if (numStr.contains("i")) {
+            return useCommaDecimal
+                    ? numStr.replaceAll("(\\d)\\.(\\d)", "$1,$2")
+                    : FormulaEditor.localizeDecimalLiterals(numStr, false);
+        }
+        String clean = numStr.trim().replace(',', '.');
+        if (clean.matches("^[+-]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][+-]?\\d+)?$")) {
+            try {
+                java.math.BigDecimal bd = new java.math.BigDecimal(clean);
+                if (bd.signum() == 0) return "0";
+                int exp = bd.precision() - bd.scale() - 1;
+                if (exp >= 6 || exp <= -5 || clean.contains("e") || clean.contains("E")) {
+                    java.math.BigDecimal mant = bd.movePointLeft(exp).setScale(6, java.math.RoundingMode.HALF_UP);
+                    if (mant.abs().compareTo(java.math.BigDecimal.TEN) >= 0) {
+                        mant = mant.movePointLeft(1).setScale(6, java.math.RoundingMode.HALF_UP);
+                        exp += 1;
+                    }
+                    String mStr = mant.toPlainString();
+                    int mDot = mStr.indexOf('.');
+                    String mInt = mDot >= 0 ? mStr.substring(0, mDot) : mStr;
+                    String mFrac = mDot >= 0 ? mStr.substring(mDot + 1) : "000000";
+                    while (mFrac.length() < 6) mFrac += "0";
+                    String decSep = useCommaDecimal ? "," : ".";
+                    return mInt + decSep + mFrac.substring(0, 3) + " " + mFrac.substring(3, 6) + " × 10" + toSuperscript(exp);
+                }
+            } catch (Exception ignored) {
+            }
+        }
         if (clean.matches("[+-]?\\d+")) {
             return groupIntegerDigits(clean);
         }
@@ -3142,14 +3779,8 @@ private static class FilledBackspaceDrawable extends Drawable {
                 }
             }
             String intPart = groupIntegerDigits(clean.substring(0, dot));
-            fracPart = clean.substring(dot + 1);
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < fracPart.length(); i++) {
-                if (i > 0 && i % 3 == 0) sb.append(' ');
-                sb.append(fracPart.charAt(i));
-            }
             String decSep = useCommaDecimal ? "," : ".";
-            return intPart + decSep + sb.toString();
+            return intPart + decSep + groupFractionDigits(clean.substring(dot + 1));
         }
         return formatUnchainedSuperscripts(numStr);
     }

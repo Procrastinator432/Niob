@@ -168,10 +168,10 @@ pub fn run_all_verification_checks() -> Vec<VerificationCheck> {
 
     // 7. Original App Bug #1: Swapped Proton/Neutron Masses & Wrong Unit Exponent (10^-24 g vs 10^-27 kg)
     {
-        // Fixed SI masses (CODATA 2018/2022): m_p = 1.67262192369e-27 kg < m_n = 1.67492749804e-27 kg.
+        // Fixed SI masses (CODATA 2022): m_p = 1.67262192595e-27 kg < m_n = 1.67492750056e-27 kg.
         let mp_lt_mn_kg = MASS_PROTON < MASS_NEUTRON
-            && (MASS_PROTON - 1.67262192369e-27).abs() < 1e-36
-            && (MASS_NEUTRON - 1.67492749804e-27).abs() < 1e-36;
+            && (MASS_PROTON - 1.67262192595e-27).abs() < 1e-36
+            && (MASS_NEUTRON - 1.67492750056e-27).abs() < 1e-36;
         results.push(VerificationCheck {
             id: "ORIG-BUG-01",
             category: "Original-App Fehler #1 (Physikalische Konstanten)",
@@ -221,13 +221,13 @@ pub fn run_all_verification_checks() -> Vec<VerificationCheck> {
             && (BOLTZMANN_CONST - 1.380649e-23).abs() < 1e-30
             && (GRAVITATIONAL_ACCELERATION - 9.80665).abs() < 1e-8
             && (ELECTRON_CHARGE - 1.602176634e-19).abs() < 1e-28
-            && (IMPEDANCE_VACUUM - 376.730313668).abs() < 1e-8
-            && (VON_KLITZING_CONST - 25812.80745).abs() < 1e-5
-            && (STEFAN_BOLTZMANN_CONST - 5.670374419e-8).abs() < 1e-16
+            && (IMPEDANCE_VACUUM - 376.730313412).abs() < 1e-8
+            && (VON_KLITZING_CONST - 25812.807459304513).abs() < 1e-5
+            && (STEFAN_BOLTZMANN_CONST - 5.6703744191844294e-8).abs() < 1e-16
             && (AVOGADRO_CONST - 6.02214076e23).abs() < 1e15
             && (FARADAY_CONST - 96485.3321233100184).abs() < 1e-8
             && (MOLAR_GAS_CONSTANT - 8.31446261815324).abs() < 1e-12
-            && (MASS_ELECTRON - 9.1093837015e-31).abs() < 1e-39
+            && (MASS_ELECTRON - 9.1093837139e-31).abs() < 1e-39
             && (PERCENT_VAR - 0.01).abs() < 1e-9;
         results.push(VerificationCheck {
             id: "ORIG-BUG-03",

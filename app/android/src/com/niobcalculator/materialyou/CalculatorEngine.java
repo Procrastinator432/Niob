@@ -15,41 +15,41 @@ import java.util.concurrent.CancellationException;
  * 100% Offline Exact Rational, Complex, AST Symbolic, Matrix & Adaptive Calculus Engine.
  */
 public final class CalculatorEngine {
-    // Exact mathematical constants in Niob Scientific Calculator
+    // CODATA 2022 & SI 2019 exact defining physical constants
     public static final double SPEED_OF_LIGHT = 299792458.0;
-    public static final double PERMEABILITY_VACUUM = 1.25663706212e-6;
-    public static final double PERMITTIVITY_VACUUM = 8.8541878128e-12;
+    public static final double PERMEABILITY_VACUUM = 1.25663706127e-6;
+    public static final double PERMITTIVITY_VACUUM = 8.8541878188e-12;
     public static final double GRAVITATION_CONST = 6.67430e-11;
     public static final double PLANCK_CONSTANT = 6.62607015e-34;
-    public static final double FINE_STRUCTURE_CONST = 7.2973525693e-3;
+    public static final double FINE_STRUCTURE_CONST = 7.2973525643e-3;
     public static final double BOLTZMANN_CONST = 1.380649e-23;
     public static final double GRAVITATIONAL_ACCELERATION = 9.80665;
     public static final double PLANCK_MASS = 2.176434e-8;
     public static final double PLANCK_TIME = 5.391247e-44;
     public static final double PLANCK_LENGTH = 1.616255e-35;
     public static final double ELECTRON_CHARGE = 1.602176634e-19;
-    public static final double IMPEDANCE_VACUUM = 376.730313668;
-    public static final double MAGNETIC_FLUX_QUANTUM = 2.067833848e-15;
-    public static final double JOSEPHSON_CONST = 483597.8484e9;
-    public static final double VON_KLITZING_CONST = 25812.80745;
-    public static final double CONDUCTANCE_QUANTUM = 7.748091729e-5;
-    public static final double STEFAN_BOLTZMANN_CONST = 5.670374419e-8;
-    public static final double RYDBERG_CONST = 10973731.568160;
-    public static final double HARTREE_ENERGY = 4.3597447222071e-18;
-    public static final double BOHR_MAGNETON = 1.39962449361e10;
-    public static final double ELECTRON_MAGNETIC_MOMENT = -9.2847647043e-24;
+    public static final double IMPEDANCE_VACUUM = 376.730313412;
+    public static final double MAGNETIC_FLUX_QUANTUM = 2.0678338484619295e-15;
+    public static final double JOSEPHSON_CONST = 483597.8484169836e9;
+    public static final double VON_KLITZING_CONST = 25812.807459304513;
+    public static final double CONDUCTANCE_QUANTUM = 7.748091729863649e-5;
+    public static final double STEFAN_BOLTZMANN_CONST = 5.6703744191844294e-8;
+    public static final double RYDBERG_CONST = 10973731.568157;
+    public static final double HARTREE_ENERGY = 4.3597447222060e-18;
+    public static final double BOHR_MAGNETON = 9.2740100657e-24;
+    public static final double ELECTRON_MAGNETIC_MOMENT = -9.2847646917e-24;
     public static final double AVOGADRO_CONST = 6.02214076e23;
-    public static final double ATOMIC_MASS_CONST = 1.66053906660e-27;
+    public static final double ATOMIC_MASS_CONST = 1.66053906892e-27;
     public static final double FARADAY_CONST = 96485.3321233100184;
     public static final double MOLAR_GAS_CONSTANT = 8.31446261815324;
-    public static final double MASS_ELECTRON = 9.1093837015e-31;
-    public static final double MASS_PROTON = 1.67262192369e-27;
-    public static final double MASS_NEUTRON = 1.67492749804e-27;
+    public static final double MASS_ELECTRON = 9.1093837139e-31;
+    public static final double MASS_PROTON = 1.67262192595e-27;
+    public static final double MASS_NEUTRON = 1.67492750056e-27;
     public static final double MASS_MUON = 1.883531627e-28;
-    public static final double CLASSICAL_ELECTRON_RADIUS = 2.8179403262e-15;
-    public static final double COMPTON_WAVELENGTH = 2.42631023867e-12;
-    public static final double BOHR_RADIUS = 5.29177210903e-11;
-    public static final double NUCLEAR_MAGNETON = 5.0507837461e-27;
+    public static final double CLASSICAL_ELECTRON_RADIUS = 2.8179403205e-15;
+    public static final double COMPTON_WAVELENGTH = 2.42631023538e-12;
+    public static final double BOHR_RADIUS = 5.29177210544e-11;
+    public static final double NUCLEAR_MAGNETON = 5.0507837393e-27;
     public static final double PERCENT_VAR = 0.01;
 
     public static final String[] USER_VARIABLES = {
@@ -128,16 +128,22 @@ public final class CalculatorEngine {
         public final String exactText;
         public final String decimalText;
         public final String reusableText;
+        public final boolean isExact;
 
         public Result(double value, String exactText, String decimalText) {
-            this(value, exactText, decimalText, exactText);
+            this(value, exactText, decimalText, exactText, false);
         }
 
         public Result(double value, String exactText, String decimalText, String reusableText) {
+            this(value, exactText, decimalText, reusableText, false);
+        }
+
+        public Result(double value, String exactText, String decimalText, String reusableText, boolean isExact) {
             this.value = value;
             this.exactText = exactText;
             this.decimalText = decimalText;
             this.reusableText = reusableText;
+            this.isExact = isExact;
         }
     }
 
@@ -224,20 +230,25 @@ public final class CalculatorEngine {
                 return new Result(0.0, vname + " := " + display, vname + " := " + display, reusable);
             }
             Value rhsVal = evalScalar(rhs, rhsAst);
-            if (!Double.isFinite(rhsVal.c.re) || !Double.isFinite(rhsVal.c.im)) {
-                throw new RuntimeException("Ungültiges Rechenergebnis (Division durch Null oder Überlauf)");
+            boolean rhsExactInt = rhsVal.rat != null && rhsVal.rat.den.equals(BigInteger.ONE);
+            if (!rhsExactInt && (!Double.isFinite(rhsVal.c.re) || !Double.isFinite(rhsVal.c.im))) {
+                if (Double.isInfinite(rhsVal.c.re) || Double.isInfinite(rhsVal.c.im)) {
+                    throw new RuntimeException("Wert zu groß (Überlauf)");
+                }
+                throw new RuntimeException("Ergebnis nicht definiert");
             }
             String decimal = formatDecimalVal(rhsVal);
             String symbolic = symbolicResult(rhsAst, rhsVal);
             String exact = formatExactVal(rhsVal, decimal, symbolic);
             String reusable = formatReusableVal(rhsVal, symbolic);
+            boolean isExact = (rhsVal.rat != null) || (symbolic != null);
             if (commit) {
                 variables.put(vname, rhsVal);
                 matrixVariables.remove(vname);
                 lastAns = rhsVal;
                 lastMatrixAns = null;
             }
-            return new Result(rhsVal.c.re, vname + " := " + exact, vname + " := " + decimal, reusable);
+            return new Result(rhsVal.c.re, vname + " := " + exact, vname + " := " + decimal, reusable, isExact);
         }
 
         // 2. Matrix Expressions
@@ -279,20 +290,25 @@ public final class CalculatorEngine {
             throw ex;
         }
 
-        if (!Double.isFinite(val.c.re) || !Double.isFinite(val.c.im)) {
-            throw new RuntimeException("Ungültiges Rechenergebnis (Division durch Null oder Überlauf)");
+        boolean isExactBigInt = val.rat != null && val.rat.den.equals(BigInteger.ONE);
+        if (!isExactBigInt && (!Double.isFinite(val.c.re) || !Double.isFinite(val.c.im))) {
+            if (Double.isInfinite(val.c.re) || Double.isInfinite(val.c.im)) {
+                throw new RuntimeException("Wert zu groß (Überlauf)");
+            }
+            throw new RuntimeException("Ergebnis nicht definiert");
         }
         double numericVal = val.c.re;
         String decimal = formatDecimalVal(val);
         String symbolic = symbolicResult(parsedAst, val);
         String exact = formatExactVal(val, decimal, symbolic);
         String reusable = formatReusableVal(val, symbolic);
+        boolean isExact = (val.rat != null) || (symbolic != null);
 
         if (commit) {
             lastAns = val;
             lastMatrixAns = null;
         }
-        return new Result(numericVal, exact, decimal, reusable);
+        return new Result(numericVal, exact, decimal, reusable, isExact);
     }
 
     private Value evalScalar(String source, AstNode ast) {
@@ -886,7 +902,7 @@ public final class CalculatorEngine {
         variables.put("b", Value.fromInt(3));
         variables.put("x", Value.fromInt(2));
 
-        variables.put("c0", Value.fromFloat(SPEED_OF_LIGHT));
+        variables.put("c0", Value.fromInt(299792458L));
         variables.put("mu0", Value.fromFloat(PERMEABILITY_VACUUM));
         variables.put("μ₀", Value.fromFloat(PERMEABILITY_VACUUM));
         variables.put("eps0", Value.fromFloat(PERMITTIVITY_VACUUM));
@@ -1165,7 +1181,10 @@ public final class CalculatorEngine {
         }
 
         Value div(Value o) {
-            if (o.c.abs() == 0.0 || (o.c.re == 0.0 && o.c.im == 0.0)) {
+            boolean isZero = (o.rat != null)
+                    ? (o.rat.num.signum() == 0)
+                    : (o.c.abs() == 0.0 || (o.c.re == 0.0 && o.c.im == 0.0));
+            if (isZero) {
                 throw new ArithmeticException("Division by zero");
             }
             ExactRat r = (rat != null && o.rat != null) ? rat.div(o.rat) : null;
@@ -1550,15 +1569,33 @@ public final class CalculatorEngine {
     }
 
     private Value evalFactorial(Value val) {
-        if (!val.c.isReal() || val.c.re < 0.0 || Math.abs(val.c.re - Math.round(val.c.re)) > 1e-11) {
-            throw new RuntimeException("Fakultät ist nur für nicht-negative ganze Zahlen definiert");
+        long k;
+        if (val.rat != null) {
+            if (!val.rat.den.equals(BigInteger.ONE) || val.rat.num.signum() < 0) {
+                throw new RuntimeException("Fakultät ist nur für nicht-negative ganze Zahlen definiert");
+            }
+            if (val.rat.num.compareTo(BigInteger.valueOf(1000)) > 0) {
+                throw new RuntimeException("Wert zu groß (Fakultät bis 1000! unterstützt)");
+            }
+            k = val.rat.num.longValue();
+        } else {
+            if (val.c.isReal() && Double.isInfinite(val.c.re) && val.c.re > 0.0) {
+                throw new RuntimeException("Wert zu groß (Überlauf)");
+            }
+            if (!val.c.isReal() || !Double.isFinite(val.c.re) || val.c.re < 0.0
+                    || Math.abs(val.c.re - Math.round(val.c.re)) > 1e-11) {
+                throw new RuntimeException("Fakultät ist nur für nicht-negative ganze Zahlen definiert");
+            }
+            if (val.c.re > 1000.0) {
+                throw new RuntimeException("Wert zu groß (Fakultät bis 1000! unterstützt)");
+            }
+            k = Math.round(val.c.re);
         }
-        if (val.c.re > 170.0) {
-            throw new RuntimeException("Fakultät übersteigt Rechenbereich");
-        }
-        long k = Math.round(val.c.re);
         BigInteger prod = BigInteger.ONE;
-        for (long i = 2; i <= k; i++) prod = prod.multiply(BigInteger.valueOf(i));
+        for (long i = 2; i <= k; i++) {
+            if ((i & 63) == 0) checkInterrupted();
+            prod = prod.multiply(BigInteger.valueOf(i));
+        }
         return Value.fromInt(prod);
     }
 
@@ -6411,7 +6448,7 @@ public final class CalculatorEngine {
                         String res = resAst.simplify().toDisplayString();
                         double numVal = 0.0;
                         try { numVal = Double.parseDouble(res); } catch (Exception ignored) {}
-                        return new Result(numVal, res, res);
+                        return new Result(numVal, res, res, res, true);
                     }
                 }
             }
@@ -6423,7 +6460,7 @@ public final class CalculatorEngine {
                         String res = diffAst.simplify().toDisplayString();
                         double numVal = 0.0;
                         try { numVal = Double.parseDouble(res); } catch (Exception ignored) {}
-                        return new Result(numVal, res, res);
+                        return new Result(numVal, res, res, res, true);
                     }
                 }
             }
@@ -6437,7 +6474,7 @@ public final class CalculatorEngine {
             String res = simplified.toDisplayString();
             double numVal = 0.0;
             try { numVal = Double.parseDouble(res); } catch (Exception ignored) {}
-            return new Result(numVal, res, res);
+            return new Result(numVal, res, res, res, true);
         }
         return null;
     }
@@ -6449,8 +6486,8 @@ public final class CalculatorEngine {
         double absV = Math.abs(v);
         if (absV == 0.0) return "0";
 
-        // Scientific notation for very small (< 1e-6) or large (>= 1e12) values
-        if (absV >= 1e12 || absV < 1e-6) {
+        // Scientific notation for very small (< 1e-4) or large (>= 1e12) values
+        if (absV >= 1e12 || absV < 1e-4) {
             String s = String.format(Locale.US, "%.12g", v);
             if (s.contains("e") || s.contains("E")) {
                 String[] p = s.split("[eE]");
@@ -6466,8 +6503,14 @@ public final class CalculatorEngine {
             return String.valueOf(Math.round(v));
         }
 
-        int intDigits = (absV < 1.0) ? 1 : ((int) Math.floor(Math.log10(absV)) + 1);
-        int maxDecimals = Math.max(0, Math.min(10, 15 - intDigits));
+        int maxDecimals;
+        if (absV < 1.0) {
+            int leadingZeros = Math.max(0, -((int) Math.floor(Math.log10(absV))) - 1);
+            maxDecimals = Math.min(15, 12 + leadingZeros);
+        } else {
+            int intDigits = (int) Math.floor(Math.log10(absV)) + 1;
+            maxDecimals = Math.max(0, Math.min(10, 15 - intDigits));
+        }
         return trimTrailingZeros(String.format(Locale.US, "%." + maxDecimals + "f", v));
     }
 
@@ -6530,6 +6573,31 @@ public final class CalculatorEngine {
 
     private String tryFormatExactAst(AstNode ast) {
         if (ast == null) return null;
+        if (ast instanceof AstVar) {
+            String name = ((AstVar) ast).name;
+            switch (name) {
+                case "h":
+                case "h_planck":
+                    return "6.62607015e-34";
+                case "e_charge":
+                    return "1.602176634e-19";
+                case "k_B":
+                    return "1.380649e-23";
+                case "N_A":
+                    return "6.02214076e23";
+                case "F":
+                case "F_faraday":
+                    return "96485.3321233100184";
+                case "R":
+                case "R_gas":
+                    return "8.31446261815324";
+                case "g":
+                case "g_earth":
+                    return "9.80665";
+                default:
+                    return null;
+            }
+        }
         if (ast instanceof AstNeg) {
             String inner = tryFormatExactAst(((AstNeg) ast).inner);
             if (inner == null) return null;

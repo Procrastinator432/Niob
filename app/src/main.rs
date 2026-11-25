@@ -1,5 +1,7 @@
 mod constants;
 mod engine;
+mod mathview;
+mod numdiff;
 mod theme;
 mod verification;
 
@@ -10,6 +12,9 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 type PreviewKey = (String, AngleMode, bool, u64);
 type AsyncPreviewMsg = (PreviewKey, Result<EvalOutput, String>);
 type AsyncCommitMsg = (String, MathEngine, Result<EvalOutput, String>);
+
+/// Id der Formelzeile im Rechner (für Fokus und Cursorzustand).
+const INPUT_FIELD_ID: &str = "niob_formula_input";
 
 struct PreviewJob {
     key: PreviewKey,
@@ -274,6 +279,8 @@ mod state_json {
             json_escape(&item.reusable_result, &mut out);
             out.push_str(",\"has_distinct_exact\":");
             out.push_str(if item.has_distinct_exact { "true" } else { "false" });
+            out.push_str(",\"is_exact\":");
+            out.push_str(if item.is_exact { "true" } else { "false" });
             out.push_str(",\"showing_exact\":");
             out.push_str(if item.showing_exact { "true" } else { "false" });
             out.push_str(",\"is_error\":");
@@ -556,7 +563,10 @@ mod state_json {
                 let decimal_result = entry.get("decimal_result").and_then(JsonVal::as_str).unwrap_or("").to_string();
                 let reusable_result = entry.get("reusable_result").and_then(JsonVal::as_str).unwrap_or("").to_string();
                 let has_distinct_exact = entry.get("has_distinct_exact").and_then(JsonVal::as_bool).unwrap_or(false);
-                let showing_exact = entry.get("showing_exact").and_then(JsonVal::as_bool).unwrap_or(true);
+                let is_exact = entry.get("is_exact").and_then(JsonVal::as_bool).unwrap_or_else(|| {
+                    has_distinct_exact || super::is_plain_integer_str(&exact_result)
+                });
+                let showing_exact = entry.get("showing_exact").and_then(JsonVal::as_bool).unwrap_or(is_exact);
                 let is_error = entry.get("is_error").and_then(JsonVal::as_bool).unwrap_or(false);
                 history.push(HistoryItem {
                     raw_input: raw_input.to_string(),
@@ -564,6 +574,7 @@ mod state_json {
                     decimal_result,
                     reusable_result,
                     has_distinct_exact,
+                    is_exact,
                     showing_exact,
                     is_error,
                     integration_report: None,
@@ -587,6 +598,7 @@ mod state_json {
                 decimal_result: "[[-2, 1], [1.5, -0.5]]".to_string(),
                 reusable_result: "[[-2, 1], [3/2, -1/2]]".to_string(),
                 has_distinct_exact: true,
+                is_exact: true,
                 showing_exact: true,
                 is_error: false,
                 integration_report: None,
@@ -672,9 +684,253 @@ struct HistoryItem {
     decimal_result: String,
     reusable_result: String,
     has_distinct_exact: bool,
+    is_exact: bool,
     showing_exact: bool,
     is_error: bool,
     integration_report: Option<crate::engine::IntegrationReport>,
+}
+
+fn is_plain_integer_str(s: &str) -> bool {
+    let rhs = s.split_once(":=").map(|(_, r)| r).unwrap_or(s).trim();
+    let digits = rhs
+        .strip_prefix('-')
+        .or_else(|| rhs.strip_prefix('+'))
+        .unwrap_or(rhs);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn decimal_and_group_seps(nf: NumberFormatMode) -> (&'static str, char) {
+    match nf {
+        NumberFormatMode::SpacePoint => (" ", '.'),
+        NumberFormatMode::CommaPoint => (",", '.'),
+        NumberFormatMode::NonePoint => ("", '.'),
+        NumberFormatMode::SpaceComma => (" ", ','),
+        NumberFormatMode::PointComma => (".", ','),
+        NumberFormatMode::NoneComma => ("", ','),
+    }
+}
+
+fn group_exact_integer_desktop(int_str: &str, nf: NumberFormatMode) -> String {
+    let (sign, digits) = if let Some(r) = int_str.strip_prefix('-') {
+        ("-", r)
+    } else if let Some(r) = int_str.strip_prefix('+') {
+        ("+", r)
+    } else {
+        ("", int_str)
+    };
+    let (group_sep, _) = decimal_and_group_seps(nf);
+    let sep = if group_sep.is_empty() && digits.len() > 6 {
+        " "
+    } else {
+        group_sep
+    };
+    if digits.len() <= 3 || sep.is_empty() {
+        return format!("{sign}{digits}");
+    }
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3 + 2);
+    out.push_str(sign);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push_str(sep);
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn group_frac_3(frac: &str) -> String {
+    let mut out = String::with_capacity(frac.len() + frac.len() / 3);
+    for (i, ch) in frac.chars().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(' ');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn format_exact_history_display(raw: &str, nf: NumberFormatMode) -> String {
+    if raw.contains('[') {
+        return raw.to_string();
+    }
+    if let Some((lhs, rhs)) = raw.split_once(":=") {
+        return format!(
+            "{} := {}",
+            lhs.trim(),
+            format_exact_history_display(rhs.trim(), nf)
+        );
+    }
+    let trimmed = raw.trim();
+    if is_plain_integer_str(trimmed) {
+        return group_exact_integer_desktop(trimmed, nf);
+    }
+    let (_, dec_sep) = decimal_and_group_seps(nf);
+    if let Some((mant, exp_s)) = trimmed.split_once('e').or_else(|| trimmed.split_once('E')) {
+        if let Ok(exp) = exp_s.parse::<i32>() {
+            let (m_int, m_frac) = mant.split_once('.').unwrap_or((mant, ""));
+            let (sign, u_int) = if let Some(r) = m_int.strip_prefix('-') {
+                ("-", r)
+            } else {
+                ("", m_int)
+            };
+            if u_int.bytes().all(|b| b.is_ascii_digit())
+                && m_frac.bytes().all(|b| b.is_ascii_digit())
+            {
+                return if m_frac.is_empty() {
+                    format!("{sign}{u_int} × 10{}", crate::engine::to_superscript(exp))
+                } else {
+                    format!(
+                        "{sign}{u_int}{dec_sep}{} × 10{}",
+                        group_frac_3(m_frac),
+                        crate::engine::to_superscript(exp)
+                    )
+                };
+            }
+        }
+    }
+    trimmed.to_string()
+}
+
+fn format_decimal_history_display(raw: &str, nf: NumberFormatMode) -> String {
+    if raw.contains('[') {
+        return raw.to_string();
+    }
+    if let Some((lhs, rhs)) = raw.split_once(":=") {
+        return format!(
+            "{} := {}",
+            lhs.trim(),
+            format_decimal_history_display(rhs.trim(), nf)
+        );
+    }
+    let trimmed = raw.trim();
+    let (_, dec_sep) = decimal_and_group_seps(nf);
+    let unsigned = trimmed
+        .strip_prefix('-')
+        .or_else(|| trimmed.strip_prefix('+'))
+        .unwrap_or(trimmed);
+    if unsigned.len() >= 7 && unsigned.bytes().all(|b| b.is_ascii_digit()) {
+        let sign = if trimmed.starts_with('-') { "-" } else { "" };
+        let exp = (unsigned.len() - 1) as i32;
+        let round_idx = 7;
+        let mut digits: Vec<u8> = unsigned.bytes().take(round_idx).map(|b| b - b'0').collect();
+        let next_digit = unsigned.as_bytes().get(round_idx).copied().unwrap_or(b'0') - b'0';
+        let mut final_exp = exp;
+        if next_digit >= 5 {
+            let mut carry = 1u8;
+            for d in digits.iter_mut().rev() {
+                let s = *d + carry;
+                *d = s % 10;
+                carry = s / 10;
+                if carry == 0 {
+                    break;
+                }
+            }
+            if carry > 0 {
+                digits.insert(0, carry);
+                digits.pop();
+                final_exp += 1;
+            }
+        }
+        let lead = digits[0];
+        let frac: String = digits[1..7].iter().map(|d| (b'0' + *d) as char).collect();
+        return format!(
+            "{sign}{lead}{dec_sep}{} {} × 10{}",
+            &frac[0..3],
+            &frac[3..6],
+            crate::engine::to_superscript(final_exp)
+        );
+    }
+    trimmed.to_string()
+}
+
+/// Wie die Live-Vorschau eine Fehlermeldung der Engine zeigt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreviewError {
+    /// Eingabe ist vermutlich nur noch nicht fertig („2+“, „sin(“).
+    Incomplete,
+    /// Echter Fehler, Meldung anzeigen (Division durch Null, unbekannte Funktion …).
+    Show,
+}
+
+/// `engine_input` ist die Eingabe in Engine-Schreibweise.
+fn classify_preview_error(err: &str, engine_input: &str) -> PreviewError {
+    const MATH_ERRORS: [&str; 4] = ["Wert zu groß", "Überlauf", "Division durch Null", "nicht definiert"];
+    if MATH_ERRORS.iter().any(|m| err.contains(m)) {
+        return PreviewError::Show;
+    }
+    if err.starts_with("Unbekannte Funktion") {
+        return PreviewError::Show;
+    }
+    if let Some(name) = err
+        .strip_prefix("Unbekannte Variable oder Konstante '")
+        .and_then(|r| r.strip_suffix('\''))
+    {
+        // Steht der Name ganz am Ende, wird er womöglich gerade noch getippt
+        // (`s` → `si` → `sin(`). Sonst ist es ein Tippfehler.
+        let t = engine_input.trim_end();
+        let still_typing = t.ends_with(name)
+            && t[..t.len() - name.len()]
+                .chars()
+                .last()
+                .is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+        return if still_typing {
+            PreviewError::Incomplete
+        } else {
+            PreviewError::Show
+        };
+    }
+    if err.starts_with("Unbekannte Variable") {
+        return PreviewError::Show;
+    }
+    PreviewError::Incomplete
+}
+
+/// `12` → `₁₂` (für die Funktionsnamen f₁, f₂ … im Plotter).
+fn subscript_number(n: usize) -> String {
+    n.to_string()
+        .chars()
+        .map(|c| char::from_u32(0x2080 + c.to_digit(10).unwrap_or(0)).unwrap_or(c))
+        .collect()
+}
+
+/// Statuszeile einer Plotter-Funktion an der Spurposition `x`:
+/// Funktionswert und Ableitung, oder ein eindeutiger Hinweis, wenn die Eingabe
+/// fehlerhaft ist, die Funktion an der Stelle nicht definiert ist oder dort
+/// keine endliche zweiseitige Ableitung existiert. Zweites Feld: Fehler.
+fn plot_readout(engine: &MathEngine, display_expr: &str, x: f64, de: bool) -> (String, bool) {
+    let expr = mathview::to_engine_syntax(display_expr);
+    if expr.trim().is_empty() {
+        return (String::new(), false);
+    }
+    let fx = engine.eval_for_x_result(&expr, x);
+    if let Err(err) = &fx {
+        // Schlägt die Auswertung auch an anderen Stellen mit derselben Meldung
+        // fehl, liegt es an der Eingabe und nicht am Definitionsbereich.
+        let probes = [0.5, -1.7, 2.3, 7.1];
+        let everywhere = probes
+            .iter()
+            .all(|&p| matches!(engine.eval_for_x_result(&expr, p), Err(e) if &e == err));
+        if everywhere {
+            return (format!("⚠ {}", err), true);
+        }
+    }
+    let x_txt = format!("{:.2}", x);
+    let Ok(y) = fx else {
+        return (
+            if de {
+                format!("f({x_txt}) nicht definiert")
+            } else {
+                format!("f({x_txt}) undefined")
+            },
+            false,
+        );
+    };
+    let derivative = match numdiff::derivative_at(|t| engine.eval_for_x(&expr, t), x) {
+        Some(numdiff::Derivative::Value(v)) => format!("f'({x_txt}) = {:.4}", v),
+        _ if de => format!("f'({x_txt}) existiert nicht"),
+        _ => format!("f'({x_txt}) does not exist"),
+    };
+    (format!("f({x_txt}) = {:.4}   |   {derivative}", y), false)
 }
 
 #[derive(Clone, Debug)]
@@ -756,14 +1012,14 @@ impl UnitCategory {
                 ("Kilometer/Stunde (km/h)", 1.0 / 3.6),
                 ("Meilen/Stunde (mph)", 0.44704),
                 ("Knoten (kn)", 0.514444),
-                ("Lichtgeschwindigkeit (c₀)", 299790000.0),
+                ("Lichtgeschwindigkeit (c₀)", crate::constants::SPEED_OF_LIGHT),
             ],
             Self::Energy => &[
                 ("Joule (J)", 1.0),
                 ("Kilojoule (kJ)", 1000.0),
                 ("Wattstunde (Wh)", 3600.0),
                 ("Kilowattstunde (kWh)", 3_600_000.0),
-                ("Elektronenvolt (eV)", 1.6022e-19),
+                ("Elektronenvolt (eV)", crate::constants::ELECTRON_CHARGE),
                 ("Kalorie (cal)", 4.184),
             ],
             Self::Angle => &[
@@ -786,7 +1042,16 @@ impl UnitCategory {
 struct NiobCalculatorApp {
     // Core engine & state
     engine: MathEngine,
+    /// Eingabe in Anzeige-Schreibweise (`√(2)÷2`); für die Engine siehe [`Self::engine_input`].
     input_expr: String,
+    /// Auswahl in der Formelzeile als Zeichenindizes (Start, Ende); leer = Cursor.
+    input_sel: (usize, usize),
+    /// Cursor, der beim nächsten Zeichnen ins Eingabefeld übernommen wird.
+    pending_cursor: Option<usize>,
+    /// Höhe der Eingabekarte im letzten Frame (für die Platzaufteilung).
+    last_input_bar_height: f32,
+    /// Sicherheitsabfrage für „Verlauf leeren“ sichtbar.
+    confirm_clear_history: bool,
     history: Vec<HistoryItem>,
     active_tab: MainTab,
     active_section: KeyboardSection,
@@ -859,13 +1124,14 @@ impl NiobCalculatorApp {
                         exact_result: out.exact_text,
                         decimal_result: out.decimal_text,
                         has_distinct_exact: out.has_distinct_exact,
-                        showing_exact: engine.show_exact_first,
+                        is_exact: out.is_exact,
+                        showing_exact: out.is_exact && engine.show_exact_first,
                         is_error: false,
                         integration_report: out.integration_report,
                     });
                 }
             }
-            input_expr = "sqrt(2)/2 + sin(pi/4)".to_string();
+            input_expr = mathview::to_display_syntax("sqrt(2)/2 + sin(pi/4)");
         } else {
             state_json::load_state_from_disk(&mut engine, &mut history);
         }
@@ -874,7 +1140,11 @@ impl NiobCalculatorApp {
 
         Self {
             engine,
+            input_sel: (input_expr.chars().count(), input_expr.chars().count()),
+            pending_cursor: Some(input_expr.chars().count()),
             input_expr,
+            last_input_bar_height: 84.0,
+            confirm_clear_history: false,
             history,
             active_tab: MainTab::Calculator,
             active_section: KeyboardSection::Operators,
@@ -892,17 +1162,17 @@ impl NiobCalculatorApp {
             var_edit_value: "5".to_string(),
             plot_functions: vec![
                 PlotFunction {
-                    expr: "sin(x) * cos(x/2)".to_string(),
+                    expr: mathview::to_display_syntax("sin(x) * cos(x/2)"),
                     visible: true,
                     color: Color32::from_rgb(0x3D, 0xDC, 0x84),
                 },
                 PlotFunction {
-                    expr: "x^2 / 4 - 2".to_string(),
+                    expr: mathview::to_display_syntax("x^2 / 4 - 2"),
                     visible: true,
                     color: Color32::from_rgb(0x64, 0xB5, 0xF6),
                 },
                 PlotFunction {
-                    expr: "exp(-x^2 / 3) * 2".to_string(),
+                    expr: mathview::to_display_syntax("exp(-x^2 / 3) * 2"),
                     visible: true,
                     color: Color32::from_rgb(0xFF, 0xB7, 0x4D),
                 },
@@ -936,18 +1206,72 @@ impl NiobCalculatorApp {
         }
     }
 
+    /// Eingabe in Engine-Schreibweise (`√(2)÷2` → `sqrt(2)/2`).
+    fn engine_input(&self) -> String {
+        mathview::to_engine_syntax(self.input_expr.trim())
+    }
+
+    fn set_cursor(&mut self, pos: usize) {
+        self.input_sel = (pos, pos);
+        self.pending_cursor = Some(pos);
+    }
+
+    fn clear_input(&mut self) {
+        self.input_expr.clear();
+        self.set_cursor(0);
+    }
+
+    /// Auswahl, auf die aktuelle Länge begrenzt und sortiert.
+    fn selection(&self) -> (usize, usize) {
+        let len = self.input_expr.chars().count();
+        let (a, b) = self.input_sel;
+        (a.min(b).min(len), a.max(b).min(len))
+    }
+
+    /// Text links vom Cursor bzw. von der Auswahl.
+    fn text_before_cursor(&self) -> &str {
+        let end = mathview::char_to_byte(&self.input_expr, self.selection().0);
+        &self.input_expr[..end]
+    }
+
+    /// Eingabe in Anzeige-Schreibweise bringen und den Cursor mitführen.
+    fn normalize_input(&mut self, cursor: usize) {
+        let (normalized, map) = mathview::to_display_syntax_with_map(&self.input_expr);
+        let pos = map.get(cursor).copied().unwrap_or(normalized.chars().count());
+        self.input_expr = normalized;
+        self.set_cursor(pos);
+    }
+
+    /// Token an der Cursorposition einfügen; eine Auswahl wird ersetzt.
     fn insert_token(&mut self, token: &str) {
+        let mut text = String::new();
         if self.input_expr.is_empty()
             && self.engine.auto_ans_insertion
             && matches!(token, "+" | "-" | "*" | "/" | "^")
         {
-            self.input_expr.push_str("ans");
+            text.push_str("ans");
         }
-        self.input_expr.push_str(token);
+        text.push_str(token);
+        let text = mathview::to_display_syntax(&text);
+        let (start, end) = self.selection();
+        let b0 = mathview::char_to_byte(&self.input_expr, start);
+        let b1 = mathview::char_to_byte(&self.input_expr, end);
+        self.input_expr.replace_range(b0..b1, &text);
+        self.normalize_input(start + text.chars().count());
     }
 
+    /// Löschen links vom Cursor; mehrteilige Funktionsnamen wie `sin(` am Stück.
+    /// Eine Auswahl wird komplett gelöscht.
     fn backspace(&mut self) {
-        if self.input_expr.is_empty() {
+        let (start, end) = self.selection();
+        if start != end {
+            let b0 = mathview::char_to_byte(&self.input_expr, start);
+            let b1 = mathview::char_to_byte(&self.input_expr, end);
+            self.input_expr.replace_range(b0..b1, "");
+            self.set_cursor(start);
+            return;
+        }
+        if start == 0 {
             return;
         }
         const MULTI_CHAR_TOKENS: &[&str] = &[
@@ -963,14 +1287,20 @@ impl NiobCalculatorApp {
             "Phi0", "K_J", "R_K", "G0", "sigma", "E_h", "mu_B", "mu_e", "N_A",
             "m_u", "m_e", "m_p", "m_n", "pi", "^2", ":=", "0x", "[[", "]]",
         ];
+        let before = self.text_before_cursor().to_string();
+        let mut remove = 1;
         for tok in MULTI_CHAR_TOKENS {
-            if self.input_expr.ends_with(tok) {
-                let new_len = self.input_expr.len() - tok.len();
-                self.input_expr.truncate(new_len);
-                return;
+            let disp = mathview::to_display_syntax(tok);
+            if before.ends_with(&disp) {
+                remove = disp.chars().count();
+                break;
             }
         }
-        self.input_expr.pop();
+        let new_start = start - remove.min(start);
+        let b0 = mathview::char_to_byte(&self.input_expr, new_start);
+        let b1 = mathview::char_to_byte(&self.input_expr, start);
+        self.input_expr.replace_range(b0..b1, "");
+        self.set_cursor(new_start);
     }
 
     fn finish_commit(&mut self, trimmed: String, res: Result<EvalOutput, String>, updated_engine: Option<MathEngine>) {
@@ -990,11 +1320,12 @@ impl NiobCalculatorApp {
                     exact_result: out.exact_text,
                     decimal_result: out.decimal_text,
                     has_distinct_exact: out.has_distinct_exact,
-                    showing_exact: self.engine.show_exact_first,
+                    is_exact: out.is_exact,
+                    showing_exact: out.is_exact && self.engine.show_exact_first,
                     is_error: false,
                     integration_report: out.integration_report,
                 });
-                self.input_expr.clear();
+                self.clear_input();
             }
             Err(err_msg) => {
                 self.history.push(HistoryItem {
@@ -1003,7 +1334,8 @@ impl NiobCalculatorApp {
                     exact_result: err_msg.clone(),
                     decimal_result: err_msg,
                     has_distinct_exact: false,
-                    showing_exact: true,
+                    is_exact: false,
+                    showing_exact: false,
                     is_error: true,
                     integration_report: None,
                 });
@@ -1057,7 +1389,7 @@ impl NiobCalculatorApp {
         if self.commit_pending {
             return;
         }
-        let trimmed = self.input_expr.trim().to_string();
+        let trimmed = self.engine_input();
         if trimmed.is_empty() {
             return;
         }
@@ -1084,31 +1416,10 @@ impl NiobCalculatorApp {
         if self.active_tab != MainTab::Calculator {
             return;
         }
-        // Only handle global hotkeys when no text edit widget has focus
-        if ctx.memory(|m| m.focused().is_some()) {
-            return;
-        }
-        let mut enter_pressed = false;
-        ctx.input(|i| {
-            if i.key_pressed(egui::Key::Enter) {
-                enter_pressed = true;
-            } else if i.key_pressed(egui::Key::Backspace) {
-                self.backspace();
-            } else if i.key_pressed(egui::Key::Escape) {
-                self.input_expr.clear();
-            }
-            for event in &i.events {
-                if let egui::Event::Text(text) = event {
-                    for ch in text.chars() {
-                        if !ch.is_control() && ch != '\r' && ch != '\n' {
-                            self.input_expr.push(ch);
-                        }
-                    }
-                }
-            }
-        });
-        if enter_pressed {
-            self.evaluate_current(Some(ctx));
+        // Hat kein Widget den Fokus, bekommt ihn die Formelzeile. Sie übernimmt
+        // dann Tippen, Cursor, Auswahl, Einfügen, Enter und Escape selbst.
+        if ctx.memory(|m| m.focused().is_none()) {
+            ctx.memory_mut(|m| m.request_focus(egui::Id::new(INPUT_FIELD_ID)));
         }
     }
 
@@ -1380,425 +1691,38 @@ impl NiobCalculatorApp {
     }
 
     fn render_calculator_tab(&mut self, ui: &mut Ui, pal: &MaterialYouPalette) {
+        // Platzaufteilung: Eingabekarte und Tastatur haben Vorrang. Der Verlauf
+        // bekommt nur, was übrig bleibt, und wird bei sehr kleinen Fenstern
+        // ganz ausgeblendet, damit alle Rechentasten sichtbar bleiben.
+        const GAP: f32 = 6.0;
+        const HISTORY_FRAME_EXTRA: f32 = 22.0; // Innenabstand 2 × 10 + Rand
+        const HISTORY_MIN_BODY: f32 = 70.0; // Kopfzeile + ein Eintrag
+        const KEYBOARD_MIN_CARD: f32 = 225.0;
         let total_h = ui.available_height();
-        let kb_height = (total_h * 0.47 * self.keyboard_scale).clamp(225.0, 340.0);
-        let input_bar_height = 84.0;
-        let history_height = (total_h - kb_height - input_bar_height - 16.0).max(95.0);
+        let kb_target = (total_h * 0.47 * self.keyboard_scale).clamp(KEYBOARD_MIN_CARD, 340.0);
+        let history_body =
+            total_h - self.last_input_bar_height - kb_target - 2.0 * GAP - HISTORY_FRAME_EXTRA;
+        let show_history = history_body >= HISTORY_MIN_BODY;
 
         // 1. Top Area: TermHistoryRecyclerView (`@id/term_history_list_view`)
-        Frame::new()
-            .fill(pal.surface_container_low)
-            .corner_radius(CornerRadius::same(16))
-            .inner_margin(egui::Margin::same(10))
-            .stroke(Stroke::new(1.0_f32, pal.outline_variant))
-            .show(ui, |ui| {
-                ui.set_height(history_height);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(if self.german_ui {
-                            "Rechenverlauf (Klick auf exact / decim. wechselt Darstellung)"
-                        } else {
-                            "Calculation History (Click exact / decim. to toggle format)"
-                        })
-                        .font(FontId::proportional(11.5))
-                        .color(pal.on_surface_variant),
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if !self.history.is_empty()
-                            && ui
-                                .small_button(if self.german_ui {
-                                    "Verlauf leeren"
-                                } else {
-                                    "Clear History"
-                                })
-                                .clicked()
-                        {
-                            self.history.clear();
-                            self.mark_state_dirty();
-                        }
-                    });
-                });
-                ui.add_space(4.0);
-
-                ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        let mut paste_text: Option<String> = None;
-                        let mut plot_expr: Option<String> = None;
-                        let mut delete_idx: Option<usize> = None;
-
-                        for (idx, item) in self.history.iter_mut().enumerate() {
-                            Frame::new()
-                                .fill(pal.surface_container)
-                                .corner_radius(CornerRadius::same(12))
-                                .inner_margin(egui::Margin::symmetric(12, 6))
-                                .show(ui, |ui| {
-                                    // Row 1 (`@id/input_term_view` from `term_input_result_combination_layout.xml`):
-                                    // Left-aligned input expression + right-aligned plot/delete actions
-                                    ui.horizontal(|ui| {
-                                        let pretty_in =
-                                            MathEngine::prettify_expression(&item.raw_input);
-                                        if ui
-                                            .add(
-                                                egui::Button::new(
-                                                    RichText::new(&pretty_in)
-                                                        .font(FontId::proportional(
-                                                            HISTORY_TERM_FONT_SIZE - 2.0,
-                                                        ))
-                                                        .color(pal.on_surface),
-                                                )
-                                                .frame(false),
-                                            )
-                                            .on_hover_text(if self.german_ui {
-                                                "Klicken, um Ausdruck in die Eingabe zu übernehmen"
-                                            } else {
-                                                "Click to paste expression to input"
-                                            })
-                                            .clicked()
-                                        {
-                                            paste_text = Some(item.raw_input.clone());
-                                        }
-
-                                        ui.with_layout(
-                                            Layout::right_to_left(Align::Center),
-                                            |ui| {
-                                                if ui
-                                                    .add(
-                                                        egui::Button::new(
-                                                            RichText::new("×")
-                                                                .font(FontId::proportional(14.0))
-                                                                .color(pal.on_surface_variant),
-                                                        )
-                                                        .frame(false),
-                                                    )
-                                                    .on_hover_text(if self.german_ui {
-                                                        "Eintrag löschen"
-                                                    } else {
-                                                        "Delete item"
-                                                    })
-                                                    .clicked()
-                                                {
-                                                    delete_idx = Some(idx);
-                                                }
-
-                                                if item.raw_input.contains('x')
-                                                    && !item.raw_input.contains("int(")
-                                                {
-                                                    if ui
-                                                        .small_button("Plot")
-                                                        .on_hover_text(if self.german_ui {
-                                                            "Im 2D-Funktionsplotter zeichnen"
-                                                        } else {
-                                                            "Plot in 2D Graph"
-                                                        })
-                                                        .clicked()
-                                                    {
-                                                        plot_expr = Some(item.raw_input.clone());
-                                                    }
-                                                }
-                                            },
-                                        );
-                                    });
-
-                                    // Row 2 (`@id/exact_decimal_switch_button` + `@id/equal_sign_text_view` on left,
-                                    // `@id/result_term_view_exact` / `@id/result_term_view_decimal` right-aligned)
-                                    ui.horizontal(|ui| {
-                                        if !item.is_error {
-                                            let badge_txt = if self.german_ui {
-                                                if item.showing_exact {
-                                                    "> dezi."
-                                                } else {
-                                                    "> exakt"
-                                                }
-                                            } else if item.showing_exact {
-                                                "↔ exact"
-                                            } else {
-                                                "↔ decim."
-                                            };
-                                            let pill_fill = if item.showing_exact {
-                                                pal.primary_container
-                                            } else if item.has_distinct_exact {
-                                                pal.secondary_container
-                                            } else {
-                                                pal.surface_container_highest
-                                            };
-                                            let pill_fg = if item.showing_exact {
-                                                pal.on_primary_container
-                                            } else {
-                                                pal.on_secondary_container
-                                            };
-                                            let btn = egui::Button::new(
-                                                RichText::new(badge_txt)
-                                                    .font(FontId::proportional(11.5))
-                                                    .strong()
-                                                    .color(pill_fg),
-                                            )
-                                            .fill(pill_fill)
-                                            .corner_radius(CornerRadius::same(10));
-                                            let tooltip = if self.german_ui {
-                                                format!(
-                                                    "Exakt: {}  |  Dezi.: {}",
-                                                    item.exact_result, item.decimal_result
-                                                )
-                                            } else {
-                                                format!(
-                                                    "Exact: {}  |  Decimal: {}",
-                                                    item.exact_result, item.decimal_result
-                                                )
-                                            };
-                                            if ui.add(btn).on_hover_text(tooltip).clicked() {
-                                                item.showing_exact = !item.showing_exact;
-                                            }
-                                        }
-
-                                        ui.label(
-                                            RichText::new("=")
-                                                .font(FontId::proportional(HISTORY_TERM_FONT_SIZE))
-                                                .strong()
-                                                .color(pal.on_surface_variant),
-                                        );
-
-                                        ui.with_layout(
-                                            Layout::right_to_left(Align::Center),
-                                            |ui| {
-                                                let shown_res = if item.showing_exact {
-                                                    &item.exact_result
-                                                } else {
-                                                    &item.decimal_result
-                                                };
-                                                let res_col = if item.is_error {
-                                                    pal.error
-                                                } else {
-                                                    pal.primary
-                                                };
-                                                if ui
-                                                    .add(
-                                                        egui::Button::new(
-                                                            RichText::new(shown_res)
-                                                                .font(FontId::proportional(
-                                                                    HISTORY_TERM_FONT_SIZE,
-                                                                ))
-                                                                .strong()
-                                                                .color(res_col),
-                                                        )
-                                                        .frame(false),
-                                                    )
-                                                    .on_hover_text(if self.german_ui {
-                                                        "Klicken, um Ergebnis einzufügen"
-                                                    } else {
-                                                        "Click to insert result"
-                                                    })
-                                                    .clicked()
-                                                {
-                                                    if !item.is_error {
-                                                        paste_text = Some(item.reusable_result.clone());
-                                                    }
-                                                }
-                                            },
-                                        );
-                                    });
-
-                                    if let Some(ref rep) = item.integration_report {
-                                        ui.horizontal(|ui| {
-                                            let (info, color) = if rep.converged {
-                                                (
-                                                    format!(
-                                                        "✓ conv. | err ≈ {:.1e} | {} subintervals",
-                                                        rep.abs_err, rep.subintervals
-                                                    ),
-                                                    pal.on_surface_variant,
-                                                )
-                                            } else {
-                                                (
-                                                    format!(
-                                                        "⚠ not converged | {} subintervals",
-                                                        rep.subintervals
-                                                    ),
-                                                    pal.error,
-                                                )
-                                            };
-                                            ui.label(
-                                                RichText::new(info)
-                                                    .font(FontId::proportional(11.0))
-                                                    .color(color),
-                                            );
-                                        });
-                                    }
-                                });
-                        }
-
-                        if let Some(txt) = paste_text {
-                            self.insert_token(&txt);
-                        }
-                        if let Some(p_expr) = plot_expr {
-                            self.plot_functions[0].expr = p_expr;
-                            self.plot_functions[0].visible = true;
-                            self.active_tab = MainTab::Plotter;
-                        }
-                        if let Some(i) = delete_idx {
-                            self.history.remove(i);
-                            self.mark_state_dirty();
-                        }
-                    });
-            });
-
-        ui.add_space(6.0);
+        if show_history {
+            self.render_history(ui, pal, history_body);
+            ui.add_space(GAP);
+        }
 
         // 2. Middle Area: Editable User Input TermView (`user_input_termview_layout.xml`)
-        Frame::new()
+        let input_card = Frame::new()
             .fill(pal.surface_container)
             .corner_radius(CornerRadius::same(16))
             .inner_margin(egui::Margin::symmetric(12, 8))
             .stroke(Stroke::new(1.5_f32, pal.primary))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let pretty = if self.input_expr.is_empty() {
-                        if self.german_ui {
-                            "Ausdruck eingeben oder über Tastatur wählen…".to_string()
-                        } else {
-                            "Enter expression or use keyboard below…".to_string()
-                        }
-                    } else {
-                        MathEngine::prettify_expression(&self.input_expr)
-                    };
-                    let font_sz = if pretty.len() > 32 {
-                        INPUT_TERM_MIN_FONT_SIZE
-                    } else {
-                        INPUT_TERM_FONT_SIZE
-                    };
-                    let text_col = if self.input_expr.is_empty() {
-                        pal.on_surface_variant
-                    } else {
-                        pal.on_surface
-                    };
-                    ui.label(
-                        RichText::new(pretty)
-                            .font(FontId::proportional(font_sz))
-                            .strong()
-                            .color(text_col),
-                    );
-
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new("AC")
-                                        .font(FontId::proportional(13.0))
-                                        .strong()
-                                        .color(pal.error),
-                                )
-                                .fill(pal.surface_container_high)
-                                .corner_radius(CornerRadius::same(10)),
-                            )
-                            .on_hover_text(if self.german_ui {
-                                "Eingabe löschen (Escape)"
-                            } else {
-                                "Clear input (Escape)"
-                            })
-                            .clicked()
-                        {
-                            self.input_expr.clear();
-                        }
-                    });
-                });
-
-                // Live Instant Symbolic + Decimal Preview row
-                ui.horizontal(|ui| {
-                    let raw = self.input_expr.trim().to_string();
-                    if raw.is_empty() {
-                        let ans_s = self.engine.number_format.format_f64(self.engine.ans.re);
-                        ui.label(
-                            RichText::new(format!(
-                                "ANS = {}   •   Timeout: {} ms",
-                                ans_s, SYMBOLIC_WATCHDOG_TIMEOUT_MS
-                            ))
-                            .font(FontId::proportional(12.5))
-                            .color(pal.on_surface_variant),
-                        );
-                    } else {
-                        let key: PreviewKey = (
-                            raw,
-                            self.engine.angle_mode,
-                            self.engine.modulo_always_positive,
-                            self.eval_revision,
-                        );
-                        if self.commit_pending {
-                            ui.label(
-                                RichText::new(if self.german_ui {
-                                    "… wird berechnet"
-                                } else {
-                                    "… calculating"
-                                })
-                                .font(FontId::proportional(12.5))
-                                .color(pal.on_surface_variant),
-                            );
-                        } else {
-                            if self.screenshot_path.is_some() {
-                                if self.preview_cache_key.as_ref() != Some(&key) {
-                                    self.preview_cache_result = Some(self.engine.evaluate_preview(&key.0, false));
-                                    self.preview_cache_key = Some(key.clone());
-                                }
-                            } else if self.preview_cache_key.as_ref() != Some(&key)
-                                && self.preview_pending_key.as_ref() != Some(&key)
-                            {
-                                if self.preview_worker.is_none() || self.preview_rx.is_none() {
-                                    let (tx, rx) = mpsc::channel();
-                                    self.preview_rx = Some(rx);
-                                    self.preview_worker = Some(PreviewWorker::new(tx));
-                                }
-                                if let Some(ref worker) = self.preview_worker {
-                                    self.preview_pending_key = Some(key.clone());
-                                    worker.submit(key.clone(), self.engine.clone(), ui.ctx().clone());
-                                }
-                            }
-                            if self.preview_cache_key.as_ref() != Some(&key) {
-                                ui.label(
-                                    RichText::new(if self.german_ui {
-                                        "… wird berechnet"
-                                    } else {
-                                        "… calculating"
-                                    })
-                                    .font(FontId::proportional(12.5))
-                                    .color(pal.on_surface_variant),
-                                );
-                            } else {
-                                match self.preview_cache_result.as_ref().unwrap() {
-                                    Ok(preview) => {
-                                        ui.label(
-                                            RichText::new(format!("exact: {}", preview.exact_text))
-                                                .font(FontId::proportional(13.5))
-                                                .strong()
-                                                .color(pal.primary),
-                                        );
-                                        if preview.has_distinct_exact {
-                                            ui.separator();
-                                            ui.label(
-                                                RichText::new(format!("decim.: ≈ {}", preview.decimal_text))
-                                                    .font(FontId::proportional(13.5))
-                                                    .color(pal.on_surface_variant),
-                                            );
-                                        }
-                                    }
-                                    Err(_) => {
-                                        ui.label(
-                                            RichText::new(if self.german_ui {
-                                                "… Ausdruck wird vervollständigt"
-                                            } else {
-                                                "… completing expression"
-                                            })
-                                            .font(FontId::proportional(12.5))
-                                            .color(pal.on_surface_variant),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                });
+                self.render_input_line(ui, pal);
+                self.render_preview_line(ui, pal);
             });
+        self.last_input_bar_height = input_card.response.rect.height();
 
-        ui.add_space(6.0);
+        ui.add_space(GAP);
 
         // 3. Bottom Keyboard Card (`main_keyboard_layout.xml`, corner radius 20dp + `@id/main_keyboard_drag_bar`)
         Frame::new()
@@ -1865,12 +1789,13 @@ impl NiobCalculatorApp {
                                 };
 
                                 cols[i].vertical_centered(|ui| {
-                                    let btn = egui::Button::new(
-                                        RichText::new(sec.label(self.german_ui))
-                                            .font(FontId::proportional(13.0))
-                                            .strong()
-                                            .color(fg),
-                                    )
+                                    let btn = egui::Button::new(egui::WidgetText::from(
+                                        mathview::rich_job(
+                                            sec.label(self.german_ui),
+                                            FontId::proportional(13.0),
+                                            fg,
+                                        ),
+                                    ))
                                     .fill(fill)
                                     .corner_radius(CornerRadius::same(14))
                                     .min_size(egui::vec2(
@@ -1911,13 +1836,519 @@ impl NiobCalculatorApp {
             });
     }
 
+    /// Rechenverlauf mit Formelsatz für Eingaben und exakte Ergebnisse.
+    fn render_history(&mut self, ui: &mut Ui, pal: &MaterialYouPalette, body_height: f32) {
+        Frame::new()
+            .fill(pal.surface_container_low)
+            .corner_radius(CornerRadius::same(16))
+            .inner_margin(egui::Margin::same(10))
+            .stroke(Stroke::new(1.0_f32, pal.outline_variant))
+            .show(ui, |ui| {
+                ui.set_height(body_height);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(if self.german_ui {
+                            "Rechenverlauf (Klick auf exakt / dezimal wechselt Darstellung)"
+                        } else {
+                            "Calculation History (Click exact / decim. to toggle format)"
+                        })
+                        .font(FontId::proportional(11.5))
+                        .color(pal.on_surface_variant),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if self.history.is_empty() {
+                            self.confirm_clear_history = false;
+                        } else if self.confirm_clear_history {
+                            if ui.small_button(if self.german_ui { "Abbrechen" } else { "Cancel" }).clicked() {
+                                self.confirm_clear_history = false;
+                            }
+                            if ui
+                                .small_button(
+                                    RichText::new(if self.german_ui { "Ja, leeren" } else { "Yes, clear" })
+                                        .color(pal.error),
+                                )
+                                .clicked()
+                            {
+                                self.history.clear();
+                                self.confirm_clear_history = false;
+                                self.mark_state_dirty();
+                            }
+                            ui.label(
+                                RichText::new(if self.german_ui {
+                                    "Gesamten Verlauf löschen?"
+                                } else {
+                                    "Delete entire history?"
+                                })
+                                .font(FontId::proportional(11.5))
+                                .color(pal.error),
+                            );
+                        } else if ui
+                            .small_button(if self.german_ui { "Verlauf leeren" } else { "Clear History" })
+                            .clicked()
+                        {
+                            self.confirm_clear_history = true;
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+
+                ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        let mut paste_text: Option<String> = None;
+                        let mut plot_expr: Option<String> = None;
+                        let mut delete_idx: Option<usize> = None;
+
+                        for (idx, item) in self.history.iter_mut().enumerate() {
+                            Frame::new()
+                                .fill(pal.surface_container)
+                                .corner_radius(CornerRadius::same(12))
+                                .inner_margin(egui::Margin::symmetric(12, 6))
+                                .show(ui, |ui| {
+                                    // Row 1 (`@id/input_term_view` from `term_input_result_combination_layout.xml`):
+                                    // Left-aligned input expression + right-aligned plot/delete actions
+                                    ui.horizontal(|ui| {
+                                        let pretty_in =
+                                            MathEngine::prettify_expression(&item.raw_input);
+                                        // Platz rechts für „Plot“ und „×“ freihalten
+                                        let max_w = (ui.available_width() - 90.0).max(60.0);
+                                        if mathview::show_math(
+                                            ui,
+                                            &item.raw_input,
+                                            &pretty_in,
+                                            HISTORY_TERM_FONT_SIZE - 2.0,
+                                            pal.on_surface,
+                                            max_w,
+                                            Sense::click(),
+                                        )
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                        .on_hover_text(if self.german_ui {
+                                                "Klicken, um Ausdruck in die Eingabe zu übernehmen"
+                                            } else {
+                                                "Click to paste expression to input"
+                                            })
+                                            .clicked()
+                                        {
+                                            paste_text = Some(item.raw_input.clone());
+                                        }
+
+                                        ui.with_layout(
+                                            Layout::right_to_left(Align::Center),
+                                            |ui| {
+                                                if ui
+                                                    .add(
+                                                        egui::Button::new(
+                                                            RichText::new("×")
+                                                                .font(FontId::proportional(14.0))
+                                                                .color(pal.on_surface_variant),
+                                                        )
+                                                        .frame(false),
+                                                    )
+                                                    .on_hover_text(if self.german_ui {
+                                                        "Eintrag löschen"
+                                                    } else {
+                                                        "Delete item"
+                                                    })
+                                                    .clicked()
+                                                {
+                                                    delete_idx = Some(idx);
+                                                }
+
+                                                if item.raw_input.contains('x')
+                                                    && !item.raw_input.contains("int(")
+                                                {
+                                                    if ui
+                                                        .small_button("Plot")
+                                                        .on_hover_text(if self.german_ui {
+                                                            "Im 2D-Funktionsplotter zeichnen"
+                                                        } else {
+                                                            "Plot in 2D Graph"
+                                                        })
+                                                        .clicked()
+                                                    {
+                                                        plot_expr = Some(item.raw_input.clone());
+                                                    }
+                                                }
+                                            },
+                                        );
+                                    });
+
+                                    // Row 2 (`@id/exact_decimal_switch_button` + `@id/equal_sign_text_view` on left,
+                                    // `@id/result_term_view_exact` / `@id/result_term_view_decimal` right-aligned)
+                                    let exact_disp = if item.is_exact && !item.is_error {
+                                        format_exact_history_display(&item.exact_result, self.engine.number_format)
+                                    } else {
+                                        String::new()
+                                    };
+                                    let dec_disp = format_decimal_history_display(
+                                        &item.decimal_result,
+                                        self.engine.number_format,
+                                    );
+                                    let is_matrix = item.exact_result.contains("[[")
+                                        || item.decimal_result.contains("[[");
+                                    let can_toggle = !item.is_error
+                                        && item.is_exact
+                                        && !is_matrix
+                                        && exact_disp != dec_disp;
+                                    let use_exact = if can_toggle {
+                                        item.showing_exact
+                                    } else {
+                                        item.is_exact && !item.is_error
+                                    };
+                                    let shown_res: &str = if use_exact {
+                                        &exact_disp
+                                    } else {
+                                        &dec_disp
+                                    };
+
+                                    ui.horizontal(|ui| {
+                                        if can_toggle {
+                                            let badge_txt = if self.german_ui {
+                                                if item.showing_exact {
+                                                    "exakt"
+                                                } else {
+                                                    "dezimal"
+                                                }
+                                            } else if item.showing_exact {
+                                                "exact"
+                                            } else {
+                                                "decim."
+                                            };
+                                            let pill_fill = if item.showing_exact {
+                                                pal.primary_container
+                                            } else {
+                                                pal.secondary_container
+                                            };
+                                            let pill_fg = if item.showing_exact {
+                                                pal.on_primary_container
+                                            } else {
+                                                pal.on_secondary_container
+                                            };
+                                            let btn = egui::Button::new(
+                                                RichText::new(badge_txt)
+                                                    .font(FontId::proportional(11.5))
+                                                    .strong()
+                                                    .color(pill_fg),
+                                            )
+                                            .fill(pill_fill)
+                                            .corner_radius(CornerRadius::same(10));
+                                            let tooltip = if self.german_ui {
+                                                format!(
+                                                    "Exakt: {}  |  Dezi.: {}",
+                                                    exact_disp, dec_disp
+                                                )
+                                            } else {
+                                                format!(
+                                                    "Exact: {}  |  Decimal: {}",
+                                                    exact_disp, dec_disp
+                                                )
+                                            };
+                                            if ui.add(btn).on_hover_text(tooltip).clicked() {
+                                                item.showing_exact = !item.showing_exact;
+                                            }
+                                        }
+
+                                        ui.label(
+                                            RichText::new("=")
+                                                .font(FontId::proportional(HISTORY_TERM_FONT_SIZE))
+                                                .strong()
+                                                .color(pal.on_surface_variant),
+                                        );
+
+                                        ui.with_layout(
+                                            Layout::right_to_left(Align::Center),
+                                            |ui| {
+                                                let res_col = if item.is_error {
+                                                    pal.error
+                                                } else {
+                                                    pal.primary
+                                                };
+                                                // Exakte Ergebnisse mit Bruchstrich/Wurzel setzen,
+                                                // alles andere als Text (Hochzahlen angehoben).
+                                                let parse_src = if use_exact && !item.is_error {
+                                                    shown_res
+                                                } else {
+                                                    ""
+                                                };
+                                                let max_w = ui.available_width();
+                                                if mathview::show_math(
+                                                    ui,
+                                                    parse_src,
+                                                    shown_res,
+                                                    HISTORY_TERM_FONT_SIZE,
+                                                    res_col,
+                                                    max_w,
+                                                    Sense::click(),
+                                                )
+                                                .on_hover_text(if self.german_ui {
+                                                        "Klicken, um Ergebnis einzufügen"
+                                                    } else {
+                                                        "Click to insert result"
+                                                    })
+                                                    .clicked()
+                                                {
+                                                    if !item.is_error {
+                                                        paste_text = Some(item.reusable_result.clone());
+                                                    }
+                                                }
+                                            },
+                                        );
+                                    });
+
+                                    if let Some(ref rep) = item.integration_report {
+                                        ui.horizontal(|ui| {
+                                            let (info, color) = if rep.converged {
+                                                (
+                                                    format!(
+                                                        "✓ conv. | err ≈ {:.1e} | {} subintervals",
+                                                        rep.abs_err, rep.subintervals
+                                                    ),
+                                                    pal.on_surface_variant,
+                                                )
+                                            } else {
+                                                (
+                                                    format!(
+                                                        "⚠ not converged | {} subintervals",
+                                                        rep.subintervals
+                                                    ),
+                                                    pal.error,
+                                                )
+                                            };
+                                            ui.label(
+                                                RichText::new(info)
+                                                    .font(FontId::proportional(11.0))
+                                                    .color(color),
+                                            );
+                                        });
+                                    }
+                                });
+                        }
+
+                        if let Some(txt) = paste_text {
+                            self.insert_token(&txt);
+                        }
+                        if let Some(p_expr) = plot_expr {
+                            self.plot_functions[0].expr = mathview::to_display_syntax(&p_expr);
+                            self.plot_functions[0].visible = true;
+                            self.active_tab = MainTab::Plotter;
+                        }
+                        if let Some(i) = delete_idx {
+                            self.history.remove(i);
+                            self.mark_state_dirty();
+                        }
+                    });
+            });
+    }
+
+    /// Formelzeile: echtes Textfeld mit Cursor, Auswahl, Einfügen und Rückgängig.
+    /// Angezeigt wird die Anzeige-Schreibweise (`√(2)÷2`), Exponenten angehoben.
+    fn render_input_line(&mut self, ui: &mut Ui, pal: &MaterialYouPalette) {
+        let input_id = egui::Id::new(INPUT_FIELD_ID);
+        if let Some(pos) = self.pending_cursor.take() {
+            let mut state = egui::text_edit::TextEditState::load(ui.ctx(), input_id).unwrap_or_default();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(pos))));
+            state.store(ui.ctx(), input_id);
+            ui.memory_mut(|m| m.request_focus(input_id));
+        }
+
+        ui.horizontal(|ui| {
+            let mut clear_clicked = false;
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                clear_clicked = ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new("AC")
+                                .font(FontId::proportional(13.0))
+                                .strong()
+                                .color(pal.error),
+                        )
+                        .fill(pal.surface_container_high)
+                        .corner_radius(CornerRadius::same(10)),
+                    )
+                    .on_hover_text(if self.german_ui {
+                        "Eingabe löschen (Escape)"
+                    } else {
+                        "Clear input (Escape)"
+                    })
+                    .clicked();
+
+                let font_sz = if self.input_expr.chars().count() > 32 {
+                    INPUT_TERM_MIN_FONT_SIZE
+                } else {
+                    INPUT_TERM_FONT_SIZE
+                };
+                let font = FontId::proportional(font_sz);
+                let text_col = pal.on_surface;
+                let layout_font = font.clone();
+                let mut layouter = move |ui: &Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
+                    let job = mathview::edit_layout_job(buf.as_str(), layout_font.clone(), text_col);
+                    ui.fonts_mut(|f| f.layout_job(job))
+                };
+                let hint = RichText::new(if self.german_ui {
+                    "Ausdruck eingeben oder über Tastatur wählen…"
+                } else {
+                    "Enter expression or use keyboard below…"
+                })
+                .font(FontId::proportional(INPUT_TERM_MIN_FONT_SIZE))
+                .color(pal.on_surface_variant);
+
+                let out = egui::TextEdit::singleline(&mut self.input_expr)
+                    .id(input_id)
+                    .font(font)
+                    .frame(Frame::NONE)
+                    .hint_text(hint)
+                    .desired_width(ui.available_width())
+                    .layouter(&mut layouter)
+                    .show(ui);
+
+                if let Some(range) = out.cursor_range {
+                    let r = range.as_sorted_char_range();
+                    self.input_sel = (r.start, r.end);
+                }
+                if out.response.changed() {
+                    // Getippte oder eingefügte ASCII-Operatoren in Anzeige-Schreibweise
+                    let cursor = self.input_sel.1;
+                    let (normalized, map) = mathview::to_display_syntax_with_map(&self.input_expr);
+                    if normalized != self.input_expr {
+                        let pos = map.get(cursor).copied().unwrap_or(normalized.chars().count());
+                        self.input_expr = normalized;
+                        self.input_sel = (pos, pos);
+                        let mut state = out.state.clone();
+                        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                            egui::text::CCursor::new(pos),
+                        )));
+                        state.store(ui.ctx(), input_id);
+                    }
+                }
+                if out.response.lost_focus() {
+                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        let ctx = ui.ctx().clone();
+                        self.evaluate_current(Some(&ctx));
+                        ui.memory_mut(|m| m.request_focus(input_id));
+                    } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        self.clear_input();
+                    }
+                }
+            });
+            if clear_clicked {
+                self.clear_input();
+            }
+        });
+    }
+
+    /// Live-Vorschau unter der Formelzeile.
+    fn render_preview_line(&mut self, ui: &mut Ui, pal: &MaterialYouPalette) {
+        ui.horizontal(|ui| {
+            let raw = self.engine_input();
+            if raw.is_empty() {
+                let ans_s = self.engine.number_format.format_f64(self.engine.ans.re);
+                ui.label(
+                    RichText::new(format!(
+                        "ANS = {}   •   Timeout: {} ms",
+                        ans_s, SYMBOLIC_WATCHDOG_TIMEOUT_MS
+                    ))
+                    .font(FontId::proportional(12.5))
+                    .color(pal.on_surface_variant),
+                );
+                return;
+            }
+            let calculating = |ui: &mut Ui, de: bool| {
+                ui.label(
+                    RichText::new(if de { "… wird berechnet" } else { "… calculating" })
+                        .font(FontId::proportional(12.5))
+                        .color(pal.on_surface_variant),
+                );
+            };
+            let key: PreviewKey = (
+                raw.clone(),
+                self.engine.angle_mode,
+                self.engine.modulo_always_positive,
+                self.eval_revision,
+            );
+            if self.commit_pending {
+                calculating(ui, self.german_ui);
+                return;
+            }
+            if self.screenshot_path.is_some() {
+                if self.preview_cache_key.as_ref() != Some(&key) {
+                    self.preview_cache_result = Some(self.engine.evaluate_preview(&key.0, false));
+                    self.preview_cache_key = Some(key.clone());
+                }
+            } else if self.preview_cache_key.as_ref() != Some(&key)
+                && self.preview_pending_key.as_ref() != Some(&key)
+            {
+                if self.preview_worker.is_none() || self.preview_rx.is_none() {
+                    let (tx, rx) = mpsc::channel();
+                    self.preview_rx = Some(rx);
+                    self.preview_worker = Some(PreviewWorker::new(tx));
+                }
+                if let Some(ref worker) = self.preview_worker {
+                    self.preview_pending_key = Some(key.clone());
+                    worker.submit(key.clone(), self.engine.clone(), ui.ctx().clone());
+                }
+            }
+            if self.preview_cache_key.as_ref() != Some(&key) {
+                calculating(ui, self.german_ui);
+                return;
+            }
+            match self.preview_cache_result.as_ref().unwrap() {
+                Ok(preview) => {
+                    let nf = self.engine.number_format;
+                    let dec_disp = format_decimal_history_display(&preview.decimal_text, nf);
+                    if preview.is_exact {
+                        let ex_disp = format_exact_history_display(&preview.exact_text, nf);
+                        ui.label(
+                            RichText::new(if self.german_ui { "exakt:" } else { "exact:" })
+                                .font(FontId::proportional(13.5))
+                                .color(pal.primary),
+                        );
+                        let max_w = ui.available_width() * 0.6;
+                        mathview::show_math(ui, &ex_disp, &ex_disp, 15.0, pal.primary, max_w, Sense::hover());
+                        if ex_disp != dec_disp {
+                            ui.separator();
+                            let job = mathview::rich_job(
+                                &format!("{}: ≈ {}", if self.german_ui { "dezimal" } else { "decimal" }, dec_disp),
+                                FontId::proportional(13.5),
+                                pal.on_surface_variant,
+                            );
+                            ui.label(job);
+                        }
+                    } else {
+                        ui.label(mathview::rich_job(
+                            &format!("= {}", dec_disp),
+                            FontId::proportional(13.5),
+                            pal.primary,
+                        ));
+                    }
+                }
+                Err(err) => {
+                    let (text, color) = match classify_preview_error(err, &raw) {
+                        PreviewError::Show => (format!("⚠ {}", err), pal.error),
+                        PreviewError::Incomplete => (
+                            if self.german_ui {
+                                "… Ausdruck wird vervollständigt".to_string()
+                            } else {
+                                "… completing expression".to_string()
+                            },
+                            pal.on_surface_variant,
+                        ),
+                    };
+                    ui.label(RichText::new(text).font(FontId::proportional(12.5)).color(color));
+                }
+            }
+        });
+    }
+
     fn render_keyboard_section(
         &mut self,
         ui: &mut Ui,
         section: KeyboardSection,
         pal: &MaterialYouPalette,
     ) {
-        let avail_h = ui.available_height().max(150.0);
+        let avail_h = ui.available_height().max(100.0);
 
         match section {
             KeyboardSection::Numbers => {
@@ -1933,9 +2364,9 @@ impl NiobCalculatorApp {
                                 pal.tertiary_container,
                                 pal.on_tertiary_container,
                             ) {
-                                if !self.input_expr.ends_with("0x")
-                                    && !self
-                                        .input_expr
+                                let before = self.text_before_cursor();
+                                if !before.ends_with("0x")
+                                    && !before
                                         .chars()
                                         .last()
                                         .map(|c| c.is_ascii_hexdigit())
@@ -1956,8 +2387,8 @@ impl NiobCalculatorApp {
                 // Authentic `keyboard_number_section.xml` layout:
                 // Left 3 columns (weight 3): 4 rows of digits (`7 8 9`, `4 5 6`, `1 2 3`, `0 . =`)
                 // Right 1 column (weight 1, `layout_rowSpan="4"`): 5 vertically stacked operators (`DEL`, `÷`, `×`, `+`, `−`)
-                let grid_h = (avail_h - hex_h - 6.0).max(120.0);
-                let digit_row_h = ((grid_h - 18.0) / 4.0).max(26.0);
+                let grid_h = (avail_h - hex_h - 6.0).max(100.0);
+                let digit_row_h = ((grid_h - 18.0) / 4.0).max(22.0);
                 let spacing_y = ui.spacing().item_spacing.y;
                 let op_row_h = ((4.0 * digit_row_h - spacing_y) / 5.0).max(16.0);
 
@@ -2002,8 +2433,14 @@ impl NiobCalculatorApp {
                     }
 
                     // Rightmost column (`rowSpan="4"` with 5 vertical buttons: `⌫`, `÷`, `×`, `+`, `−`)
+                    // `⌫` gibt es nur in System-Symbolschriften; sonst Pfeil.
+                    let del_lbl = if ctx_clone.fonts_mut(|f| f.has_glyph(&FontId::proportional(15.0), '⌫')) {
+                        "⌫"
+                    } else {
+                        "←"
+                    };
                     for (op_lbl, op_tok) in [
-                        ("⌫", "DEL"),
+                        (del_lbl, "DEL"),
                         ("÷", "/"),
                         ("×", "*"),
                         ("+", "+"),
@@ -2325,15 +2762,22 @@ impl NiobCalculatorApp {
 
     fn key_btn(ui: &mut Ui, label: &str, height: f32, fill: Color32, fg: Color32) -> bool {
         let w = ui.available_width();
-        let btn = egui::Button::new(
-            RichText::new(label)
-                .font(FontId::proportional(15.0))
-                .strong()
-                .color(fg),
-        )
+        // Hochzahlen (xⁿ, sin⁻¹, Aᵀ) als angehobenen Text setzen – die
+        // eingebaute Schrift hat für ⁿ, ⁻ und ᵀ keine Zeichen.
+        let btn = egui::Button::new(egui::WidgetText::from(mathview::rich_job(
+            label,
+            FontId::proportional(15.0),
+            fg,
+        )))
         .fill(fill)
         .corner_radius(CornerRadius::same(14))
         .min_size(egui::vec2(w, height));
+        // Kurze Tastenbeschriftungen nie umbrechen („AN|S“, „log|10“)
+        let btn = if label.chars().count() <= 6 {
+            btn.wrap_mode(egui::TextWrapMode::Extend)
+        } else {
+            btn
+        };
         ui.add(btn).clicked()
     }
 
@@ -2377,39 +2821,57 @@ impl NiobCalculatorApp {
                 });
 
                 ui.add_space(4.0);
+                let de = self.german_ui;
+                let trace_x = self.plot_trace_x;
                 for (i, pf) in self.plot_functions.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut pf.visible, "");
                         ui.label(
-                            RichText::new(format!("f{}(x) =", i + 1))
-                                .font(FontId::proportional(13.5))
-                                .strong()
-                                .color(pf.color),
+                            mathview::rich_job(
+                                &format!("f{}(x) =", subscript_number(i + 1)),
+                                FontId::proportional(13.5),
+                                pf.color,
+                            ),
                         );
-                        ui.add(
-                            egui::TextEdit::singleline(&mut pf.expr)
-                                .desired_width(220.0)
-                                .font(FontId::monospace(13.5)),
-                        );
-                        if let Some(y_at_trace) = self.engine.eval_for_x(&pf.expr, self.plot_trace_x)
-                        {
-                            let h = 1e-5;
-                            let dy = match (
-                                self.engine.eval_for_x(&pf.expr, self.plot_trace_x + h),
-                                self.engine.eval_for_x(&pf.expr, self.plot_trace_x - h),
-                            ) {
-                                (Some(yp), Some(ym)) => (yp - ym) / (2.0 * h),
-                                _ => 0.0,
-                            };
-                            ui.label(
-                                RichText::new(format!(
-                                    "f({:.2}) = {:.4}  |  f'({:.2}) = {:.4}",
-                                    self.plot_trace_x, y_at_trace, self.plot_trace_x, dy
-                                ))
-                                .font(FontId::monospace(12.0))
-                                .color(pal.on_surface_variant),
-                            );
+                        // Gleiche Schreibweise wie in der Formelzeile des Rechners
+                        let field_font = FontId::proportional(15.0);
+                        let field_col = pal.on_surface;
+                        let layout_font = field_font.clone();
+                        let mut layouter = move |ui: &Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
+                            let job = mathview::edit_layout_job(buf.as_str(), layout_font.clone(), field_col);
+                            ui.fonts_mut(|f| f.layout_job(job))
+                        };
+                        let field_id = ui.id().with(("plot_fn", i));
+                        let out = egui::TextEdit::singleline(&mut pf.expr)
+                            .id(field_id)
+                            .desired_width(220.0)
+                            .font(field_font)
+                            .layouter(&mut layouter)
+                            .show(ui);
+                        if out.response.changed() {
+                            let cursor = out
+                                .cursor_range
+                                .map(|r| r.primary.index)
+                                .unwrap_or(pf.expr.chars().count());
+                            let (normalized, map) = mathview::to_display_syntax_with_map(&pf.expr);
+                            if normalized != pf.expr {
+                                let pos = map.get(cursor).copied().unwrap_or(normalized.chars().count());
+                                pf.expr = normalized;
+                                let mut state = out.state.clone();
+                                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                                    egui::text::CCursor::new(pos),
+                                )));
+                                state.store(ui.ctx(), field_id);
+                            }
                         }
+                        let (text, is_err) = plot_readout(&self.engine, &pf.expr, trace_x, de);
+                        ui.label(
+                            mathview::rich_job(
+                                &text,
+                                FontId::proportional(12.5),
+                                if is_err { pal.error } else { pal.on_surface_variant },
+                            ),
+                        );
                     });
                 }
             });
@@ -2430,7 +2892,7 @@ impl NiobCalculatorApp {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll.abs() > 0.1 {
                 let factor = (1.0 + scroll as f64 * 0.002).clamp(0.8, 1.25);
-                self.plot_scale = (self.plot_scale * factor).clamp(8.0, 400.0);
+                self.plot_scale = (self.plot_scale * factor).clamp(1e-5, 1e5);
             }
             self.plot_trace_x =
                 self.plot_center_x + ((hover_pos.x - rect.center().x) as f64) / self.plot_scale;
@@ -2444,7 +2906,7 @@ impl NiobCalculatorApp {
         let scale = self.plot_scale as f32;
 
         // Choose grid step based on zoom scale
-        let raw_step = (80.0 / self.plot_scale).max(0.1);
+        let raw_step = (80.0 / self.plot_scale).max(1e-6);
         let mag = 10f64.powf(raw_step.log10().floor());
         let major_step = if raw_step / mag < 2.0 {
             mag
@@ -2545,6 +3007,7 @@ impl NiobCalculatorApp {
             if !pf.visible || pf.expr.trim().is_empty() {
                 continue;
             }
+            let expr = mathview::to_engine_syntax(&pf.expr);
             let mut prev_pt: Option<Pos2> = None;
             let mut prev_val: Option<(f64, f64)> = None;
 
@@ -2552,7 +3015,7 @@ impl NiobCalculatorApp {
                 let t = (s as f32) / (samples as f32);
                 let sx = rect.left() + t * rect.width();
                 let x_val = self.plot_center_x + ((sx - cx) as f64) / self.plot_scale;
-                if let Some(y_val) = self.engine.eval_for_x(&pf.expr, x_val) {
+                if let Some(y_val) = self.engine.eval_for_x(&expr, x_val) {
                     let sy = cy - ((y_val - self.plot_center_y) as f32) * scale;
                     let cur_pt = Pos2::new(sx, sy);
                     if sy >= rect.top() - 200.0 && sy <= rect.bottom() + 200.0 {
@@ -2586,7 +3049,7 @@ impl NiobCalculatorApp {
             }
 
             // Draw trace point at `self.plot_trace_x`
-            if let Some(ty) = self.engine.eval_for_x(&pf.expr, self.plot_trace_x) {
+            if let Some(ty) = self.engine.eval_for_x(&expr, self.plot_trace_x) {
                 let tx_s = cx + ((self.plot_trace_x - self.plot_center_x) as f32) * scale;
                 let ty_s = cy - ((ty - self.plot_center_y) as f32) * scale;
                 if rect.contains(Pos2::new(tx_s, ty_s)) {
@@ -3149,7 +3612,9 @@ impl NiobCalculatorApp {
                         }
 
                         ui.add_space(4.0);
-                        ui.checkbox(
+                        material_switch(
+                            ui,
+                            pal,
                             &mut self.engine.show_exact_first,
                             if self.german_ui {
                                 "Exakte Ergebnisse (Brüche, π, Wurzeln) im Verlauf zuerst anzeigen"
@@ -3157,20 +3622,23 @@ impl NiobCalculatorApp {
                                 "Show exact results (fractions, π, surds) first in history"
                             },
                         );
-                        if ui
-                            .checkbox(
-                                &mut self.engine.modulo_always_positive,
-                                if self.german_ui {
-                                    "Modulo-Ergebnis immer positiv (a mod b ≥ 0)"
-                                } else {
-                                    "Modulo result always positive (a mod b ≥ 0)"
-                                },
-                            )
-                            .changed()
+                        if material_switch(
+                            ui,
+                            pal,
+                            &mut self.engine.modulo_always_positive,
+                            if self.german_ui {
+                                "Modulo-Ergebnis immer positiv (a mod b ≥ 0)"
+                            } else {
+                                "Modulo result always positive (a mod b ≥ 0)"
+                            },
+                        )
+                        .changed()
                         {
                             self.mark_state_dirty();
                         }
-                        ui.checkbox(
+                        material_switch(
+                            ui,
+                            pal,
                             &mut self.engine.auto_ans_insertion,
                             if self.german_ui {
                                 "Automatisches Einfügen von ANS vor Operatoren (+, −, ×, ÷, ^)"
@@ -3178,7 +3646,9 @@ impl NiobCalculatorApp {
                                 "Automatic ANS insertion before binary operators"
                             },
                         );
-                        ui.checkbox(
+                        material_switch(
+                            ui,
+                            pal,
                             &mut self.dual_keyboard,
                             if self.german_ui {
                                 "Zweittastatur (Dual-Ansicht: Wissenschaftlich + Ziffernblock gleichzeitig)"
@@ -3186,7 +3656,9 @@ impl NiobCalculatorApp {
                                 "Dual / Auxiliary Keyboard (Show scientific pad + number pad side by side)"
                             },
                         );
-                        ui.checkbox(
+                        material_switch(
+                            ui,
+                            pal,
                             &mut self.show_hex_row,
                             if self.german_ui {
                                 "Hexadezimal-Zeile (A B C D E F) über dem Ziffernblock anzeigen"
@@ -3252,6 +3724,54 @@ impl NiobCalculatorApp {
                     });
             });
     }
+}
+
+fn material_switch(
+    ui: &mut Ui,
+    pal: &MaterialYouPalette,
+    on: &mut bool,
+    label: &str,
+) -> egui::Response {
+    ui.horizontal(|ui| {
+        let desired_size = egui::vec2(46.0, 26.0);
+        let (rect, mut response) = ui.allocate_exact_size(desired_size, Sense::click());
+        let lbl_resp = ui.add(
+            egui::Label::new(RichText::new(label).color(pal.on_surface))
+                .wrap()
+                .sense(Sense::click()),
+        );
+        if response.clicked() || lbl_resp.clicked() {
+            *on = !*on;
+            response.mark_changed();
+        }
+        if ui.is_rect_visible(rect) {
+            let how_on = ui.ctx().animate_bool_responsive(response.id, *on);
+            let radius = rect.height() * 0.5;
+            let track_fill = if *on {
+                pal.primary
+            } else {
+                pal.surface_container_highest
+            };
+            let track_stroke = if *on {
+                Stroke::NONE
+            } else {
+                Stroke::new(1.5_f32, pal.on_surface_variant)
+            };
+            ui.painter()
+                .rect(rect, CornerRadius::same(radius as u8), track_fill, track_stroke, StrokeKind::Inside);
+            let thumb_r = radius - 3.5 - (1.0 - how_on) * 2.0;
+            let circle_x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), how_on);
+            let center = Pos2::new(circle_x, rect.center().y);
+            let thumb_col = if *on {
+                pal.on_primary
+            } else {
+                pal.on_surface_variant
+            };
+            ui.painter().circle_filled(center, thumb_r, thumb_col);
+        }
+        response
+    })
+    .inner
 }
 
 fn convert_temperature(v: f64, from: usize, to: usize) -> f64 {
@@ -3348,6 +3868,115 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Niob",
         options,
-        Box::new(move |_cc| Ok(Box::new(NiobCalculatorApp::new(screenshot_path)))),
+        Box::new(move |cc| {
+            install_fonts(&cc.egui_ctx);
+            Ok(Box::new(NiobCalculatorApp::new(screenshot_path)))
+        }),
     )
+}
+
+/// Ersatzschriften für mathematische Zeichen, die der eingebauten
+/// Proportionalschrift fehlen (z. B. `⁻`, `←`, `⌫`, `✓`).
+fn install_fonts(ctx: &egui::Context) {
+    use egui::{FontData, FontDefinitions, FontFamily};
+    let mut fonts = FontDefinitions::default();
+    // Die mitgelieferte Hack-Schrift deckt Hochzeichen und Pfeile ab.
+    if let Some(list) = fonts.families.get_mut(&FontFamily::Proportional) {
+        if !list.iter().any(|n| n == "Hack") {
+            list.push("Hack".to_owned());
+        }
+    }
+    // Symbolschrift des Systems, falls vorhanden (⌫, ✓ …).
+    const SYSTEM_SYMBOL_FONTS: [&str; 3] = [
+        "C:\\Windows\\Fonts\\seguisym.ttf",
+        "/System/Library/Fonts/Apple Symbols.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ];
+    for path in SYSTEM_SYMBOL_FONTS {
+        if let Ok(bytes) = std::fs::read(path) {
+            fonts
+                .font_data
+                .insert("system-symbols".to_owned(), std::sync::Arc::new(FontData::from_owned(bytes)));
+            for family in [FontFamily::Proportional, FontFamily::Monospace] {
+                if let Some(list) = fonts.families.get_mut(&family) {
+                    list.push("system-symbols".to_owned());
+                }
+            }
+            break;
+        }
+    }
+    ctx.set_fonts(fonts);
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use super::*;
+
+    fn preview_kind(input: &str) -> Option<PreviewError> {
+        let raw = mathview::to_engine_syntax(input);
+        let mut engine = MathEngine::default();
+        engine.evaluate_preview(&raw, false).err().map(|e| classify_preview_error(&e, &raw))
+    }
+
+    #[test]
+    fn preview_separates_typos_from_unfinished_input() {
+        // Befund aus dem UI-Test: beide meldeten „Ausdruck wird vervollständigt“
+        assert_eq!(preview_kind("2+"), Some(PreviewError::Incomplete));
+        assert_eq!(preview_kind("fao(2)"), Some(PreviewError::Show));
+        assert_eq!(preview_kind("sin("), Some(PreviewError::Incomplete));
+        assert_eq!(preview_kind("1÷0"), Some(PreviewError::Show));
+        // Unbekannter Name: am Ende wird er womöglich noch getippt, sonst Tippfehler
+        let unknown = "Unbekannte Variable oder Konstante 'fa'";
+        assert_eq!(classify_preview_error(unknown, "2+fa"), PreviewError::Incomplete);
+        assert_eq!(classify_preview_error(unknown, "fa+2"), PreviewError::Show);
+        assert_eq!(classify_preview_error(unknown, "2+sofa"), PreviewError::Show);
+        assert_eq!(preview_kind("√(2)÷2"), None);
+    }
+
+    #[test]
+    fn plot_readout_reports_missing_derivatives_and_input_errors() {
+        let engine = MathEngine::default();
+        // Befunde aus dem UI-Test: f'(0) = 0 bei √x und |x| war falsch
+        let (txt, err) = plot_readout(&engine, "√(x)", 0.0, true);
+        assert!(txt.contains("f'(0.00) existiert nicht") && !err, "{txt}");
+        let (txt, err) = plot_readout(&engine, "abs(x)", 0.0, true);
+        assert!(txt.contains("f'(0.00) existiert nicht") && !err, "{txt}");
+        // Unbekannte Funktion wird gemeldet statt still ignoriert
+        let (txt, err) = plot_readout(&engine, "fao(2)", 0.0, true);
+        assert!(err && txt.contains("Unbekannte Funktion 'fao'"), "{txt}");
+        // Außerhalb des Definitionsbereichs: kein Eingabefehler
+        let (txt, err) = plot_readout(&engine, "√(x)", -1.0, true);
+        assert!(!err && txt.contains("nicht definiert"), "{txt}");
+        // Normalfall
+        let (txt, _) = plot_readout(&engine, "x^2", 1.0, true);
+        assert_eq!(txt, "f(1.00) = 1.0000   |   f'(1.00) = 2.0000");
+    }
+
+    #[test]
+    fn keypad_and_cursor_editing() {
+        let mut app = NiobCalculatorApp::new(None);
+        app.history.clear();
+        app.clear_input();
+        app.engine.auto_ans_insertion = false;
+        for t in ["1", "2", "3", "4", "5"] {
+            app.insert_token(t);
+        }
+        // Befund aus dem UI-Test: nach zweimal ← löschte ⌫ trotzdem die letzte Ziffer
+        app.input_sel = (3, 3);
+        app.backspace();
+        assert_eq!(app.input_expr, "1245");
+        assert_eq!(app.input_sel, (2, 2));
+        // Einfügen an der Cursorposition, ASCII wird zu Anzeige-Schreibweise
+        app.insert_token("*pi");
+        assert_eq!(app.input_expr, "12×π45");
+        assert_eq!(app.engine_input(), "12*pi45");
+        // Auswahl wird ersetzt
+        app.input_sel = (0, 2);
+        app.insert_token("sqrt(");
+        assert_eq!(app.input_expr, "√(×π45");
+        // Funktionsnamen am Stück löschen
+        app.input_sel = (2, 2);
+        app.backspace();
+        assert_eq!(app.input_expr, "×π45");
+    }
 }
