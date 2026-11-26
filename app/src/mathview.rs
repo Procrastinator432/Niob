@@ -1183,16 +1183,23 @@ pub fn show_math(
     ui.add(egui::Label::new(job).sense(sense))
 }
 
-/// Teilt `s` an Kommas außerhalb von Klammern.
+/// Teilt `s` an Kommas außerhalb von Klammern. Ein Komma zwischen zwei
+/// Ziffern ist ein Dezimalkomma (`1,5` im Zahlenformat „123 456,789“), kein
+/// Trenner – die Engine trennt Zellen immer mit „, “.
 fn split_top_level(s: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut depth = 0i32;
     let mut start = 0;
-    for (i, ch) in s.char_indices() {
+    let chars: Vec<(usize, char)> = s.char_indices().collect();
+    for (k, &(i, ch)) in chars.iter().enumerate() {
+        let decimal_comma = ch == ','
+            && k > 0
+            && chars[k - 1].1.is_ascii_digit()
+            && chars.get(k + 1).is_some_and(|&(_, c)| c.is_ascii_digit());
         match ch {
             '(' | '[' => depth += 1,
             ')' | ']' => depth -= 1,
-            ',' if depth == 0 => {
+            ',' if depth == 0 && !decimal_comma => {
                 parts.push(&s[start..i]);
                 start = i + 1;
             }
@@ -1224,7 +1231,26 @@ pub fn parse_matrix_literal(src: &str) -> Option<Vec<Vec<String>>> {
 /// Wurzeln), spaltenweise zentriert. Die Matrix wird als ein Block gesetzt
 /// und belegt nur eine Fläche – so passt sie auch in rechtsbündige Zeilen.
 pub fn matrix_widget(ui: &mut Ui, rows: &[Vec<String>], size: f32, color: Color32, sense: Sense) -> Response {
-    let laid = {
+    let laid = matrix_laid(ui, rows, size, color);
+    paint_laid(ui, laid, color, sense)
+}
+
+/// Platzbedarf einer gesetzten Matrix (für die Zeilenhöhe daneben).
+pub fn matrix_size(ui: &Ui, rows: &[Vec<String>], size: f32) -> Vec2 {
+    let laid = matrix_laid(ui, rows, size, Color32::WHITE);
+    Vec2::new(laid.w.ceil(), laid.h().ceil())
+}
+
+/// Höhe von `src` im Formelsatz, 0 wenn `src` keine Formelstruktur hat.
+pub fn formula_height(ui: &Ui, src: &str, size: f32) -> f32 {
+    parse_math(src)
+        .filter(MathNode::is_structured)
+        .map(|node| Layouter { ui, color: Color32::WHITE }.layout(&node, size).h().ceil())
+        .unwrap_or(0.0)
+}
+
+fn matrix_laid(ui: &Ui, rows: &[Vec<String>], size: f32, color: Color32) -> Laid {
+    {
         let lay = Layouter { ui, color };
         let cells: Vec<Vec<Laid>> = rows
             .iter()
@@ -1266,8 +1292,7 @@ pub fn matrix_widget(ui: &mut Ui, rows: &[Vec<String>], size: f32, color: Color3
             out.prims.push(Prim::Line(Vec2::new(x, y1), Vec2::new(x + dir * tick, y1), lw));
         }
         out
-    };
-    paint_laid(ui, laid, color, sense)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1462,5 +1487,10 @@ mod tests {
         assert!(parse_matrix_literal("[[1, 2], [3]]").is_none());
         assert!(parse_matrix_literal("42").is_none());
         assert!(parse_matrix_literal("[[1, ], [2, 3]]").is_none());
+        // Befund aus dem Live-Test: Dezimalkomma wurde als Zellentrenner gelesen
+        let rows = parse_matrix_literal("[[-2, 1], [1,5, -0,5]]").unwrap();
+        assert_eq!(rows, vec![vec!["-2", "1"], vec!["1,5", "-0,5"]]);
+        let rows = parse_matrix_literal("[[1,234.5, 2]]").unwrap();
+        assert_eq!(rows, vec![vec!["1,234.5", "2"]]);
     }
 }

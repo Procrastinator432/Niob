@@ -2,6 +2,7 @@ mod constants;
 mod engine;
 mod mathview;
 mod numdiff;
+mod i18n;
 mod theme;
 #[cfg(test)]
 mod verification;
@@ -654,6 +655,16 @@ mod state_json {
             }
             engine.matrix_variables = loaded_mats;
         }
+        // Frühere Versionen speicherten die Vorbelegung a = 5, b = 3, x = 2
+        // mit. In Dateien ohne Bedien-Einstellungen (also von vor dieser
+        // Version) werden genau diese Werte einmalig entfernt; andere bleiben.
+        if root.get("ui").is_none() {
+            for (name, preset) in [("a", 5.0), ("b", 3.0), ("x", 2.0)] {
+                if engine.variables.get(name).is_some_and(|v| v.to_f64() == preset) {
+                    engine.variables.remove(name);
+                }
+            }
+        }
         if let Some(JsonVal::Arr(items)) = root.get("history") {
             history.clear();
             for entry in items {
@@ -753,6 +764,31 @@ mod state_json {
             let mut engine = MathEngine::default();
             assert_eq!(apply_state_json(legacy, &mut engine, &mut Vec::new()), None);
             assert_eq!(engine.angle_mode, AngleMode::Degrees);
+        }
+
+        /// Befund: Bestehende Installationen behielten die alte Vorbelegung.
+        #[test]
+        fn legacy_state_drops_only_the_old_variable_presets() {
+            let mut engine = MathEngine::default(); // alte Vorbelegung a = 5, b = 3, x = 2
+            engine.evaluate_and_commit("b := 7").unwrap();
+            engine.evaluate_and_commit("c := 5").unwrap();
+            let json = serialize_state_json(&engine, &[], &UiPrefs::default());
+            let cut = json.find(",\n  \"ui\":").expect("ui-Abschnitt");
+            let legacy = format!("{}\n}}\n", &json[..cut]);
+
+            let mut restored = MathEngine::default();
+            restored.variables.clear();
+            apply_state_json(&legacy, &mut restored, &mut Vec::new());
+            assert!(restored.variables.get("a").is_none());
+            assert!(restored.variables.get("x").is_none());
+            assert_eq!(restored.variables.get("b").map(|v| v.to_f64()), Some(7.0));
+            assert_eq!(restored.variables.get("c").map(|v| v.to_f64()), Some(5.0));
+
+            // Neues Format: gespeicherte Werte bleiben, auch wenn sie den alten Vorgaben gleichen
+            let mut restored = MathEngine::default();
+            restored.variables.clear();
+            apply_state_json(&json, &mut restored, &mut Vec::new());
+            assert_eq!(restored.variables.get("a").map(|v| v.to_f64()), Some(5.0));
         }
     }
 }
@@ -1040,33 +1076,40 @@ fn subscript_number(n: usize) -> String {
 /// Funktionswert und Ableitung, oder ein eindeutiger Hinweis, wenn die Eingabe
 /// fehlerhaft ist, die Funktion an der Stelle nicht definiert ist oder dort
 /// keine endliche zweiseitige Ableitung existiert. Zweites Feld: Fehler.
+#[cfg(test)]
 fn plot_readout(engine: &MathEngine, display_expr: &str, x: f64, de: bool) -> (String, bool) {
+    plot_readout_named(engine, display_expr, x, de, "f")
+}
+
+/// Wie [`plot_readout`], mit dem Funktionsnamen der Zeile (f₁, f₂ …), damit
+/// die Statuszeilen mehrerer Kurven unterscheidbar sind.
+fn plot_readout_named(engine: &MathEngine, display_expr: &str, x: f64, de: bool, name: &str) -> (String, bool) {
     let expr = mathview::to_engine_syntax(display_expr);
     if expr.trim().is_empty() {
         return (String::new(), false);
     }
     // Eingabefehler (Syntax, unbekannte Namen) unabhängig von der Spurposition
     if let Err(err) = engine.validate_expression(&expr, &["x"]) {
-        return (format!("⚠ {}", err), true);
+        return (format!("⚠ {}", i18n::localize_error(&err, de)), true);
     }
     let fx = engine.eval_for_x_result(&expr, x);
     let x_txt = readout_number(x, 2);
     let Ok(y) = fx else {
         return (
             if de {
-                format!("f({x_txt}) nicht definiert")
+                format!("{name}({x_txt}) nicht definiert")
             } else {
-                format!("f({x_txt}) undefined")
+                format!("{name}({x_txt}) undefined")
             },
             false,
         );
     };
     let derivative = match numdiff::derivative_at(|t| engine.eval_for_x(&expr, t), x) {
-        Some(numdiff::Derivative::Value(v)) => format!("f'({x_txt}) = {}", readout_number(v, 4)),
-        _ if de => format!("f'({x_txt}) existiert nicht"),
-        _ => format!("f'({x_txt}) does not exist"),
+        Some(numdiff::Derivative::Value(v)) => format!("{name}'({x_txt}) = {}", readout_number(v, 4)),
+        _ if de => format!("{name}'({x_txt}) existiert nicht"),
+        _ => format!("{name}'({x_txt}) does not exist"),
     };
-    (format!("f({x_txt}) = {}   |   {derivative}", readout_number(y, 4)), false)
+    (format!("{name}({x_txt}) = {}   |   {derivative}", readout_number(y, 4)), false)
 }
 
 /// Zahl für die Plotter-Statuszeile: höchstens `decimals` Nachkommastellen und
@@ -1208,6 +1251,8 @@ struct NiobCalculatorApp {
     pending_cursor: Option<usize>,
     /// Höhe der Eingabekarte im letzten Frame (für die Platzaufteilung).
     last_input_bar_height: f32,
+    /// Hatte die Formelzeile im letzten Frame den Fokus? (für Escape)
+    input_had_focus: bool,
     /// Sicherheitsabfrage für „Verlauf leeren“ sichtbar.
     confirm_clear_history: bool,
     history: Vec<HistoryItem>,
@@ -1303,8 +1348,16 @@ impl NiobCalculatorApp {
                 }
             }
             input_expr = mathview::to_display_syntax("sqrt(2)/2 + sin(pi/4)");
-        } else if let Some(saved) = state_json::load_state_from_disk(&mut engine, &mut history) {
-            prefs = saved;
+        } else {
+            let first_start = state_json::state_file_path().is_none_or(|p| !p.exists());
+            if let Some(saved) = state_json::load_state_from_disk(&mut engine, &mut history) {
+                prefs = saved;
+            }
+            // Erster Start mit deutscher Oberfläche: Dezimalkomma statt Punkt.
+            // Danach gilt, was gespeichert ist.
+            if first_start && prefs.german_ui {
+                engine.number_format = NumberFormatMode::SpaceComma;
+            }
         }
         engine.show_exact_first = prefs.show_exact_first;
         engine.auto_ans_insertion = prefs.auto_ans_insertion;
@@ -1315,6 +1368,7 @@ impl NiobCalculatorApp {
             pending_cursor: Some(input_expr.chars().count()),
             input_expr,
             last_input_bar_height: 84.0,
+            input_had_focus: false,
             confirm_clear_history: false,
             history,
             active_tab: MainTab::Calculator,
@@ -1621,8 +1675,14 @@ impl NiobCalculatorApp {
         if self.active_tab != MainTab::Calculator {
             return;
         }
+        // Escape leert die Formelzeile. egui nimmt ihr bei Escape schon zu
+        // Beginn des Frames den Fokus; da sie ihn gleich unten zurückbekommt,
+        // sähe das Textfeld selbst den Fokusverlust nie.
+        if self.input_had_focus && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.clear_input();
+        }
         // Hat kein Widget den Fokus, bekommt ihn die Formelzeile. Sie übernimmt
-        // dann Tippen, Cursor, Auswahl, Einfügen, Enter und Escape selbst.
+        // dann Tippen, Cursor, Auswahl, Einfügen und Enter selbst.
         if ctx.memory(|m| m.focused().is_none()) {
             ctx.memory_mut(|m| m.request_focus(egui::Id::new(INPUT_FIELD_ID)));
         }
@@ -2106,8 +2166,11 @@ impl NiobCalculatorApp {
                                     } else {
                                         String::new()
                                     };
-                                    let dec_disp =
-                                        format_decimal_history_display(&item.decimal_result, self.engine.number_format);
+                                    let dec_disp = if item.is_error {
+                                        i18n::localize_error(&item.decimal_result, de)
+                                    } else {
+                                        format_decimal_history_display(&item.decimal_result, self.engine.number_format)
+                                    };
                                     let is_matrix =
                                         item.exact_result.contains("[[") || item.decimal_result.contains("[[");
                                     let can_toggle =
@@ -2118,8 +2181,26 @@ impl NiobCalculatorApp {
                                         item.is_exact && !item.is_error
                                     };
                                     let shown_res: &str = if use_exact { &exact_disp } else { &dec_disp };
+                                    // Matrizen als Matrix setzen, exakte Ergebnisse mit
+                                    // Bruchstrich/Wurzel, alles andere als Text.
+                                    let matrix_rows = if is_matrix && !item.is_error {
+                                        mathview::parse_matrix_literal(shown_res)
+                                    } else {
+                                        None
+                                    };
+                                    // Zeilenhöhe vorab bestimmen, damit „=“ und der Umschalter
+                                    // auch neben hohen Ergebnissen (Matrix, Bruch) mittig stehen.
+                                    let row_h = match &matrix_rows {
+                                        Some(rows) => mathview::matrix_size(ui, rows, HISTORY_TERM_FONT_SIZE - 2.0).y,
+                                        None if use_exact => mathview::formula_height(ui, shown_res, HISTORY_TERM_FONT_SIZE),
+                                        None => 0.0,
+                                    }
+                                    .max(ui.spacing().interact_size.y);
 
-                                    ui.horizontal(|ui| {
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(ui.available_width(), row_h),
+                                        Layout::left_to_right(Align::Center),
+                                        |ui| {
                                         if can_toggle {
                                             let badge_txt = match (de, item.showing_exact) {
                                                 (true, true) => "exakt",
@@ -2164,17 +2245,10 @@ impl NiobCalculatorApp {
                                             } else {
                                                 "Click to insert the result"
                                             };
-                                            // Matrizen als Matrix setzen, exakte Ergebnisse mit
-                                            // Bruchstrich/Wurzel, alles andere als Text.
-                                            let matrix = if is_matrix && !item.is_error {
-                                                mathview::parse_matrix_literal(shown_res)
-                                            } else {
-                                                None
-                                            };
-                                            let resp = if let Some(rows) = matrix {
+                                            let resp = if let Some(rows) = &matrix_rows {
                                                 mathview::matrix_widget(
                                                     ui,
-                                                    &rows,
+                                                    rows,
                                                     HISTORY_TERM_FONT_SIZE - 2.0,
                                                     res_col,
                                                     Sense::click(),
@@ -2196,7 +2270,8 @@ impl NiobCalculatorApp {
                                                 paste_text = Some(item.reusable_result.clone());
                                             }
                                         });
-                                    });
+                                    },
+                                    );
 
                                     if let Some(ref rep) = item.integration_report {
                                         let (info, color) = match (rep.converged, de) {
@@ -2359,14 +2434,11 @@ impl NiobCalculatorApp {
                         state.store(ui.ctx(), input_id);
                     }
                 }
-                if out.response.lost_focus() {
-                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        let ctx = ui.ctx().clone();
-                        self.evaluate_current(Some(&ctx));
-                        ui.memory_mut(|m| m.request_focus(input_id));
-                    } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        self.clear_input();
-                    }
+                self.input_had_focus = out.response.has_focus();
+                if out.response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    let ctx = ui.ctx().clone();
+                    self.evaluate_current(Some(&ctx));
+                    ui.memory_mut(|m| m.request_focus(input_id));
                 }
             });
             if clear_clicked {
@@ -2431,6 +2503,42 @@ impl NiobCalculatorApp {
                 Ok(preview) => {
                     let nf = self.engine.number_format;
                     let dec_disp = format_decimal_history_display(&preview.decimal_text, nf);
+                    // Matrizen wie im Verlauf als Matrix setzen; „=“ und „≈“
+                    // stehen mittig neben der Matrix.
+                    let shown = if preview.is_exact {
+                        format_exact_history_display(&preview.exact_text, nf)
+                    } else {
+                        dec_disp.clone()
+                    };
+                    if let Some(rows) = mathview::parse_matrix_literal(&shown) {
+                        let size = mathview::matrix_size(ui, &rows, 15.0);
+                        let dec_rows = if preview.is_exact && shown != dec_disp {
+                            mathview::parse_matrix_literal(&dec_disp)
+                        } else {
+                            None
+                        };
+                        let dec_size = dec_rows.as_ref().map(|r| mathview::matrix_size(ui, r, 13.5));
+                        let h = size.y.max(dec_size.map_or(0.0, |s| s.y));
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ui.available_width(), h),
+                            Layout::left_to_right(Align::Center),
+                            |ui| {
+                                ui.label(RichText::new("=").font(FontId::proportional(15.0)).color(pal.primary));
+                                mathview::matrix_widget(ui, &rows, 15.0, pal.primary, Sense::hover());
+                                if let (Some(r), Some(s)) = (&dec_rows, dec_size) {
+                                    if s.x + 30.0 <= ui.available_width() {
+                                        ui.label(
+                                            RichText::new("≈")
+                                                .font(FontId::proportional(15.0))
+                                                .color(pal.on_surface_variant),
+                                        );
+                                        mathview::matrix_widget(ui, r, 13.5, pal.on_surface_variant, Sense::hover());
+                                    }
+                                }
+                            },
+                        );
+                        return;
+                    }
                     // Formelspiegel: Die Eingabezeile ist ein Textfeld und setzt
                     // Brüche und Wurzeln einzeilig. Hier steht die Eingabe
                     // zweidimensional, wenn sie Brüche oder Wurzeln enthält.
@@ -2471,7 +2579,7 @@ impl NiobCalculatorApp {
                 }
                 Err(err) => {
                     let (text, color) = match classify_preview_error(err, &raw) {
-                        PreviewError::Show => (format!("⚠ {}", err), pal.error),
+                        PreviewError::Show => (format!("⚠ {}", i18n::localize_error(err, self.german_ui)), pal.error),
                         PreviewError::Incomplete => (
                             if self.german_ui {
                                 "… Ausdruck wird vervollständigt".to_string()
@@ -2808,7 +2916,8 @@ impl NiobCalculatorApp {
                                 mathview::math_widget(ui, &node, 14.0, pal.on_surface_variant, Sense::hover());
                             }
                         }
-                        let (text, is_err) = plot_readout(&self.engine, &pf.expr, trace_x, de);
+                        let name = format!("f{}", subscript_number(i + 1));
+                        let (text, is_err) = plot_readout_named(&self.engine, &pf.expr, trace_x, de, &name);
                         let job = mathview::rich_job(
                             &text,
                             FontId::proportional(12.5),
@@ -3208,7 +3317,7 @@ impl NiobCalculatorApp {
                     ));
                 }
             },
-            Err(err) => self.var_status = Some((format!("⚠ {err}"), true)),
+            Err(err) => self.var_status = Some((format!("⚠ {}", i18n::localize_error(&err, de)), true)),
         }
     }
 
@@ -3350,6 +3459,7 @@ impl NiobCalculatorApp {
             }
 
             let narrow = ui.available_width() < 560.0;
+            let nf = self.engine.number_format;
             for cat in [
                 ConstantCategory::Universal,
                 ConstantCategory::Electromagnetic,
@@ -3389,11 +3499,11 @@ impl NiobCalculatorApp {
                                     .clicked();
                             };
                             if narrow {
-                                ui.horizontal(|ui| constant_info(ui, sc, pal, de));
+                                ui.horizontal(|ui| constant_info(ui, sc, pal, de, nf));
                                 ui.horizontal(|ui| actions(ui));
                             } else {
                                 ui.horizontal(|ui| {
-                                    constant_info(ui, sc, pal, de);
+                                    constant_info(ui, sc, pal, de, nf);
                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| actions(ui));
                                 });
                             }
@@ -3602,7 +3712,13 @@ fn card_title(ui: &mut Ui, pal: &MaterialYouPalette, text: &str) {
 }
 
 /// Symbol, Name und Wert einer Konstante.
-fn constant_info(ui: &mut Ui, sc: &crate::constants::ScientificConstant, pal: &MaterialYouPalette, de: bool) {
+fn constant_info(
+    ui: &mut Ui,
+    sc: &crate::constants::ScientificConstant,
+    pal: &MaterialYouPalette,
+    de: bool,
+    nf: NumberFormatMode,
+) {
     Frame::new()
         .fill(pal.primary_container)
         .corner_radius(CornerRadius::same(8))
@@ -3616,6 +3732,8 @@ fn constant_info(ui: &mut Ui, sc: &crate::constants::ScientificConstant, pal: &M
             );
         });
     let value = if de { sc.display_value.to_string() } else { sc.display_value.replace("(exakt)", "(exact)") };
+    // Dezimalzeichen wie im eingestellten Zahlenformat
+    let value = if decimal_and_group_seps(nf).1 == ',' { value.replace('.', ",") } else { value };
     // Dimensionslose Größen ohne angehängte „1“
     let value = if sc.unit == "1" { value } else { format!("{value} {}", sc.unit) };
     ui.vertical(|ui| {
@@ -3839,6 +3957,13 @@ fn convert_temperature(v: f64, from: usize, to: usize) -> f64 {
 
 impl eframe::App for NiobCalculatorApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.draw(ui);
+    }
+}
+
+impl NiobCalculatorApp {
+    /// Ein Frame der gesamten Oberfläche (auch ohne eframe aufrufbar, z. B. in Tests).
+    fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.poll_async_eval();
         let pal = MaterialYouPalette::generate(self.theme_mode, self.accent_seed);
@@ -4172,6 +4297,51 @@ mod ui_tests {
     fn fresh_start_has_no_preset_variables() {
         let app = NiobCalculatorApp::new(Some("review-fixture".into()));
         assert!(app.engine.variables.is_empty());
+    }
+
+    /// Befund: Alle Statuszeilen im Plotter begannen mit „f(…)“; Fehler blieben im
+    /// Englisch-Modus deutsch.
+    #[test]
+    fn plot_readout_names_the_curve_and_follows_the_language() {
+        let engine = MathEngine::default();
+        let (txt, err) = plot_readout_named(&engine, "x^2", 1.0, true, "f₂");
+        assert!(!err);
+        assert_eq!(txt, "f₂(1.00) = 1.0000   |   f₂'(1.00) = 2.0000");
+        let (txt, err) = plot_readout_named(&engine, "fao(2)", 0.0, false, "f₁");
+        assert!(err && txt == "⚠ Unknown function 'fao'", "{txt}");
+        let (txt, _) = plot_readout_named(&engine, "√(x)", -1.0, false, "f₃");
+        assert_eq!(txt, "f₃(-1.00) undefined");
+    }
+
+    /// Befund aus dem Live-Test: Escape leerte die Formelzeile nicht, weil egui
+    /// ihr den Fokus schon vor dem Textfeld entzog.
+    #[test]
+    fn escape_clears_the_formula_input() {
+        let mut app = NiobCalculatorApp::new(Some("review-fixture".into()));
+        let ctx = egui::Context::default();
+        let frame = |app: &mut NiobCalculatorApp, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 680.0))),
+                events,
+                focused: true,
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| app.draw(ui));
+        };
+        for _ in 0..3 {
+            frame(&mut app, vec![]);
+        }
+        assert!(!app.input_expr.is_empty());
+        let escape = egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&mut app, vec![escape]);
+        frame(&mut app, vec![]);
+        assert!(app.input_expr.is_empty(), "{}", app.input_expr);
     }
 
     #[test]
