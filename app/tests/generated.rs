@@ -67,12 +67,12 @@ fn rows(table: &str) -> Vec<Row<'_>> {
 }
 
 fn new_engine(degrees: bool) -> MathEngine {
-    let mut engine = MathEngine::default();
-    engine.number_format = NumberFormatMode::NonePoint;
-    if degrees {
-        engine.angle_mode = AngleMode::Degrees;
+    let base = MathEngine::default();
+    MathEngine {
+        number_format: NumberFormatMode::NonePoint,
+        angle_mode: if degrees { AngleMode::Degrees } else { base.angle_mode },
+        ..base
     }
-    engine
 }
 
 fn eval(engine: &mut MathEngine, expr: &str) -> Result<EvalOutput, String> {
@@ -106,7 +106,7 @@ fn parse_display(text: &str) -> Option<(f64, f64)> {
             })
             .collect();
         (m.to_string(), e.parse::<i32>().ok()?)
-    } else if let Some(pos) = t.find(|c| c == 'e' || c == 'E') {
+    } else if let Some(pos) = t.find(['e', 'E']) {
         (t[..pos].to_string(), t[pos + 1..].parse::<i32>().ok()?)
     } else {
         (t.clone(), 0)

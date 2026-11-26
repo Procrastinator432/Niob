@@ -781,8 +781,8 @@ fn try_eval_bigrat_matrix_ast(node: &AstNode, engine: &MathEngine) -> Result<Opt
             let zero = BigRat { num: BigInt::from_i128(0), den: BigUInt::one() };
             let one = BigRat { num: BigInt::from_i128(1), den: BigUInt::one() };
             let mut res = vec![vec![zero.clone(); n]; n];
-            for i in 0..n {
-                res[i][i] = one.clone();
+            for (i, row) in res.iter_mut().enumerate() {
+                row[i] = one.clone();
             }
             if p_i32 == 0 {
                 return Ok(Some(res));
@@ -897,13 +897,13 @@ fn bigrat_matrix_mul(left: &[Vec<BigRat>], right: &[Vec<BigRat>]) -> Result<Opti
     let cols = right[0].len();
     let zero = BigRat { num: BigInt::from_i128(0), den: BigUInt::one() };
     let mut out = Vec::with_capacity(rows);
-    for r in 0..rows {
+    for lrow in left {
         let mut rr = Vec::with_capacity(cols);
         for c in 0..cols {
             check_eval_deadline()?;
             let mut sum = zero.clone();
-            for k in 0..inner {
-                let prod = left[r][k].mul(&right[k][c])?;
+            for (lv, rrow) in lrow.iter().zip(right) {
+                let prod = lv.mul(&rrow[c])?;
                 sum = sum.add(&prod)?;
                 if sum.num.mag.bit_len().max(sum.den.bit_len()) > 32768 {
                     return Ok(None);
@@ -916,6 +916,19 @@ fn bigrat_matrix_mul(left: &[Vec<BigRat>], right: &[Vec<BigRat>]) -> Result<Opti
     Ok(Some(out))
 }
 
+/// Pivotzeile und eine andere Zeile einer Matrix gleichzeitig ausleihen
+/// (Gauß-Elimination ändert eine Zeile anhand der Pivotzeile).
+fn pivot_and_row<T>(m: &mut [Vec<T>], pivot: usize, row: usize) -> (&[T], &mut [T]) {
+    debug_assert_ne!(pivot, row);
+    if pivot < row {
+        let (head, tail) = m.split_at_mut(row);
+        (&head[pivot], &mut tail[0])
+    } else {
+        let (head, tail) = m.split_at_mut(pivot);
+        (&tail[0], &mut head[row])
+    }
+}
+
 fn bigrat_matrix_inv(m: &[Vec<BigRat>]) -> Result<Option<Vec<Vec<BigRat>>>, String> {
     let n = m.len();
     if n == 0 || m[0].len() != n {
@@ -924,48 +937,40 @@ fn bigrat_matrix_inv(m: &[Vec<BigRat>]) -> Result<Option<Vec<Vec<BigRat>>>, Stri
     let zero = BigRat { num: BigInt::from_i128(0), den: BigUInt::one() };
     let one = BigRat { num: BigInt::from_i128(1), den: BigUInt::one() };
     let mut aug = Vec::with_capacity(n);
-    for r in 0..n {
+    for (r, src) in m.iter().enumerate() {
         let mut row = Vec::with_capacity(2 * n);
-        row.extend(m[r].iter().cloned());
-        for c in 0..n {
-            row.push(if r == c { one.clone() } else { zero.clone() });
-        }
+        row.extend(src.iter().cloned());
+        row.extend((0..n).map(|c| if r == c { one.clone() } else { zero.clone() }));
         aug.push(row);
     }
     for i in 0..n {
         check_eval_deadline()?;
-        let mut pivot_row = None;
-        for k in i..n {
-            if !aug[k][i].num.mag.is_zero() {
-                pivot_row = Some(k);
-                break;
-            }
-        }
-        let Some(pr) = pivot_row else {
+        let Some(pr) = (i..n).find(|&k| !aug[k][i].num.mag.is_zero()) else {
             return Err("Matrix ist singulär (nicht invertierbar)".to_string());
         };
         if pr != i {
             aug.swap(i, pr);
         }
         let pivot = aug[i][i].clone();
-        for col in i..(2 * n) {
-            aug[i][col] = aug[i][col].div(&pivot)?;
-            if aug[i][col].num.mag.bit_len().max(aug[i][col].den.bit_len()) > 32768 {
+        for cell in &mut aug[i][i..] {
+            *cell = cell.div(&pivot)?;
+            if cell.num.mag.bit_len().max(cell.den.bit_len()) > 32768 {
                 return Ok(None);
             }
         }
         for r in 0..n {
-            if r != i && !aug[r][i].num.mag.is_zero() {
-                check_eval_deadline()?;
-                let factor = aug[r][i].clone();
-                aug[r][i] = zero.clone();
-                for col in (i + 1)..(2 * n) {
-                    if !aug[i][col].num.mag.is_zero() {
-                        let sub_term = factor.mul(&aug[i][col])?;
-                        aug[r][col] = aug[r][col].sub(&sub_term)?;
-                        if aug[r][col].num.mag.bit_len().max(aug[r][col].den.bit_len()) > 32768 {
-                            return Ok(None);
-                        }
+            if r == i || aug[r][i].num.mag.is_zero() {
+                continue;
+            }
+            check_eval_deadline()?;
+            let (pivot_row, row) = pivot_and_row(&mut aug, i, r);
+            let factor = std::mem::replace(&mut row[i], zero.clone());
+            for (dst, src) in row[i + 1..].iter_mut().zip(&pivot_row[i + 1..]) {
+                if !src.num.mag.is_zero() {
+                    let sub_term = factor.mul(src)?;
+                    *dst = dst.sub(&sub_term)?;
+                    if dst.num.mag.bit_len().max(dst.den.bit_len()) > 32768 {
+                        return Ok(None);
                     }
                 }
             }
@@ -984,14 +989,7 @@ fn exact_bigrat_det(mut a: Vec<Vec<BigRat>>) -> Result<BigRat, String> {
     let mut sign_neg = false;
     for i in 0..n {
         check_eval_deadline()?;
-        let mut pivot_row = None;
-        for k in i..n {
-            if !a[k][i].num.mag.is_zero() {
-                pivot_row = Some(k);
-                break;
-            }
-        }
-        let Some(pr) = pivot_row else {
+        let Some(pr) = (i..n).find(|&k| !a[k][i].num.mag.is_zero()) else {
             return Ok(zero);
         };
         if pr != i {
@@ -1008,12 +1006,13 @@ fn exact_bigrat_det(mut a: Vec<Vec<BigRat>>) -> Result<BigRat, String> {
                 continue;
             }
             check_eval_deadline()?;
-            let factor = a[k][i].div(&pivot)?;
-            for j in (i + 1)..n {
-                if !a[i][j].num.mag.is_zero() {
-                    let sub_term = factor.mul(&a[i][j])?;
-                    a[k][j] = a[k][j].sub(&sub_term)?;
-                    if a[k][j].num.mag.bit_len().max(a[k][j].den.bit_len()) > 65536 {
+            let (pivot_row, row) = pivot_and_row(&mut a, i, k);
+            let factor = row[i].div(&pivot)?;
+            for (dst, src) in row[i + 1..].iter_mut().zip(&pivot_row[i + 1..]) {
+                if !src.num.mag.is_zero() {
+                    let sub_term = factor.mul(src)?;
+                    *dst = dst.sub(&sub_term)?;
+                    if dst.num.mag.bit_len().max(dst.den.bit_len()) > 65536 {
                         return Err("Matrix-Überlauf".to_string());
                     }
                 }
@@ -1099,7 +1098,7 @@ impl AngleMode {
         }
     }
 
-    pub fn from_radians(self, rad: f64) -> f64 {
+    pub fn radians_to_unit(self, rad: f64) -> f64 {
         match self {
             Self::Radians => rad,
             Self::Degrees => rad * (180.0 / std::f64::consts::PI),
@@ -1219,7 +1218,7 @@ impl NumberFormatMode {
             let chars: Vec<char> = int_part.chars().collect();
             let mut out = String::new();
             for (i, ch) in chars.iter().enumerate() {
-                if i > 0 && (chars.len() - i) % 3 == 0 {
+                if i > 0 && (chars.len() - i).is_multiple_of(3) {
                     out.push_str(group_sep);
                 }
                 out.push(*ch);
@@ -1755,6 +1754,9 @@ impl fmt::Display for Value {
     }
 }
 
+/// Matrix aus Werten, zeilenweise.
+type ValueMatrix = Vec<Vec<Value>>;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct IntegrationReport {
     pub value: f64,
@@ -1919,7 +1921,7 @@ impl MathEngine {
             }
         }
         let _guard = CancelGuard(prev_tok);
-        let timeout_ms = crate::constants::SYMBOLIC_WATCHDOG_TIMEOUT_MS as u64;
+        let timeout_ms = crate::constants::SYMBOLIC_WATCHDOG_TIMEOUT_MS;
         self.evaluate_with_timeout(raw_input, false, timeout_ms)
     }
 
@@ -1952,7 +1954,7 @@ impl MathEngine {
         }
         let installed = prev_deadline.is_none();
         if installed {
-            let ms = crate::constants::SYMBOLIC_WATCHDOG_TIMEOUT_MS as u64;
+            let ms = crate::constants::SYMBOLIC_WATCHDOG_TIMEOUT_MS;
             EVAL_DEADLINE.with(|d| {
                 d.set(Some(std::time::Instant::now() + std::time::Duration::from_millis(ms)));
             });
@@ -2647,7 +2649,7 @@ impl MathEngine {
         res.map(|s| s.to_string())
     }
 
-    fn evaluate_matrix_expression_with_value(&self, expr: &str) -> Result<(EvalOutput, Option<Vec<Vec<Value>>>), String> {
+    fn evaluate_matrix_expression_with_value(&self, expr: &str) -> Result<(EvalOutput, Option<ValueMatrix>), String> {
         let trimmed = expr.trim();
         if let Ok(ast) = AstParser::parse(trimmed) {
             if !self.contains_matrix_expression(&ast) {
@@ -2781,7 +2783,7 @@ impl MathEngine {
                 let Some(ev) = exp.const_value() else {
                     return false;
                 };
-                ev.rat.map_or(false, |r| r.den == 1 && r.num > 0)
+                ev.rat.is_some_and(|r| r.den == 1 && r.num > 0)
                     && Self::is_entire_antiderivative(base, var)
             }
             AstNode::Func(name, args) => {
@@ -3049,7 +3051,7 @@ impl MathEngine {
                     }),
                     "asin" | "arcsin" => {
                         if v0.c.is_real() && v0.c.re.abs() <= 1.0 {
-                            Ok(Value::from_f64(self.angle_mode.from_radians(v0.c.re.asin())))
+                            Ok(Value::from_f64(self.angle_mode.radians_to_unit(v0.c.re.asin())))
                         } else {
                             let z = v0.c;
                             let one = Complex::real(1.0);
@@ -3059,7 +3061,7 @@ impl MathEngine {
                     }
                     "acos" | "arccos" => {
                         if v0.c.is_real() && v0.c.re.abs() <= 1.0 {
-                            Ok(Value::from_f64(self.angle_mode.from_radians(v0.c.re.acos())))
+                            Ok(Value::from_f64(self.angle_mode.radians_to_unit(v0.c.re.acos())))
                         } else {
                             let z = v0.c;
                             let one = Complex::real(1.0);
@@ -3070,7 +3072,7 @@ impl MathEngine {
                     }
                     "atan" | "arctan" => {
                         if v0.c.is_real() {
-                            Ok(Value::from_f64(self.angle_mode.from_radians(v0.c.re.atan())))
+                            Ok(Value::from_f64(self.angle_mode.radians_to_unit(v0.c.re.atan())))
                         } else {
                             let iz = Complex::i().mul(v0.c);
                             let one = Complex::real(1.0);
@@ -3268,6 +3270,9 @@ impl MathEngine {
         }
     }
 
+    // Rekursive Pol-/Nullstellensuche: Variable, Intervall, Belegungen und
+    // Ergebnisliste laufen gemeinsam durch alle Aufrufe.
+    #[allow(clippy::too_many_arguments)]
     fn push_periodic_roots(
         &self,
         arg: &AstNode,
@@ -3425,6 +3430,9 @@ impl MathEngine {
         }
     }
 
+    // Rekursive Pol-/Nullstellensuche: Variable, Intervall, Belegungen und
+    // Ergebnisliste laufen gemeinsam durch alle Aufrufe.
+    #[allow(clippy::too_many_arguments)]
     fn push_zero_roots(
         &self,
         expr: &AstNode,
@@ -3537,6 +3545,9 @@ impl MathEngine {
         }
     }
 
+    // Rekursive Pol-/Nullstellensuche: Variable, Intervall, Belegungen und
+    // Ergebnisliste laufen gemeinsam durch alle Aufrufe.
+    #[allow(clippy::too_many_arguments)]
     fn collect_critical_points(
         &self,
         node: &AstNode,
@@ -3550,6 +3561,9 @@ impl MathEngine {
         self.collect_critical_points_impl(node, var, lo, hi, ov, out, truncated, 0, false);
     }
 
+    // Rekursive Pol-/Nullstellensuche: Variable, Intervall, Belegungen und
+    // Ergebnisliste laufen gemeinsam durch alle Aufrufe.
+    #[allow(clippy::too_many_arguments)]
     fn collect_critical_points_impl(
         &self,
         node: &AstNode,
@@ -3736,20 +3750,20 @@ impl MathEngine {
                     let pi = std::f64::consts::PI;
                     match fname.as_str() {
                         "sin" if target.abs() <= 1.0 => {
-                            let u0 = self.angle_mode.from_radians(target.asin());
+                            let u0 = self.angle_mode.radians_to_unit(target.asin());
                             let half = if self.angle_mode == AngleMode::Degrees { 180.0 } else { pi };
                             let full = 2.0 * half;
                             self.push_periodic_roots(arg, var, u0, full, lo, hi, ov, out, truncated, depth);
                             self.push_periodic_roots(arg, var, half - u0, full, lo, hi, ov, out, truncated, depth);
                         }
                         "cos" if target.abs() <= 1.0 => {
-                            let u0 = self.angle_mode.from_radians(target.acos());
+                            let u0 = self.angle_mode.radians_to_unit(target.acos());
                             let full = if self.angle_mode == AngleMode::Degrees { 360.0 } else { 2.0 * pi };
                             self.push_periodic_roots(arg, var, u0, full, lo, hi, ov, out, truncated, depth);
                             self.push_periodic_roots(arg, var, -u0, full, lo, hi, ov, out, truncated, depth);
                         }
                         "tan" => {
-                            let u0 = self.angle_mode.from_radians(target.atan());
+                            let u0 = self.angle_mode.radians_to_unit(target.atan());
                             let half = if self.angle_mode == AngleMode::Degrees { 180.0 } else { pi };
                             self.push_periodic_roots(arg, var, u0, half, lo, hi, ov, out, truncated, depth);
                         }
@@ -4323,13 +4337,13 @@ fn try_exact_matrix_mul(left: &[Vec<Value>], right: &[Vec<Value>]) -> Result<Opt
         den: BigUInt::one(),
     };
     let mut res = Vec::with_capacity(rows);
-    for r in 0..rows {
+    for lrow in &l_rat {
         let mut out_row = Vec::with_capacity(cols);
         for c in 0..cols {
             check_eval_deadline()?;
             let mut sum = zero.clone();
-            for k in 0..inner {
-                let prod = l_rat[r][k].mul(&r_rat[k][c])?;
+            for (lv, rrow) in lrow.iter().zip(&r_rat) {
+                let prod = lv.mul(&rrow[c])?;
                 sum = sum.add(&prod)?;
                 if sum.num.mag.bit_len().max(sum.den.bit_len()) > 16384 {
                     return Ok(None);
@@ -4360,61 +4374,52 @@ fn try_exact_matrix_inv(m: &[Vec<Value>]) -> Result<Option<Vec<Vec<Value>>>, Str
         den: BigUInt::one(),
     };
     let mut aug = Vec::with_capacity(n);
-    for r in 0..n {
+    for (r, src) in m.iter().enumerate() {
         let mut row = Vec::with_capacity(2 * n);
-        for c in 0..n {
-            let Some(br) = value_to_bigrat(m[r][c]) else { return Ok(None); };
+        for &cell in src.iter().take(n) {
+            let Some(br) = value_to_bigrat(cell) else { return Ok(None); };
             row.push(br);
         }
-        for c in 0..n {
-            row.push(if r == c { one.clone() } else { zero.clone() });
-        }
+        row.extend((0..n).map(|c| if r == c { one.clone() } else { zero.clone() }));
         aug.push(row);
     }
     for i in 0..n {
         check_eval_deadline()?;
-        let mut pivot_row = None;
-        for k in i..n {
-            if !aug[k][i].num.mag.is_zero() {
-                pivot_row = Some(k);
-                break;
-            }
-        }
-        let Some(pr) = pivot_row else {
+        let Some(pr) = (i..n).find(|&k| !aug[k][i].num.mag.is_zero()) else {
             return Err("Matrix ist singulär (nicht invertierbar)".to_string());
         };
         if pr != i {
             aug.swap(i, pr);
         }
         let pivot = aug[i][i].clone();
-        for col in i..(2 * n) {
-            aug[i][col] = aug[i][col].div(&pivot)?;
-            if aug[i][col].num.mag.bit_len().max(aug[i][col].den.bit_len()) > 16384 {
+        for cell in &mut aug[i][i..] {
+            *cell = cell.div(&pivot)?;
+            if cell.num.mag.bit_len().max(cell.den.bit_len()) > 16384 {
                 return Ok(None);
             }
         }
         for r in 0..n {
-            if r != i && !aug[r][i].num.mag.is_zero() {
-                check_eval_deadline()?;
-                let factor = aug[r][i].clone();
-                aug[r][i] = zero.clone();
-                for col in (i + 1)..(2 * n) {
-                    if !aug[i][col].num.mag.is_zero() {
-                        let sub_term = factor.mul(&aug[i][col])?;
-                        aug[r][col] = aug[r][col].sub(&sub_term)?;
-                        if aug[r][col].num.mag.bit_len().max(aug[r][col].den.bit_len()) > 16384 {
-                            return Ok(None);
-                        }
+            if r == i || aug[r][i].num.mag.is_zero() {
+                continue;
+            }
+            check_eval_deadline()?;
+            let (pivot_row, row) = pivot_and_row(&mut aug, i, r);
+            let factor = std::mem::replace(&mut row[i], zero.clone());
+            for (dst, src) in row[i + 1..].iter_mut().zip(&pivot_row[i + 1..]) {
+                if !src.num.mag.is_zero() {
+                    let sub_term = factor.mul(src)?;
+                    *dst = dst.sub(&sub_term)?;
+                    if dst.num.mag.bit_len().max(dst.den.bit_len()) > 16384 {
+                        return Ok(None);
                     }
                 }
             }
         }
     }
     let mut inv = Vec::with_capacity(n);
-    for r in 0..n {
+    for row in &aug {
         let mut out_row = Vec::with_capacity(n);
-        for c in 0..n {
-            let br = &aug[r][n + c];
+        for br in &row[n..] {
             let f = br.to_f64();
             if !f.is_finite() {
                 return Ok(None);
@@ -4495,9 +4500,9 @@ fn matrix_det(m: &[Vec<Value>]) -> Result<Value, String> {
     for i in 0..n {
         let mut pivot_row = i;
         let mut max_val = a[i][i].c.re.abs();
-        for k in (i + 1)..n {
-            if a[k][i].c.re.abs() > max_val {
-                max_val = a[k][i].c.re.abs();
+        for (k, row) in a.iter().enumerate().skip(i + 1) {
+            if row[i].c.re.abs() > max_val {
+                max_val = row[i].c.re.abs();
                 pivot_row = k;
             }
         }
@@ -4511,9 +4516,10 @@ fn matrix_det(m: &[Vec<Value>]) -> Result<Value, String> {
         let pivot = a[i][i];
         det = det.mul(pivot);
         for k in (i + 1)..n {
-            let factor = a[k][i].div(pivot)?;
-            for j in (i + 1)..n {
-                a[k][j] = a[k][j].sub(factor.mul(a[i][j]));
+            let (pivot_row, row) = pivot_and_row(&mut a, i, k);
+            let factor = row[i].div(pivot)?;
+            for (dst, &src) in row[i + 1..].iter_mut().zip(&pivot_row[i + 1..]) {
+                *dst = dst.sub(factor.mul(src));
             }
         }
     }
@@ -4558,14 +4564,14 @@ fn matrix_inv(m: &[Vec<Value>]) -> Result<Vec<Vec<Value>>, String> {
             if s > 0.0 { s } else { 1.0 }
         };
         let mut best_ratio = aug[i][i].c.abs() / active_scale(&aug[i]);
-        for k in (i + 1)..n {
-            let ratio = aug[k][i].c.abs() / active_scale(&aug[k]);
+        for (k, row) in aug.iter().enumerate().skip(i + 1) {
+            let ratio = row[i].c.abs() / active_scale(row);
             if ratio > best_ratio {
                 best_ratio = ratio;
                 pivot_row = k;
             }
         }
-        let pivot_zero_rat = aug[pivot_row][i].rat.map_or(false, |rat| rat.num == 0);
+        let pivot_zero_rat = aug[pivot_row][i].rat.is_some_and(|rat| rat.num == 0);
         let cond_denom = row_scale[pivot_row].min(col_scale[i]);
         let cond_ratio = if cond_denom > 0.0 {
             aug[pivot_row][i].c.abs() / cond_denom
@@ -4580,29 +4586,31 @@ fn matrix_inv(m: &[Vec<Value>]) -> Result<Vec<Vec<Value>>, String> {
             row_scale.swap(i, pivot_row);
         }
         let pivot = aug[i][i];
-        for j in 0..(2 * n) {
-            let q = aug[i][j].div(pivot)?;
+        for cell in aug[i].iter_mut() {
+            let q = cell.div(pivot)?;
             if !q.c.is_real() || !q.c.re.is_finite() {
                 return Err("Matrix-Überlauf".to_string());
             }
-            aug[i][j] = q;
+            *cell = q;
         }
         for k in 0..n {
-            if k != i {
-                let factor = aug[k][i];
-                if factor.c.re != 0.0 || factor.c.im != 0.0 {
-                    for j in 0..(2 * n) {
-                        let old = aug[k][j];
-                        let sub_term = factor.mul(aug[i][j]);
-                        if !sub_term.c.is_real() || !sub_term.c.re.is_finite() {
-                            return Err("Matrix-Überlauf".to_string());
-                        }
-                        let updated = old.sub(sub_term);
-                        if !updated.c.is_real() || !updated.c.re.is_finite() {
-                            return Err("Matrix-Überlauf".to_string());
-                        }
-                        aug[k][j] = updated;
+            if k == i {
+                continue;
+            }
+            let (pivot_row, row) = pivot_and_row(&mut aug, i, k);
+            // Faktor vor der Schleife kopieren: Spalte i wird darin selbst zu 0.
+            let factor = row[i];
+            if factor.c.re != 0.0 || factor.c.im != 0.0 {
+                for (dst, &src) in row.iter_mut().zip(pivot_row) {
+                    let sub_term = factor.mul(src);
+                    if !sub_term.c.is_real() || !sub_term.c.re.is_finite() {
+                        return Err("Matrix-Überlauf".to_string());
                     }
+                    let updated = dst.sub(sub_term);
+                    if !updated.c.is_real() || !updated.c.re.is_finite() {
+                        return Err("Matrix-Überlauf".to_string());
+                    }
+                    *dst = updated;
                 }
             }
         }
@@ -4641,8 +4649,8 @@ fn matrix_pow(m: &[Vec<Value>], exp_val: Value) -> Result<Vec<Vec<Value>>, Strin
         exp_val.c.re.round() as i32
     };
     let mut res = vec![vec![Value::from_int(0); n]; n];
-    for i in 0..n {
-        res[i][i] = Value::from_int(1);
+    for (i, row) in res.iter_mut().enumerate() {
+        row[i] = Value::from_int(1);
     }
     if exp == 0 {
         return Ok(res);
@@ -4703,6 +4711,8 @@ where
     )
 }
 
+// Integrationsgrenzen, Toleranzen und Stützstellen sind Einzelwerte der Quadratur.
+#[allow(clippy::too_many_arguments)]
 fn adaptive_gauss_integrate_with_anchors_impl<F>(
     f: F,
     a: f64,
@@ -4720,8 +4730,8 @@ where
         0.0,
         0.5384693101056831,
         -0.5384693101056831,
-        0.9061798459386640,
-        -0.9061798459386640,
+        0.906179845938664,
+        -0.906179845938664,
     ];
     const WEIGHTS5: [f64; 5] = [
         0.5688888888888889,
@@ -7424,8 +7434,7 @@ impl AstParser {
     pub fn parse(input: &str) -> Result<AstNode, String> {
         check_bracket_depth(input)?;
         let normalized = input
-            .replace('×', "*")
-            .replace('·', "*")
+            .replace(['×', '·'], "*")
             .replace('÷', "/")
             .replace('−', "-")
             .replace("²", "^2")
@@ -7786,8 +7795,7 @@ impl<'a> ExprParser<'a> {
         in_matrix_cell: bool,
     ) -> Self {
         let normalized = input
-            .replace('×', "*")
-            .replace('·', "*")
+            .replace(['×', '·'], "*")
             .replace('÷', "/")
             .replace('−', "-")
             .replace("²", "^2")
@@ -8140,12 +8148,10 @@ impl<'a> ExprParser<'a> {
                 }
                 let mut acc = Value::from_int(0);
                 let mut ov = self.overrides.cloned().unwrap_or_default();
-                let mut iter = 0usize;
-                for k in a..=b {
+                for (iter, k) in (a..=b).enumerate() {
                     if (iter & 63) == 0 {
                         check_eval_deadline()?;
                     }
-                    iter += 1;
                     ov.insert(var.to_string(), Value::from_int(k as i128));
                     acc = acc.add(self.eval_arg(&raw_args[0], Some(&ov))?);
                 }
@@ -8163,12 +8169,10 @@ impl<'a> ExprParser<'a> {
                 }
                 let mut acc = Value::from_int(1);
                 let mut ov = self.overrides.cloned().unwrap_or_default();
-                let mut iter = 0usize;
-                for k in a..=b {
+                for (iter, k) in (a..=b).enumerate() {
                     if (iter & 63) == 0 {
                         check_eval_deadline()?;
                     }
-                    iter += 1;
                     ov.insert(var.to_string(), Value::from_int(k as i128));
                     acc = acc.mul(self.eval_arg(&raw_args[0], Some(&ov))?);
                 }
@@ -8629,7 +8633,7 @@ impl<'a> ExprParser<'a> {
             }
             "asin" | "arcsin" => {
                 if v0.c.is_real() && v0.c.re.abs() <= 1.0 {
-                    Ok(Value::from_f64(mode.from_radians(v0.c.re.asin())))
+                    Ok(Value::from_f64(mode.radians_to_unit(v0.c.re.asin())))
                 } else {
                     let z = v0.c;
                     let one = Complex::real(1.0);
@@ -8640,7 +8644,7 @@ impl<'a> ExprParser<'a> {
             }
             "acos" | "arccos" => {
                 if v0.c.is_real() && v0.c.re.abs() <= 1.0 {
-                    Ok(Value::from_f64(mode.from_radians(v0.c.re.acos())))
+                    Ok(Value::from_f64(mode.radians_to_unit(v0.c.re.acos())))
                 } else {
                     let z = v0.c;
                     let one = Complex::real(1.0);
@@ -8652,7 +8656,7 @@ impl<'a> ExprParser<'a> {
             }
             "atan" | "arctan" => {
                 if v0.c.is_real() {
-                    Ok(Value::from_f64(mode.from_radians(v0.c.re.atan())))
+                    Ok(Value::from_f64(mode.radians_to_unit(v0.c.re.atan())))
                 } else {
                     let iz = Complex::i().mul(v0.c);
                     let one = Complex::real(1.0);
@@ -8762,7 +8766,7 @@ impl<'a> ExprParser<'a> {
             }
             "exp" => Ok(Value::from_complex(v0.c.exp())),
             "abs" => Ok(Value::from_f64(v0.c.abs())),
-            "arg" => Ok(Value::from_f64(mode.from_radians(v0.c.arg()))),
+            "arg" => Ok(Value::from_f64(mode.radians_to_unit(v0.c.arg()))),
             "re" => Ok(Value::from_f64(v0.c.re)),
             "im" => Ok(Value::from_f64(v0.c.im)),
             "floor" => {

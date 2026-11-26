@@ -734,7 +734,7 @@ mod state_json {
             assert!((det_ans.numeric_value.unwrap().re - (-0.5)).abs() < 1e-12);
             let det_m = restored.evaluate_preview("det(m)", false).unwrap();
             assert!((det_m.numeric_value.unwrap().re - (-2.0)).abs() < 1e-12);
-            assert!(restored.variables.get("m").is_none());
+            assert!(!restored.variables.contains_key("m"));
             assert_eq!(restored_history.len(), 1);
 
             let _ = std::fs::remove_dir_all(&dir);
@@ -779,8 +779,8 @@ mod state_json {
             let mut restored = MathEngine::default();
             restored.variables.clear();
             apply_state_json(&legacy, &mut restored, &mut Vec::new());
-            assert!(restored.variables.get("a").is_none());
-            assert!(restored.variables.get("x").is_none());
+            assert!(!restored.variables.contains_key("a"));
+            assert!(!restored.variables.contains_key("x"));
             assert_eq!(restored.variables.get("b").map(|v| v.to_f64()), Some(7.0));
             assert_eq!(restored.variables.get("c").map(|v| v.to_f64()), Some(5.0));
 
@@ -1696,7 +1696,7 @@ impl NiobCalculatorApp {
         self.frame_count += 1;
         ctx.request_repaint();
 
-        if self.frame_count >= 120 && (!self.screenshot_requested || self.frame_count % 15 == 0) {
+        if self.frame_count >= 120 && (!self.screenshot_requested || self.frame_count.is_multiple_of(15)) {
             self.screenshot_requested = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
         }
@@ -2144,8 +2144,9 @@ impl NiobCalculatorApp {
                                                 delete_idx = Some(idx);
                                             }
 
-                                            if !item.is_error && plottable_in_x(&item.raw_input) {
-                                                if ui
+                                            if !item.is_error
+                                                && plottable_in_x(&item.raw_input)
+                                                && ui
                                                     .small_button(if de { "Plotten" } else { "Plot" })
                                                     .on_hover_text(if de {
                                                         "Im 2D-Plotter als neue Funktion zeichnen"
@@ -2153,9 +2154,8 @@ impl NiobCalculatorApp {
                                                         "Draw as a new function in the 2D plotter"
                                                     })
                                                     .clicked()
-                                                {
-                                                    plot_expr = Some(item.raw_input.clone());
-                                                }
+                                            {
+                                                plot_expr = Some(item.raw_input.clone());
                                             }
                                         });
                                     });
@@ -2663,7 +2663,7 @@ impl NiobCalculatorApp {
                 let slots = self.keyboard_slots.clone();
                 for r in 0..4 {
                     ui.columns(3, |cols| {
-                        for c in 0..3 {
+                        for (c, col) in cols.iter_mut().enumerate() {
                             let idx = r * 3 + c;
                             if idx < ASSIGNABLE_VARIABLE_SLOTS {
                                 let sym = &slots[idx];
@@ -2672,13 +2672,13 @@ impl NiobCalculatorApp {
                                 } else {
                                     sym.clone()
                                 };
-                                if Self::key_btn(&mut cols[c], &badge, row_h, pal.surface_container_high, pal.on_surface) {
+                                if Self::key_btn(col, &badge, row_h, pal.surface_container_high, pal.on_surface) {
                                     self.insert_token(sym);
                                 }
                             } else {
                                 let lbl = if de { ":= / Konst." } else { ":= / more" };
                                 let clicked = Self::key_btn_with_tip(
-                                    &mut cols[c],
+                                    col,
                                     lbl,
                                     row_h,
                                     pal.primary_container,
@@ -3446,7 +3446,7 @@ impl NiobCalculatorApp {
                     || sc.symbol.to_lowercase().contains(&query)
                     || sc.token.to_lowercase().contains(&query)
             };
-            if !SCIENTIFIC_CONSTANTS.iter().any(|sc| matches(sc)) {
+            if !SCIENTIFIC_CONSTANTS.iter().any(&matches) {
                 ui.label(
                     RichText::new(if de {
                         format!("Keine Konstante gefunden für „{}“.", self.constants_search.trim())

@@ -12,9 +12,10 @@ use engine::{AngleMode, EvalOutput, MathEngine, NumberFormatMode};
 const CASES: &str = include_str!("data/regressions.tsv");
 
 fn new_engine() -> MathEngine {
-    let mut engine = MathEngine::default();
-    engine.number_format = NumberFormatMode::NonePoint;
-    engine
+    MathEngine {
+        number_format: NumberFormatMode::NonePoint,
+        ..MathEngine::default()
+    }
 }
 
 fn close(actual: f64, expected: f64, absolute: f64, relative: f64) {

@@ -14,7 +14,7 @@ test.bat
 
 Der Aufruf führt die Rust-Tests und die Tests des Android-Rechenkerns aus. Alle ausgewählten Tests müssen bestehen, damit der Befehl Exitcode 0 liefert. Fehler sind normale fehlgeschlagene Tests: Sie sind weder ignoriert noch als erwartete Fehlschläge versteckt.
 
-Beim aktuellen Prüfstand vom 16.11.2026 bestanden **404 Tests** (192 Rust und 212 Android/JVM, 0 Fehler, inkl. `NIOB_GENERATED_ALL='1'` über alle 19 generierten Testsuiten mit 4 073 Fällen pro Kern). Die Ergebnisse der vorangegangenen Emulatorprüfungen stehen in der [Nachprüfung](CODE-SMELL-NACHPRUEFUNG.md); die Befunde und Nachprüfungen zu den Rechenkernen, Desktop-Persistenz und Release-Konfiguration sind in [BEWERTUNG-2026-11-15-2.md](BEWERTUNG-2026-11-15-2.md), [BEWERTUNG-2026-11-15-4.md](BEWERTUNG-2026-11-15-4.md), [BEWERTUNG-2026-11-16.md](BEWERTUNG-2026-11-16.md), [BEWERTUNG-2026-11-16-2.md](BEWERTUNG-2026-11-16-2.md), [BEWERTUNG-2026-11-16-3.md](BEWERTUNG-2026-11-16-3.md) und [BEWERTUNG-2026-11-16-4.md](BEWERTUNG-2026-11-16-4.md) dokumentiert.
+Beim aktuellen Prüfstand vom 16.11.2026 bestanden **404 Tests** (192 Rust und 212 Android/JVM, 0 Fehler, inkl. `NIOB_GENERATED_ALL='1'` über alle 19 generierten Testsuiten mit 4 073 Fällen pro Kern).
 
 ## Einen Fix gezielt ausprobieren
 
@@ -123,7 +123,7 @@ Beim Einbau am 15.11.2026 schlugen diese Tests fehl (Rust 5 von 6, Android 3 von
 | `generated_antiderivatives` | 0 (56 nicht unterstützt) | 0 (56 nicht unterstützt) |
 | `generated_polynomials` | 8 | 8 |
 
-Beim Einbau der vier weiteren Tests (`integral_families` bis `integral_splits`) am 15.11.2026, nach der [vierten Nachprüfung](BEWERTUNG-2026-11-15-4.md), schlugen alle vier in beiden Kernen fehl:
+Beim Einbau der vier weiteren Tests (`integral_families` bis `integral_splits`) am 15.11.2026, nach der vierten Nachprüfung, schlugen alle vier in beiden Kernen fehl:
 
 | Test | Rust falsch | Android falsch |
 |---|---:|---:|
@@ -134,7 +134,7 @@ Beim Einbau der vier weiteren Tests (`integral_families` bis `integral_splits`) 
 
 Nach Abschluss der Fixes in Rust und Android bestehen nun alle 10 generierten Suiten sowie die Regressionstests in beiden Rechenkernen mit **0 Fehlern**.
 
-Beim Einbau der vier Tests `integral_forms` bis `split_forms` am 16.11.2026, nach der [fünften Nachprüfung](BEWERTUNG-2026-11-16.md), schlugen drei davon in beiden Kernen mit denselben Fällen fehl:
+Beim Einbau der vier Tests `integral_forms` bis `split_forms` am 16.11.2026, nach der fünften Nachprüfung, schlugen drei davon in beiden Kernen mit denselben Fällen fehl:
 
 | Test | Rust falsch | Android falsch |
 |---|---:|---:|
@@ -145,13 +145,13 @@ Beim Einbau der vier Tests `integral_forms` bis `split_forms` am 16.11.2026, nac
 
 Nach Umsetzung der Korrekturen für nichtlineare Sprünge (`floor`/`ceil`/`round`/`mod`), periodische nichtlineare Knicke (`abs(sin(exp(x)))` etc.), Fakultät-/Knick-/Unstetigkeitsprüfungen in `deriv` sowie UI-Konvergenzhinweise bestehen alle 14 generierten Suiten und Regressionstests in beiden Kernen mit **0 Fehlern**.
 
-Beim Einbau der drei Tests `integral_forms2` bis `split_forms2` am 16.11.2026, nach der [sechsten Nachprüfung](BEWERTUNG-2026-11-16-2.md), schlug `generated_integral_forms2` in beiden Kernen mit denselben 4 Fällen fehl: `abs(sin(x))^(-1.5)`, `abs(cos(x))^(-1.5)`, `1/sin(x)^2` und `1/cos(x)^2` werden als konvergiert gemeldet, obwohl sie divergieren. `generated_derivative_forms2` und `generated_split_forms2` bestanden. Zugleich wurde in `integral_forms.tsv` die Toleranz der fünf `floor(3*sin(x))`-Fälle angepasst (siehe README der Tabellen); die Fälle bestanden schon vorher und bestehen weiter.
+Beim Einbau der drei Tests `integral_forms2` bis `split_forms2` am 16.11.2026, nach der sechsten Nachprüfung, schlug `generated_integral_forms2` in beiden Kernen mit denselben 4 Fällen fehl: `abs(sin(x))^(-1.5)`, `abs(cos(x))^(-1.5)`, `1/sin(x)^2` und `1/cos(x)^2` werden als konvergiert gemeldet, obwohl sie divergieren. `generated_derivative_forms2` und `generated_split_forms2` bestanden. Zugleich wurde in `integral_forms.tsv` die Toleranz der fünf `floor(3*sin(x))`-Fälle angepasst (siehe README der Tabellen); die Fälle bestanden schon vorher und bestehen weiter.
 
 Nach Umsetzung der asymptotischen Polstellen-Divergenzprüfung in beiden Rechenkernen bestehen nun alle 17 generierten Suiten (3 915 Fälle pro Kern) sowie alle Unit- und Regressionstests mit **0 Fehlern**.
 
-Beim Einbau von `generated_integral_forms3` am 16.11.2026, nach der [siebten Nachprüfung](BEWERTUNG-2026-11-16-3.md), schlug der Test in beiden Kernen mit denselben 26 von 86 Fällen fehl: 8 divergente Integrale werden als konvergiert gemeldet (6 aus der Nachprüfung, 2 der 16 skalierten), und 18 endliche Integrale werden mit „Integral divergiert“ abgelehnt (6 aus der Nachprüfung, 5 der 10 beschränkten steilen Integranden, 7 der 10 schmalen Spitzen). Nach Behebung der Befunde (skalierungsfreie Polstellenprüfung mit Abflachungs-/Obergrenzen-Check, Nullstellensuche für Nenner/Potenzbasen höherer bzw. transzendenter Ausdrücke sowie Nachprüfung schmaler Teilintervalle mit Früherkennung glatter Bereiche) bestehen nun alle 86 Fälle von `generated_integral_forms3` in beiden Kernen (`0` Fehler).
+Beim Einbau von `generated_integral_forms3` am 16.11.2026, nach der siebten Nachprüfung, schlug der Test in beiden Kernen mit denselben 26 von 86 Fällen fehl: 8 divergente Integrale werden als konvergiert gemeldet (6 aus der Nachprüfung, 2 der 16 skalierten), und 18 endliche Integrale werden mit „Integral divergiert“ abgelehnt (6 aus der Nachprüfung, 5 der 10 beschränkten steilen Integranden, 7 der 10 schmalen Spitzen). Nach Behebung der Befunde (skalierungsfreie Polstellenprüfung mit Abflachungs-/Obergrenzen-Check, Nullstellensuche für Nenner/Potenzbasen höherer bzw. transzendenter Ausdrücke sowie Nachprüfung schmaler Teilintervalle mit Früherkennung glatter Bereiche) bestehen nun alle 86 Fälle von `generated_integral_forms3` in beiden Kernen (`0` Fehler).
 
-Beim Einbau von `generated_integral_forms4` am 16.11.2026, nach der [achten Nachprüfung](BEWERTUNG-2026-11-16-4.md), schlug der Test mit dem vorherigen Kern mit 20 von 72 Fällen fehl: 19 schmale Spitzen mit überlaufendem Nenner verloren die halbe oder ganze Fläche, obwohl sie als konvergiert galten, und `int(sin(1/x)/x,x,0,1)` wurde mit „Integral divergiert“ abgelehnt. Behoben in beiden Kernen: Die Nullstellensuche für Nenner (`pushZeroRoots` bzw. `push_zero_roots`) setzt bei nicht endlichen Auswertungen nur noch einen Teilungspunkt, wenn der Punkt einzeln liegt, nicht in einem ganzen Überlaufbereich; die Polstellenprüfung verlangt zusätzlich gleichbleibendes Vorzeichen und stetiges Wachstum auch an den Zwischenstellen. Zugleich wurde in `polynomials.tsv` die absolute Toleranz von 14 Fällen an die Rundung der ausmultiplizierten Summanden angepasst (siehe README der Tabellen); mit verschobenen Startwerten schlug sonst `(y-2*z+2)^11` fehl, obwohl die Entwicklung richtig war. Seitdem bestehen alle 19 generierten Suiten in beiden Kernen, auch mit um 4 000 bis 7 000 verschobenen Startwerten.
+Beim Einbau von `generated_integral_forms4` am 16.11.2026, nach der achten Nachprüfung, schlug der Test mit dem vorherigen Kern mit 20 von 72 Fällen fehl: 19 schmale Spitzen mit überlaufendem Nenner verloren die halbe oder ganze Fläche, obwohl sie als konvergiert galten, und `int(sin(1/x)/x,x,0,1)` wurde mit „Integral divergiert“ abgelehnt. Behoben in beiden Kernen: Die Nullstellensuche für Nenner (`pushZeroRoots` bzw. `push_zero_roots`) setzt bei nicht endlichen Auswertungen nur noch einen Teilungspunkt, wenn der Punkt einzeln liegt, nicht in einem ganzen Überlaufbereich; die Polstellenprüfung verlangt zusätzlich gleichbleibendes Vorzeichen und stetiges Wachstum auch an den Zwischenstellen. Zugleich wurde in `polynomials.tsv` die absolute Toleranz von 14 Fällen an die Rundung der ausmultiplizierten Summanden angepasst (siehe README der Tabellen); mit verschobenen Startwerten schlug sonst `(y-2*z+2)^11` fehl, obwohl die Entwicklung richtig war. Seitdem bestehen alle 19 generierten Suiten in beiden Kernen, auch mit um 4 000 bis 7 000 verschobenen Startwerten.
 
 Die erzeugten Integrale brauchen in einem Rust-Debug-Build Zeit: Alle generierten Tests zusammen liefen auf einem Linux-Server in rund 135 Sekunden (Android-JVM rund 30 Sekunden). Das Standard-Zeitlimit von `test.ps1` beträgt deshalb 600 Sekunden.
 

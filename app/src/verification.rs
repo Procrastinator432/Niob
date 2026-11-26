@@ -228,7 +228,7 @@ pub fn run_all_verification_checks() -> Vec<VerificationCheck> {
             && (VON_KLITZING_CONST - 25812.807459304513).abs() < 1e-5
             && (STEFAN_BOLTZMANN_CONST - 5.6703744191844294e-8).abs() < 1e-16
             && (AVOGADRO_CONST - 6.02214076e23).abs() < 1e15
-            && (FARADAY_CONST - 96485.3321233100184).abs() < 1e-8
+            && (FARADAY_CONST - 96485.33212331001).abs() < 1e-8
             && (MOLAR_GAS_CONSTANT - 8.31446261815324).abs() < 1e-12
             && (MASS_ELECTRON - 9.1093837139e-31).abs() < 1e-39
             && (PERCENT_VAR - 0.01).abs() < 1e-9;
